@@ -4,7 +4,7 @@ An exocortex for small models. Exocortex makes a weak local LLM behave like a st
 
 It runs as a [pi](https://github.com/badlogic/pi-mono) extension and targets a local Qwen 27B behind any OpenAI-compatible engine (primarily [ninfer](https://github.com/dylanbrodiefafard/ninfer); vLLM, SGLang and llama.cpp also work).
 
-**Status:** Phase 1 (trace store and eval harness). The extension records every session to a SQLite trace. No modules exist yet.
+**Status:** Phase 2 (sidecar pool). The extension records every session to a SQLite trace and can make scheduled sidecar calls (`/exo ping`). No modules exist yet.
 
 ## Docs
 
@@ -35,6 +35,8 @@ pi -e /path/to/exocortex/packages/pi-adapter
 To load it permanently, add the adapter path to `extensions` in `~/.pi/agent/settings.json`.
 
 Every session is recorded to `~/.exocortex/exocortex.db`. To configure that, copy [`exocortex.config.example.jsonc`](exocortex.config.example.jsonc) to `~/.exocortex/config.jsonc`. A broken config disables Exocortex rather than breaking pi.
+
+Inside pi, `/exo` shows status, and `/exo ping` makes one sidecar call to check that the sidecar engine is reachable.
 
 ### Debug output
 
@@ -67,6 +69,16 @@ To add a task, create `tasks/<id>/` with:
 - `solution.patch`: a reference fix.
 
 Then run `--validate`.
+
+## Load test
+
+Measures how much the sidecar pool slows the main agent: main requests alone, then the same requests while 20 sidecar calls are kept in flight.
+
+```sh
+npm run loadtest -- --base-url http://127.0.0.1:8080/v1 --model qwen3.8-27b --profile ninfer
+```
+
+Writes `eval-runs/loadtest-<timestamp>/summary.md`. Run `npm run loadtest -- --help` for sizes and concurrency.
 
 ## Layout
 

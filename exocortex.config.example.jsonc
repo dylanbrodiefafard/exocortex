@@ -11,6 +11,28 @@
 		"dbPath": "~/.exocortex/exocortex.db"
 	},
 
+	// Where sidecar calls go. Unset fields fall back to pi's main model when it is an
+	// openai-completions provider (same endpoint, model id and API key).
+	"engine": {
+		// "baseUrl": "http://127.0.0.1:8080/v1",
+		// "model": "qwen3.8-27b",
+		// "apiKey": "$NINFER_KEY",
+		// What the engine supports (docs/INFERENCE_ENGINES.md): generic | vllm | sglang | llamacpp | ninfer.
+		"profile": "ninfer"
+		// Per-feature overrides, e.g. after adding json_schema support to your engine:
+		// "features": { "jsonSchema": true }
+	},
+
+	// The sidecar scheduler (brief §5.2).
+	"pool": {
+		"maxConcurrent": 6, // the engine's parallel decode slots
+		"reservedForMain": 2, // slots sidecars never take
+		"timeoutMs": 20000, // per call, queueing included; a timeout degrades to "no help"
+		"sessionTokenBudget": 0, // sidecar tokens per session; 0 = unlimited
+		"backgroundWhenIdleOnly": true // background work waits for the main agent to go idle
+	},
+
 	// Modules are off unless enabled here (none exist yet; the supervisor arrives in Phase 3).
+	// Each module also takes "maxCallsPerTurn" (default 4) and "maxTokensPerCall" (default 1024).
 	"modules": {}
 }
