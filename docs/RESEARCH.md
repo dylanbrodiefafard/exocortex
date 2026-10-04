@@ -4,6 +4,8 @@
 
 ## How to read this document
 
+> **Verification pending.** Claims tagged [S] or [U] have not been checked against the papers (the network blocked them). `docs/RESEARCH_VERIFY.md` is the prioritized work list for doing that.
+
 **Method and its limits.** The network proxy blocked arxiv.org, huggingface.co, openreview.net, alphaxiv.org, factory.ai and blog.jetbrains.com, so I could not open full papers. Every claim below comes from web-search result text: abstracts, publisher pages, author READMEs (GitHub was reachable) and secondary summaries. Each claim carries a tag:
 
 | Tag | Meaning |
