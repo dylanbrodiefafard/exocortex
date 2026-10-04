@@ -28,9 +28,13 @@ npm run test:watch
 
 ## Try it in pi
 
+From the repo, run the pinned pi with Exocortex loaded:
+
 ```sh
-pi -e /path/to/exocortex/packages/pi-adapter
+npm run pi -- --model <provider>/<model-id>     # e.g. --model ninfer/coding
 ```
+
+With your own pi install, use `pi -e /path/to/exocortex/packages/pi-adapter`.
 
 To load it permanently, add the adapter path to `extensions` in `~/.pi/agent/settings.json`.
 

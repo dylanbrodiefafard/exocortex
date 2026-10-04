@@ -18,7 +18,8 @@
 		"test:watch": "vitest",
 		"check": "npm run lint && npm run typecheck && npm run knip && npm run test",
 		"eval": "node packages/eval/src/cli.ts",
-		"loadtest": "node packages/eval/src/loadtest-cli.ts"
+		"loadtest": "node packages/eval/src/loadtest-cli.ts",
+		"pi": "pi -e ./packages/pi-adapter"
 	},
 	"devDependencies": {
 		"@biomejs/biome": "2.5.15",
