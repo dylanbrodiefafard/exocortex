@@ -1,0 +1,7 @@
+// Supervisor (suggest) + research R1.3/R1.4: per-criterion verdicts with quoted evidence, and only
+// the final message's unverified claims shown to the judge. Compare against `supervisor`.
+{
+	"modules": {
+		"supervisor": { "enabled": true, "mode": "suggest", "verdictStyle": "per-criterion", "finalMessage": "claims" }
+	}
+}

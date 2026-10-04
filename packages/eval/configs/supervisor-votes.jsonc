@@ -1,0 +1,7 @@
+// Supervisor (suggest) + research R1.5: a "complete" verdict is re-asked twice more at higher
+// temperature; any dissent makes it "uncertain". Costs up to 2 extra verdict calls per settle.
+{
+	"modules": {
+		"supervisor": { "enabled": true, "mode": "suggest", "completeVotes": 3 }
+	}
+}

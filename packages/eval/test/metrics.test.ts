@@ -90,6 +90,8 @@ describe("computeTraceMetrics", () => {
 			sidecarTokens: 0,
 			sidecarFailures: 0,
 			verdicts: { complete: 0, incomplete: 0, failed: 0, uncertain: 0 },
+			lastVerdict: null,
+			deterministicVerdicts: 0,
 		});
 	});
 
@@ -119,7 +121,11 @@ describe("computeTraceMetrics", () => {
 
 	it("counts supervisor verdicts and continuations (accepted suggestions and auto)", () => {
 		const metrics = computeTraceMetrics([
-			event("exo.verdict", { verdict: "incomplete" }, { synthetic: true, module: "supervisor" }),
+			event(
+				"exo.verdict",
+				{ verdict: "incomplete", source: "deterministic" },
+				{ synthetic: true, module: "supervisor" },
+			),
 			event("exo.action", { action: "suggested" }, { synthetic: true, module: "supervisor" }),
 			event("exo.action", { action: "accepted" }, { synthetic: true, module: "supervisor" }),
 			event("exo.verdict", { verdict: "incomplete" }, { synthetic: true, module: "supervisor" }),
@@ -129,6 +135,8 @@ describe("computeTraceMetrics", () => {
 		]);
 		expect(metrics.continuations).toBe(2);
 		expect(metrics.verdicts).toEqual({ complete: 1, incomplete: 2, failed: 0, uncertain: 0 });
+		expect(metrics.lastVerdict).toBe("complete");
+		expect(metrics.deterministicVerdicts).toBe(1);
 	});
 
 	it("handles an empty trace", () => {

@@ -563,6 +563,35 @@ Open check: Exocortex's injected `custom_message` reaches ninfer as a second con
 
 ---
 
+### D-046 — Supervisor research options, off until A/B'd · accepted (amends D-039 as options only)
+- **Context:** `docs/RESEARCH.md` §1 recommends moving the supervisor's decisions toward deterministic evidence: same-model self-verification is weak, and a false "complete" is the costly error. Changing the defaults before the Phase 3 baseline exists would leave nothing to compare against.
+- **Decision:** each recommendation is a setting. Defaults keep D-039's behavior exactly.
+
+| Setting | Research | Effect |
+|---|---|---|
+| `preVerdict` | R1.1 | A failing check command (run at settle, so after every edit) means `incomplete` with no LLM call. No diff, no untracked files and no writes means `uncertain`. |
+| `warningSignals` | R1.2 #4–#7 | Adds a "Warnings" section to the evidence: test files deleted, skip markers added, assertions removed, stub markers outside tests, success claims with no successful matching command after the last edit, and a last test run limited to a subset. |
+| `verdictStyle: "per-criterion"` | R1.4 | The judge rates each item met/unmet/unknown and must quote an evidence line. Code derives the verdict: any unmet → `incomplete`; all met with real quotes → `complete`; otherwise `uncertain`. A quote not found in the evidence counts as unknown. |
+| `finalMessage: "claims"` | R1.3 | The judge sees the final message's success claims, labelled unverified, plus its last 300 characters, instead of 1.5k characters of narrative. |
+| `completeVotes: k` | R1.5 | A `complete` verdict is re-asked k−1 times at temperature 0.7; any dissent means `uncertain`. Only `complete` is re-checked, because it is the costly error. |
+
+- **Not changed:** `thinking` keeps D-008's off default. `supervisor-think` A/Bs it (R1.6).
+- **Trace:** every `exo.verdict` records `source: deterministic | llm` and `votes`. The eval reports **precision of `complete`** (of runs whose last verdict was `complete`, the share whose hidden check passed) and **failures caught**, plus the deterministic-verdict count.
+- **Eval configs:** `supervisor-pre`, `supervisor-items`, `supervisor-votes`, `supervisor-think`, `supervisor-research` (all options on).
+- **Deferred:** ledger `source: explicit|implied` (R1.7), and the in-loop check (R1.8).
+
+### D-047 — Build ahead of GPU acceptance runs; gate merges and defaults, not work · accepted (amends D-020)
+- **Context:** The owner's GPU is often busy. D-020 starts a phase only after the previous phase's acceptance passes, which idles development for days.
+- **Decision:**
+  - Development continues on stacked branches while acceptance runs are pending.
+  - Everything new ships **off by default, or as an option** with an eval config, so one batch of A/B runs can settle several questions.
+  - What stays gated on evidence:
+    - **merging a phase to `main`**, and tagging it (D-022);
+    - **changing a default** (turning a module or option on by default).
+  - Each gated item names its eval command in DECISIONS.
+
+---
+
 ## Open questions (carried from brief §10, updated)
 
 1. ~~Resolved by D-029.~~ Exact pi mechanism for injecting into the current user turn without altering prior messages. *(Phase 0)*

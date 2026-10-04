@@ -18,6 +18,17 @@ const SettingsSchema = Type.Object(
 		thinking: Type.Boolean({ default: false }),
 		/** Evidence budget for the verdict prompt, in characters (~4 per token; D-024 keeps it small). */
 		maxEvidenceChars: Type.Integer({ minimum: 1000, default: 8_000 }),
+		// Research options (docs/RESEARCH.md §1), all off by default so each can be A/B'd (D-046).
+		/** R1.1: a failing check means `incomplete` with no LLM call; no change at all means `uncertain`. */
+		preVerdict: Type.Boolean({ default: false }),
+		/** R1.2 #4–#7: add test-tampering, stub, unsupported-claim and narrow-test warnings to the evidence. */
+		warningSignals: Type.Boolean({ default: false }),
+		/** R1.4: judge each checklist item with a quoted evidence line, and derive the verdict in code. */
+		verdictStyle: Type.Union([Type.Literal("holistic"), Type.Literal("per-criterion")], { default: "holistic" }),
+		/** R1.3: show the verdict the final message's tail (`tail`) or only its extracted, unverified claims. */
+		finalMessage: Type.Union([Type.Literal("tail"), Type.Literal("claims")], { default: "tail" }),
+		/** R1.5: re-ask this many times in total when the verdict is `complete`; any dissent → `uncertain`. */
+		completeVotes: Type.Integer({ minimum: 1, maximum: 5, default: 1 }),
 	},
 	{ additionalProperties: true },
 );

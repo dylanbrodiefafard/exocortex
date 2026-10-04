@@ -32,6 +32,10 @@ export interface TraceMetrics {
 	readonly continuations: number;
 	/** Supervisor verdicts by kind (brief §6.1: the labels memory will learn from). */
 	readonly verdicts: Readonly<Record<"complete" | "incomplete" | "failed" | "uncertain", number>>;
+	/** The run's last supervisor verdict: what it believed when the agent finally stopped. */
+	readonly lastVerdict: "complete" | "incomplete" | "failed" | "uncertain" | null;
+	/** Verdicts reached without an LLM call (supervisor preVerdict, D-046). */
+	readonly deterministicVerdicts: number;
 	readonly compactions: number;
 	/** Sidecar calls Exocortex made (all outcomes). */
 	readonly sidecarCalls: number;
@@ -97,6 +101,10 @@ export function computeTraceMetrics(
 				(e) => e.kind === "exo.action" && ["accepted", "continued"].includes(String(record(e.data)["action"])),
 			).length,
 		verdicts: countVerdicts(events),
+		lastVerdict: lastVerdict(events),
+		deterministicVerdicts: events.filter(
+			(e) => e.kind === "exo.verdict" && record(e.data)["source"] === "deterministic",
+		).length,
 		compactions: events.filter((e) => e.kind === "compaction").length,
 		sidecarCalls: sidecarCalls.length,
 		sidecarTokens: sidecarCalls.reduce((sum, c) => sum + c.usage.promptTokens + c.usage.completionTokens, 0),
@@ -104,6 +112,13 @@ export function computeTraceMetrics(
 			(c) => c.outcome !== "ok" && c.outcome !== "rejected_turn_cap" && c.outcome !== "rejected_budget",
 		).length,
 	};
+}
+
+function lastVerdict(events: readonly StoredTraceEvent[]): TraceMetrics["lastVerdict"] {
+	const verdict = record([...events].reverse().find((e) => e.kind === "exo.verdict")?.data)["verdict"];
+	return verdict === "complete" || verdict === "incomplete" || verdict === "failed" || verdict === "uncertain"
+		? verdict
+		: null;
 }
 
 function countVerdicts(events: readonly StoredTraceEvent[]): TraceMetrics["verdicts"] {

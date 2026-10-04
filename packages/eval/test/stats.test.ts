@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { computeTraceMetrics } from "../src/metrics.ts";
 import { renderMarkdown } from "../src/report.ts";
 import type { RunRecord } from "../src/run.ts";
 import { minimumDetectableEffect, pairedComparison, signTest } from "../src/stats.ts";
@@ -94,6 +95,23 @@ describe("report", () => {
 		expect(markdown).toContain("## Paired by task vs `off`");
 		expect(markdown).toContain("| on | 2 | +100 | [+100, +100] | 2/0/0 | 0.50 | — | — | 0% |");
 		expect(markdown).toContain("can only detect differences of about 100 points");
+	});
+
+	it("reports verdict quality against the hidden checks", () => {
+		const judged = (taskId: string, success: boolean, lastVerdict: string) =>
+			run(taskId, "sup", success, {
+				metrics: { ...computeTraceMetrics([]), lastVerdict: lastVerdict as "complete" | "incomplete" },
+			});
+		const markdown = renderMarkdown(
+			[
+				judged("a", true, "complete"),
+				judged("b", false, "complete"),
+				judged("c", false, "incomplete"),
+				run("d", "sup", false),
+			],
+			"t",
+		);
+		expect(markdown).toContain("| sup | 2 | 50% | 50% |");
 	});
 
 	it("omits it for a single config", () => {

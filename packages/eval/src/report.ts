@@ -21,6 +21,15 @@ export interface ConfigSummary {
 	readonly verdicts: string;
 	readonly sidecarFailures: number;
 	readonly abnormal: number;
+	/**
+	 * Of runs whose last verdict was `complete`, the share whose hidden check passed: the costly
+	 * supervisor error is a false "complete" (research §1c). Null without such runs.
+	 */
+	readonly completePrecision: number | null;
+	/** Runs whose last verdict was `complete`. */
+	readonly judgedComplete: number;
+	/** Of failing runs with a last verdict, the share the supervisor did not call complete. */
+	readonly failureRecall: number | null;
 }
 
 export function summarize(records: readonly RunRecord[]): ConfigSummary[] {
@@ -53,8 +62,21 @@ export function summarize(records: readonly RunRecord[]): ConfigSummary[] {
 				.join("/"),
 			sidecarFailures: sum(withMetrics.map((m) => m.sidecarFailures)),
 			abnormal: runs.filter((r) => r.outcome !== "settled").length,
+			...verdictQuality(runs),
 		};
 	});
+}
+
+function verdictQuality(runs: readonly RunRecord[]) {
+	const judged = runs.filter((r) => r.metrics?.lastVerdict);
+	const complete = judged.filter((r) => r.metrics?.lastVerdict === "complete");
+	const failing = judged.filter((r) => !r.success);
+	return {
+		judgedComplete: complete.length,
+		completePrecision: complete.length > 0 ? complete.filter((r) => r.success).length / complete.length : null,
+		failureRecall:
+			failing.length > 0 ? failing.filter((r) => r.metrics?.lastVerdict !== "complete").length / failing.length : null,
+	};
 }
 
 /** Markdown report: one row per config, then a task × config pass matrix. */
@@ -102,8 +124,27 @@ export function renderMarkdown(records: readonly RunRecord[], title: string): st
 		});
 		lines.push(`| ${task} | ${cells.join(" | ")} |`);
 	}
-	lines.push(...pairedSection(records, summaries));
+	lines.push(...verdictSection(summaries), ...pairedSection(records, summaries));
 	return `${lines.join("\n")}\n`;
+}
+
+/** Supervisor verdict quality against the hidden checks, for configs that produced verdicts. */
+function verdictSection(summaries: readonly ConfigSummary[]): string[] {
+	const judged = summaries.filter((s) => s.completePrecision !== null || s.failureRecall !== null);
+	if (judged.length === 0) return [];
+	return [
+		"",
+		"## Supervisor verdicts vs hidden checks",
+		"",
+		"| config | judged complete | precision of complete | failures caught |",
+		"|---|---|---|---|",
+		...judged.map(
+			(s) =>
+				`| ${s.config} | ${s.judgedComplete} | ${s.completePrecision === null ? "—" : pct(s.completePrecision)} | ${s.failureRecall === null ? "—" : pct(s.failureRecall)} |`,
+		),
+		"",
+		"*Precision of complete*: of runs whose last verdict was `complete`, the share whose check passed (a false `complete` sends the user away from broken work). *Failures caught*: of failing runs with a verdict, the share not called complete.",
+	];
 }
 
 /** Each config against the first one (the baseline), task by task, with the run counts' power. */

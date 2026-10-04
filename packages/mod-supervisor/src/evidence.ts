@@ -14,6 +14,8 @@ export interface EvidenceInput {
 	readonly untracked: readonly string[];
 	readonly tools: readonly ToolOutcome[];
 	readonly checks: readonly CheckResult[];
+	/** Deterministic warning signs (research R1.2), shown first. */
+	readonly warnings?: readonly string[];
 	readonly maxChars: number;
 }
 
@@ -28,6 +30,10 @@ const CHECK_OUTPUT_CHARS = 1_200;
  */
 export function formatEvidence(input: EvidenceInput): string {
 	const sections: string[] = [];
+
+	if (input.warnings && input.warnings.length > 0) {
+		sections.push(["## Warnings (detected automatically)", ...input.warnings.map((w) => `- ${w}`)].join("\n"));
+	}
 
 	if (input.checks.length > 0) {
 		sections.push(

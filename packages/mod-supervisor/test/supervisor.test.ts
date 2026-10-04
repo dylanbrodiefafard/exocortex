@@ -212,3 +212,118 @@ describe("supervisor", () => {
 		expect((await sup.onSettle?.(DONE, signal))?.kind).toBe("suggest");
 	});
 });
+
+describe("supervisor research options (all off by default)", () => {
+	const editApp = (sup: ReturnType<typeof createSupervisor>) => {
+		writeFileSync(join(repo, "app.py"), "print('v2')\n");
+		sup.onToolResult?.({ toolName: "edit", input: { path: "app.py" }, isError: false, exitCode: null, output: "ok" });
+	};
+
+	it("preVerdict: a failing check means incomplete without asking the verdict sidecar", async () => {
+		const sup = createSupervisor(
+			{ preVerdict: true, checks: ["python3 -c 'import sys; sys.exit(3)'"] },
+			context({ ledger: LEDGER, verdicts: [COMPLETE] }),
+		);
+		sup.onUserTurn?.({ text: "Make app.py print v2.", origin: "user" });
+		editApp(sup);
+		const action = await sup.onSettle?.(DONE, signal);
+		expect(action).toMatchObject({ kind: "suggest" });
+		expect(action?.kind === "suggest" && action.text).toContain(
+			"Make `python3 -c 'import sys; sys.exit(3)'` pass (it exits with code 3)",
+		);
+		expect(requests.some((r) => String(r.messages[0]?.["content"]).includes("acceptance checklist and evidence"))).toBe(
+			false,
+		);
+		expect(records.find((r) => r.kind === "exo.verdict")?.data).toMatchObject({ source: "deterministic" });
+	});
+
+	it("preVerdict: no changes at all is uncertain, and passing checks still go to the LLM", async () => {
+		const quiet = createSupervisor({ preVerdict: true }, context({ ledger: LEDGER, verdicts: [INCOMPLETE] }));
+		quiet.onUserTurn?.({ text: "Make app.py print v2.", origin: "user" });
+		expect(await quiet.onSettle?.(DONE, signal)).toEqual({
+			kind: "notify",
+			summary: "supervisor: uncertain",
+			level: "info",
+		});
+
+		const checked = createSupervisor(
+			{ preVerdict: true, checks: ["true"] },
+			context({ ledger: LEDGER, verdicts: [COMPLETE] }),
+		);
+		checked.onUserTurn?.({ text: "Make app.py print v2.", origin: "user" });
+		editApp(checked);
+		expect(await checked.onSettle?.(DONE, signal)).toMatchObject({ summary: "supervisor: complete" });
+		expect(records.filter((r) => r.kind === "exo.verdict").at(-1)?.data).toMatchObject({ source: "llm" });
+	});
+
+	it("warningSignals: shows tampering and unsupported claims to the verdict", async () => {
+		const sup = createSupervisor({ warningSignals: true }, context({ ledger: LEDGER, verdicts: [COMPLETE] }));
+		sup.onUserTurn?.({ text: "Make app.py print v2.", origin: "user" });
+		writeFileSync(join(repo, "app.py"), "print('v2')  # TODO: real output\n");
+		sup.onToolResult?.({ toolName: "edit", input: { path: "app.py" }, isError: false, exitCode: null, output: "ok" });
+		await sup.onSettle?.({ outcome: "completed", lastAssistantText: "Done. All tests pass." }, signal);
+		const prompt = String(requests.at(-1)?.messages[0]?.["content"]);
+		expect(prompt).toContain("## Warnings (detected automatically)");
+		expect(prompt).toContain("stub marker(s) added in app.py");
+		expect(prompt).toContain('the agent claims "All tests pass."');
+	});
+
+	it("per-criterion: derives the verdict in code and rejects made-up evidence quotes", async () => {
+		const items = (status: string, evidence: string) => ({
+			items: [
+				{ criterion: 1, status: "met", evidence: "app.py | 2 +-", fix: "" },
+				{ criterion: 2, status, evidence, fix: "Write README.md" },
+			],
+			failed: false,
+			asked_user: false,
+			reason: "r",
+		});
+		const unmet = createSupervisor(
+			{ verdictStyle: "per-criterion" },
+			context({ ledger: LEDGER, verdicts: [items("unmet", "")] }),
+		);
+		unmet.onUserTurn?.({ text: "Make app.py print v2 and add a README.", origin: "user" });
+		editApp(unmet);
+		const action = await unmet.onSettle?.(DONE, signal);
+		expect(action?.kind === "suggest" && action.text).toContain("1. Write README.md");
+		expect(String(requests.at(-1)?.messages[0]?.["content"])).toContain("Judge each checklist item separately");
+
+		const invented = createSupervisor(
+			{ verdictStyle: "per-criterion" },
+			context({ ledger: LEDGER, verdicts: [items("met", "README.md | 10 ++++")] }),
+		);
+		invented.onUserTurn?.({ text: "Make app.py print v2 and add a README.", origin: "user" });
+		editApp(invented);
+		expect(await invented.onSettle?.(DONE, signal)).toMatchObject({ summary: "supervisor: uncertain" });
+	});
+
+	it("finalMessage=claims: the verdict sees unverified claims and the ending, not the narrative", async () => {
+		const sup = createSupervisor({ finalMessage: "claims" }, context({ ledger: LEDGER, verdicts: [COMPLETE] }));
+		sup.onUserTurn?.({ text: "Make app.py print v2.", origin: "user" });
+		editApp(sup);
+		const long = `${"I carefully restructured everything. ".repeat(30)}All tests pass. Let me know.`;
+		await sup.onSettle?.({ outcome: "completed", lastAssistantText: long }, signal);
+		const prompt = String(requests.at(-1)?.messages[0]?.["content"]);
+		expect(prompt).toContain("- UNVERIFIED CLAIM: All tests pass.");
+		expect(prompt.split("I carefully restructured").length - 1).toBeLessThan(10);
+	});
+
+	it("completeVotes: any dissent turns complete into uncertain; unanimity keeps it", async () => {
+		const split = createSupervisor(
+			{ completeVotes: 3 },
+			context({ ledger: LEDGER, verdicts: [COMPLETE, COMPLETE, INCOMPLETE] }),
+		);
+		split.onUserTurn?.({ text: "Make app.py print v2.", origin: "user" });
+		editApp(split);
+		expect(await split.onSettle?.(DONE, signal)).toMatchObject({ summary: "supervisor: uncertain" });
+		expect(records.filter((r) => r.kind === "exo.verdict").at(-1)?.data).toMatchObject({
+			votes: 3,
+			reason: "verdicts disagreed (incomplete)",
+		});
+
+		const agreed = createSupervisor({ completeVotes: 2 }, context({ ledger: LEDGER, verdicts: [COMPLETE] }));
+		agreed.onUserTurn?.({ text: "Make app.py print v2.", origin: "user" });
+		editApp(agreed);
+		expect(await agreed.onSettle?.(DONE, signal)).toMatchObject({ summary: "supervisor: complete" });
+	});
+});
