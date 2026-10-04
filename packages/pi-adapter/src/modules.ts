@@ -17,11 +17,16 @@ import {
 	toJsonValue,
 } from "@exocortex/core";
 import { createSupervisor, SUPERVISOR_ID } from "@exocortex/mod-supervisor";
+import { createTrimmer, TRIMMER_ID } from "@exocortex/mod-trimmer";
 import type { Runtime } from "./runtime.ts";
 import { exitCodeOf } from "./trace-recorder.ts";
 
-/** Every module Exocortex knows, by config id. */
+/**
+ * Every module Exocortex knows, by config id. Order matters: tool-result rewrites run in this
+ * order (trim first, then annotate), as do settle hooks.
+ */
 const MODULES: Readonly<Record<string, ModuleFactory>> = {
+	[TRIMMER_ID]: createTrimmer,
 	[SUPERVISOR_ID]: createSupervisor,
 };
 

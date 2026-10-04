@@ -14,7 +14,8 @@
 	},
 	"dependencies": {
 		"@exocortex/core": "*",
-		"@exocortex/mod-supervisor": "*"
+		"@exocortex/mod-supervisor": "*",
+		"@exocortex/mod-trimmer": "*"
 	},
 	"peerDependencies": {
 		"@earendil-works/pi-coding-agent": "*"
