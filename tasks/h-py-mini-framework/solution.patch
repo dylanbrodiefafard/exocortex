@@ -1,0 +1,146 @@
+diff --git a/wisp/request/query.py b/wisp/request/query.py
+new file mode 100644
+index 0000000..2c48e8f
+--- /dev/null
++++ b/wisp/request/query.py
+@@ -0,0 +1,50 @@
++"""Query string parameters."""
++
++from wisp.utils.encoding import unquote
++
++
++class QueryParams:
++    """Read-only view of query string parameters, keeping repeated keys in order."""
++
++    def __init__(self, pairs=()):
++        self._pairs = list(pairs)
++
++    @classmethod
++    def parse(cls, query_string: str) -> "QueryParams":
++        pairs = []
++        for chunk in query_string.split("&"):
++            if not chunk:
++                continue
++            key, _, value = chunk.partition("=")
++            pairs.append((unquote(key), unquote(value)))
++        return cls(pairs)
++
++    def getlist(self, name: str) -> list[str]:
++        return [v for k, v in self._pairs if k == name]
++
++    def get(self, name: str, default=None):
++        for k, v in self._pairs:
++            if k == name:
++                return v
++        return default
++
++    def __getitem__(self, name: str) -> str:
++        for k, v in self._pairs:
++            if k == name:
++                return v
++        raise KeyError(name)
++
++    def __contains__(self, name: object) -> bool:
++        return any(k == name for k, _ in self._pairs)
++
++    def __iter__(self):
++        return iter(dict.fromkeys(k for k, _ in self._pairs))
++
++    def __len__(self) -> int:
++        return len(dict.fromkeys(k for k, _ in self._pairs))
++
++    def items(self) -> list[tuple[str, str]]:
++        return list(self._pairs)
++
++    def __repr__(self) -> str:
++        return f"QueryParams({self._pairs!r})"
+diff --git a/wisp/request/request.py b/wisp/request/request.py
+index 4b5048d..2503853 100644
+--- a/wisp/request/request.py
++++ b/wisp/request/request.py
+@@ -7,6 +7,7 @@ from wisp.exceptions import BadRequest
+ from wisp.request.cookies import parse_cookie_header
+ from wisp.request.forms import parse_urlencoded
+ from wisp.request.headers import Headers
++from wisp.request.query import QueryParams
+ 
+ 
+ class Request:
+@@ -39,6 +40,11 @@ class Request:
+         value = self.headers.get("Content-Type", "") or ""
+         return value.split(";", 1)[0].strip().lower()
+ 
++    @cached_property
++    def query(self) -> QueryParams:
++        """Parsed query string parameters."""
++        return QueryParams.parse(self.query_string)
++
+     @cached_property
+     def cookies(self) -> dict[str, str]:
+         return parse_cookie_header(self.headers.get("Cookie"))
+diff --git a/wisp/routing/converters.py b/wisp/routing/converters.py
+index c224c98..4c6df3f 100644
+--- a/wisp/routing/converters.py
++++ b/wisp/routing/converters.py
+@@ -26,7 +26,8 @@ class Converter:
+ 
+ 
+ class StrConverter(Converter):
+-    pass
++    # Values are matched after percent-decoding, so an encoded slash may appear.
++    regex = re.compile(r".+", re.DOTALL)
+ 
+ 
+ class IntConverter(Converter):
+diff --git a/wisp/routing/router.py b/wisp/routing/router.py
+index 46a3e32..a58893f 100644
+--- a/wisp/routing/router.py
++++ b/wisp/routing/router.py
+@@ -43,7 +43,7 @@ class Router:
+ 
+     def match(self, method: str, path: str) -> Match:
+         """Return the best match or raise ``NotFound`` / ``MethodNotAllowed``."""
+-        parts = _split(unquote(path))
++        parts = [unquote(part, plus_as_space=False) for part in _split(path)]
+         allowed: set[str] = set()
+         for route in self._routes:
+             raw = route.match_segments(parts)
+@@ -63,6 +63,8 @@ class Router:
+ def _split(path: str) -> list[str]:
+     if path in ("", "/"):
+         return []
++    if path.endswith("/"):
++        path = path[:-1]
+     return path[1:].split("/") if path.startswith("/") else path.split("/")
+ 
+ 
+diff --git a/wisp/utils/encoding.py b/wisp/utils/encoding.py
+index 0de0b44..362c27a 100644
+--- a/wisp/utils/encoding.py
++++ b/wisp/utils/encoding.py
+@@ -19,20 +19,20 @@ def unquote(value: str, plus_as_space: bool = True) -> str:
+     literally. With ``plus_as_space`` (the default, matching
+     ``application/x-www-form-urlencoded``), ``+`` decodes to a space.
+     """
+-    out = []
++    out = bytearray()
+     i = 0
+     while i < len(value):
+         ch = value[i]
+         if _is_escape(value, i):
+-            out.append(chr(int(value[i + 1 : i + 3], 16)))
++            out.append(int(value[i + 1 : i + 3], 16))
+             i += 3
+             continue
+         if ch == "+" and plus_as_space:
+-            out.append(" ")
++            out += b" "
+         else:
+-            out.append(ch)
++            out += ch.encode("utf-8")
+         i += 1
+-    return "".join(out)
++    return out.decode("utf-8", errors="replace")
+ 
+ 
+ def quote(value: str, safe: str = "") -> str:

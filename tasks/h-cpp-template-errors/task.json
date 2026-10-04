@@ -1,0 +1,10 @@
+{
+	"id": "h-cpp-template-errors",
+	"language": "cpp",
+	"prompt": "`make test` doesn't even compile since we started using stats::Summary (stats.hpp) with our units::Duration type (duration.hpp). Make the tests in test_stats.cpp compile and pass. Don't change test_stats.cpp or the Makefile. stats.hpp is a generic library: it must keep working for any type that meets the requirements documented at the top of stats.hpp, so don't special-case Duration (or its namespace) inside the library, and don't make the library depend on anything beyond those documented requirements. Fix whatever is wrong in stats.hpp and/or duration.hpp.",
+	"check": "make -s test",
+	"maxTurns": 40,
+	"timeoutSec": 1200,
+	"checkTimeoutSec": 180,
+	"tags": ["hard", "error-recovery", "cpp"]
+}

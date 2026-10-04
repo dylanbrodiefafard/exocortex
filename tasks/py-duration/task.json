@@ -5,5 +5,5 @@
 	"check": "python3 -m unittest -q test_durations",
 	"maxTurns": 20,
 	"timeoutSec": 600,
-	"tags": ["feature", "small"]
+	"tags": ["smoke", "feature"]
 }

@@ -1,12 +1,13 @@
 import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { tmpdir } from "node:os";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { openTraceStore } from "@exocortex/core";
 import { type ParseError, parse as parseJsonc } from "jsonc-parser";
 import { computeTraceMetrics, type TraceMetrics } from "./metrics.ts";
 import { PiRpcProcess, type RunOutcome } from "./pi-rpc.ts";
 import type { Task } from "./task.ts";
-import { applyPatch, prepareWorkspace, runShell } from "./workspace.ts";
+import { applyHiddenOverlay, applyPatch, prepareWorkspace, runShell } from "./workspace.ts";
 
 export interface EvalOptions {
 	readonly tasks: readonly Task[];
@@ -16,6 +17,11 @@ export interface EvalOptions {
 	readonly repeats: number;
 	/** Directory for this run's artifacts (created). */
 	readonly runDir: string;
+	/**
+	 * Parent for per-run workspaces. Defaults to the OS temp dir: workspaces must live outside
+	 * this repo so the agent can't wander up into `tasks/` and read solutions or hidden tests.
+	 */
+	readonly workRoot?: string;
 	readonly model?: string;
 	/** pi agent dir (models.json, auth). Defaults to pi's own default (`~/.pi/agent`). */
 	readonly piAgentDir?: string;
@@ -86,7 +92,7 @@ async function runOne(
 	dbPath: string,
 ): Promise<RunRecord> {
 	const started = performance.now();
-	const workdir = join(options.runDir, "work", label);
+	const workdir = join(options.workRoot ?? join(tmpdir(), `exo-eval-${basename(options.runDir)}`), label);
 	const base = { label, taskId: task.spec.id, config, repeat };
 	const fail = (outcome: RunRecord["outcome"], error: string): RunRecord => ({
 		...base,
@@ -141,10 +147,12 @@ async function runOne(
 	});
 	await pi.close();
 
+	applyHiddenOverlay(task, workdir);
 	const check = await runShell(task.spec.check, workdir, task.spec.checkTimeoutSec * 1000);
 	writeFileSync(join(options.runDir, "logs", `${label}.check.log`), check.outputTail);
 	const metrics = readMetrics(dbPath, label);
-	if (!options.keepWorkdirs) rmSync(workdir, { recursive: true, force: true });
+	if (options.keepWorkdirs) options.log?.(`  workspace kept: ${workdir}`);
+	else rmSync(workdir, { recursive: true, force: true });
 
 	return {
 		...base,
@@ -209,6 +217,7 @@ export async function validateTasks(tasks: readonly Task[], scratchDir: string):
 		let detail = "";
 		await prepareWorkspace(task, pristineDir);
 		if (task.spec.setup) await runShell(task.spec.setup, pristineDir, task.spec.checkTimeoutSec * 1000);
+		applyHiddenOverlay(task, pristineDir);
 		const pristine = await runShell(task.spec.check, pristineDir, task.spec.checkTimeoutSec * 1000);
 		if (pristine.exitCode === 0) detail += "check passes without any change; ";
 		let solutionPasses: boolean | null = null;
@@ -216,6 +225,7 @@ export async function validateTasks(tasks: readonly Task[], scratchDir: string):
 			await prepareWorkspace(task, solvedDir);
 			await applyPatch(solvedDir, task.solutionPatch);
 			if (task.spec.setup) await runShell(task.spec.setup, solvedDir, task.spec.checkTimeoutSec * 1000);
+			applyHiddenOverlay(task, solvedDir);
 			const solved = await runShell(task.spec.check, solvedDir, task.spec.checkTimeoutSec * 1000);
 			solutionPasses = solved.exitCode === 0;
 			if (!solutionPasses) detail += `solution fails: ${solved.outputTail.slice(-600)}`;

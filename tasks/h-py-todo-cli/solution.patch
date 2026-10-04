@@ -1,0 +1,173 @@
+diff --git a/todo/cli.py b/todo/cli.py
+index 9876201..9c171fa 100644
+--- a/todo/cli.py
++++ b/todo/cli.py
+@@ -1,9 +1,35 @@
+ import argparse
++import datetime
++import json
++import os
++import re
+ import sys
+ 
+ from todo import storage
+ from todo.formatting import format_tasks
+ 
++DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
++
++
++def parse_date(value):
++    """Parse a strict YYYY-MM-DD date, or return None if invalid."""
++    if not DATE_RE.fullmatch(value):
++        return None
++    try:
++        return datetime.date.fromisoformat(value)
++    except ValueError:
++        return None
++
++
++def today():
++    override = os.environ.get("TODO_TODAY")
++    if override:
++        parsed = parse_date(override)
++        if parsed is None:
++            raise ValueError(f"invalid TODO_TODAY: {override!r}")
++        return parsed
++    return datetime.date.today()
++
+ 
+ def build_parser():
+     parser = argparse.ArgumentParser(prog="todo", description="Manage a todo list.")
+@@ -11,11 +37,14 @@ def build_parser():
+ 
+     add = sub.add_parser("add", help="add a task")
+     add.add_argument("text", help="task description")
++    add.add_argument("--due", help="due date (YYYY-MM-DD)")
+ 
+-    sub.add_parser("list", help="list tasks")
++    lst = sub.add_parser("list", help="list tasks")
++    lst.add_argument("--overdue", action="store_true", help="only unfinished tasks past their due date")
++    lst.add_argument("--json", action="store_true", help="print tasks as JSON")
+ 
+-    done = sub.add_parser("done", help="mark a task as done")
+-    done.add_argument("id", type=int)
++    done = sub.add_parser("done", help="mark tasks as done")
++    done.add_argument("ids", type=int, nargs="+", metavar="id")
+ 
+     remove = sub.add_parser("remove", help="delete a task")
+     remove.add_argument("id", type=int)
+@@ -23,29 +52,48 @@ def build_parser():
+     return parser
+ 
+ 
++def sort_key(task):
++    return (task.due is None, task.due or "", task.id)
++
++
+ def cmd_add(args, todos):
+     text = args.text.strip()
+     if not text:
+         print("error: task text must not be empty", file=sys.stderr)
+         return 2
+-    task = todos.add(text)
++    due = None
++    if args.due is not None:
++        parsed = parse_date(args.due)
++        if parsed is None:
++            print(f"error: invalid due date {args.due!r} (expected YYYY-MM-DD)", file=sys.stderr)
++            return 2
++        due = parsed.isoformat()
++    task = todos.add(text, due=due)
+     storage.save(todos)
+     print(f"Added task {task.id}")
+     return 0
+ 
+ 
+ def cmd_list(args, todos):
+-    if todos.tasks:
+-        print(format_tasks(todos.tasks))
++    tasks = sorted(todos.tasks, key=sort_key)
++    if args.overdue:
++        cutoff = today().isoformat()
++        tasks = [t for t in tasks if not t.done and t.due is not None and t.due < cutoff]
++    if args.json:
++        print(json.dumps([{"id": t.id, "text": t.text, "done": t.done, "due": t.due} for t in tasks]))
++    elif tasks:
++        print(format_tasks(tasks))
+     return 0
+ 
+ 
+ def cmd_done(args, todos):
+-    task = todos.find(args.id)
+-    if task is None:
+-        print(f"error: no task with id {args.id}", file=sys.stderr)
+-        return 1
+-    task.done = True
++    missing = [task_id for task_id in args.ids if todos.find(task_id) is None]
++    if missing:
++        ids = ", ".join(str(task_id) for task_id in missing)
++        print(f"error: no task with id {ids}", file=sys.stderr)
++        return 2
++    for task_id in args.ids:
++        todos.find(task_id).done = True
+     storage.save(todos)
+     return 0
+ 
+diff --git a/todo/formatting.py b/todo/formatting.py
+index 6a66497..260a9de 100644
+--- a/todo/formatting.py
++++ b/todo/formatting.py
+@@ -1,6 +1,9 @@
+ def format_task(task):
+     mark = "x" if task.done else " "
+-    return f"{task.id}. [{mark}] {task.text}"
++    line = f"{task.id}. [{mark}] {task.text}"
++    if task.due:
++        line += f" (due {task.due})"
++    return line
+ 
+ 
+ def format_tasks(tasks):
+diff --git a/todo/models.py b/todo/models.py
+index c5c3dd9..be4a289 100644
+--- a/todo/models.py
++++ b/todo/models.py
+@@ -1,4 +1,5 @@
+ from dataclasses import asdict, dataclass
++from typing import Optional
+ 
+ 
+ @dataclass
+@@ -6,10 +7,16 @@ class Task:
+     id: int
+     text: str
+     done: bool = False
++    due: Optional[str] = None
+ 
+     def to_dict(self):
+         return asdict(self)
+ 
+     @classmethod
+     def from_dict(cls, raw):
+-        return cls(**raw)
++        return cls(
++            id=raw["id"],
++            text=raw["text"],
++            done=raw.get("done", False),
++            due=raw.get("due"),
++        )
+diff --git a/todo/storage.py b/todo/storage.py
+index 61e057e..e263482 100644
+--- a/todo/storage.py
++++ b/todo/storage.py
+@@ -18,8 +18,8 @@ class TodoList:
+         self.tasks = list(tasks or [])
+         self.next_id = next_id
+ 
+-    def add(self, text):
+-        task = Task(id=self.next_id, text=text)
++    def add(self, text, due=None):
++        task = Task(id=self.next_id, text=text, due=due)
+         self.tasks.append(task)
+         self.next_id += 1
+         return task

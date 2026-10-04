@@ -1,0 +1,113 @@
+diff --git a/src/document.rs b/src/document.rs
+index cf24692..ed0effd 100644
+--- a/src/document.rs
++++ b/src/document.rs
+@@ -12,7 +12,9 @@ struct Section {
+ 
+ impl Ini {
+     /// Returns the value of `key` in `section`, if present.
++    /// Section names match case-insensitively; keys match exactly.
+     pub fn get(&self, section: &str, key: &str) -> Option<&str> {
++        let section = section.to_lowercase();
+         self.sections
+             .iter()
+             .find(|s| s.name == section)?
+@@ -43,6 +45,9 @@ impl Ini {
+             .iter_mut()
+             .find(|s| s.name == section)
+             .expect("section was just added");
+-        section.entries.push((key.to_string(), value));
++        match section.entries.iter_mut().find(|(k, _)| k == key) {
++            Some(entry) => entry.1 = value,
++            None => section.entries.push((key.to_string(), value)),
++        }
+     }
+ }
+diff --git a/src/parser.rs b/src/parser.rs
+index f9411a5..3c981f0 100644
+--- a/src/parser.rs
++++ b/src/parser.rs
+@@ -1,7 +1,80 @@
+-use crate::{Ini, ParseError};
++use crate::{ErrorKind, Ini, ParseError};
+ 
+ /// Parses INI text into an [`Ini`] document.
+ pub fn parse(input: &str) -> Result<Ini, ParseError> {
+-    let _ = input;
+-    unimplemented!("parse")
++    let mut ini = Ini::default();
++    let mut section = String::new();
++    for (index, raw) in input.split('\n').enumerate() {
++        let line_no = index + 1;
++        let fail = |kind| ParseError { line: line_no, kind };
++        let line = raw.strip_suffix('\r').unwrap_or(raw);
++        let trimmed = line.trim();
++        if trimmed.is_empty() || trimmed.starts_with(';') || trimmed.starts_with('#') {
++            continue;
++        }
++        if trimmed.starts_with('[') {
++            let header = strip_inline_comment(trimmed).trim();
++            let name = header
++                .strip_prefix('[')
++                .and_then(|h| h.strip_suffix(']'))
++                .map(str::trim)
++                .filter(|n| !n.is_empty() && !n.contains(['[', ']']))
++                .ok_or_else(|| fail(ErrorKind::InvalidSectionHeader))?;
++            section = name.to_lowercase();
++            ini.add_section(&section);
++            continue;
++        }
++        let (key, rest) = line.split_once('=').ok_or_else(|| fail(ErrorKind::MissingEquals))?;
++        let key = key.trim();
++        if key.is_empty() {
++            return Err(fail(ErrorKind::EmptyKey));
++        }
++        let value = match rest.trim_start().strip_prefix('"') {
++            Some(quoted) => parse_quoted(quoted).map_err(fail)?,
++            None => strip_inline_comment(rest).trim().to_string(),
++        };
++        ini.insert(&section, key, value);
++    }
++    Ok(ini)
++}
++
++/// Removes a `;` comment that is preceded by a space or tab.
++fn strip_inline_comment(text: &str) -> &str {
++    let bytes = text.as_bytes();
++    for i in 1..bytes.len() {
++        if bytes[i] == b';' && (bytes[i - 1] == b' ' || bytes[i - 1] == b'\t') {
++            return &text[..i];
++        }
++    }
++    text
++}
++
++/// Parses the remainder of a quoted value (after the opening quote).
++fn parse_quoted(text: &str) -> Result<String, ErrorKind> {
++    let mut out = String::new();
++    let mut chars = text.char_indices();
++    while let Some((i, c)) = chars.next() {
++        match c {
++            '"' => {
++                let tail = text[i + 1..].trim_start();
++                if tail.is_empty() || tail.starts_with(';') {
++                    return Ok(out);
++                }
++                return Err(ErrorKind::TrailingCharacters);
++            }
++            '\\' => match chars.next() {
++                Some((_, '"')) => out.push('"'),
++                Some((_, '\\')) => out.push('\\'),
++                Some((_, 'n')) => out.push('\n'),
++                Some((_, 't')) => out.push('\t'),
++                Some((_, other)) => {
++                    out.push('\\');
++                    out.push(other);
++                }
++                None => return Err(ErrorKind::UnterminatedQuote),
++            },
++            c => out.push(c),
++        }
++    }
++    Err(ErrorKind::UnterminatedQuote)
+ }

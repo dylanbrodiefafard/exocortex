@@ -1,0 +1,10 @@
+{
+	"id": "h-rust-borrow-refactor",
+	"language": "rust",
+	"prompt": "I started refactoring the order book's storage from a Vec<Order> to a HashMap<OrderId, Order> plus the per-side price-level index in src/levels.rs, and didn't finish. The crate doesn't compile anymore. Get it compiling and make `cargo test` pass without changing the tests or the public API. Keep the new storage layout (no going back to a Vec), and make sure every function still does what its doc comment says.",
+	"check": "cargo test --offline -q",
+	"maxTurns": 50,
+	"timeoutSec": 1500,
+	"checkTimeoutSec": 300,
+	"tags": ["hard", "error-recovery", "rust"]
+}

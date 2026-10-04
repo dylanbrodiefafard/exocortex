@@ -1,0 +1,11 @@
+{
+	"id": "h-py-log-analyzer",
+	"language": "python",
+	"prompt": "`python3 analyze.py logs/app.log` crashes partway through the file, and from what I've seen the error counts it gives are wrong too. Fix the analyzer so that its report (both the default output and `--json`) matches the spec in README.md for any log in the formats described there, not just this file. Don't change the tests or tools/gen_logs.py.",
+	"check": "python3 -m unittest discover -q -s tests -t .",
+	"setup": "mkdir -p logs && python3 tools/gen_logs.py --seed 1 > logs/app.log",
+	"maxTurns": 50,
+	"timeoutSec": 1500,
+	"checkTimeoutSec": 120,
+	"tags": ["hard", "noisy-output", "python"]
+}

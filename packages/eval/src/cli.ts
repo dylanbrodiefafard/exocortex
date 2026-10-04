@@ -15,12 +15,13 @@ Runs eval tasks through pi (RPC mode) with each Exocortex config and reports met
 Options:
   --config <a,b>     Exocortex configs from packages/eval/configs (default: all-off)
   --tasks <globs>    Comma-separated task id globs, e.g. "py-*,go-lru" (default: all)
+  --tags <a,b>       Only tasks carrying any of these tags, e.g. "hard" or "smoke"
   --repeat <n>       Repeats per task × config (default: 1)
   --model <p/id>     pi model, e.g. ninfer/qwen3.8-27b (default: pi's default model)
   --pi-agent-dir <d> pi agent dir with models.json/auth (default: ~/.pi/agent)
   --pi-arg <arg>     Extra pi CLI argument (repeatable)
   --out <dir>        Output root (default: eval-runs/)
-  --keep-workdirs    Keep each run's workspace for inspection
+  --keep-workdirs    Keep each run's workspace (under the OS temp dir) for inspection
   --validate         Check fixtures only: pristine must fail, solution.patch must pass
   -h, --help`;
 
@@ -31,6 +32,7 @@ function parseCli() {
 		options: {
 			config: { type: "string", default: "all-off" },
 			tasks: { type: "string" },
+			tags: { type: "string" },
 			repeat: { type: "string", default: "1" },
 			model: { type: "string" },
 			"pi-agent-dir": { type: "string" },
@@ -50,7 +52,7 @@ async function main(): Promise<number> {
 		process.stdout.write(`${USAGE}\n`);
 		return 0;
 	}
-	const tasks = loadTasks(join(REPO_ROOT, "tasks"), splitList(values.tasks));
+	const tasks = loadTasks(join(REPO_ROOT, "tasks"), splitList(values.tasks), splitList(values.tags));
 	if (tasks.length === 0) {
 		process.stderr.write("No tasks matched.\n");
 		return 2;

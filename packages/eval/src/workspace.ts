@@ -36,6 +36,11 @@ export async function prepareWorkspace(task: Task, workdir: string): Promise<voi
 	}
 }
 
+/** Copies the task's hidden acceptance files over the workspace (overwriting same-named files). */
+export function applyHiddenOverlay(task: Task, workdir: string): void {
+	if (task.hiddenDir) cpSync(task.hiddenDir, workdir, { recursive: true, force: true });
+}
+
 export async function applyPatch(workdir: string, patchPath: string): Promise<void> {
 	const result = await runCommand("git", ["apply", "--whitespace=nowarn", patchPath], {
 		cwd: workdir,

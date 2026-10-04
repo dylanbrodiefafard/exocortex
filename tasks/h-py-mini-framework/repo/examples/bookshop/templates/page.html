@@ -1,0 +1,7 @@
+<!doctype html>
+<title>{{ title }} | Bookshop</title>
+<h1>{{ title }}</h1>
+<p>{{ body }}</p>
+{% if books %}<ul>
+{% for book in books %}  <li><a href="/books/{{ book.id }}">{{ book.title|truncate:"30" }}</a> ({{ book.author }})</li>
+{% endfor %}</ul>{% endif %}

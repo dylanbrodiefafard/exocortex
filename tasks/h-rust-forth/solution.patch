@@ -1,0 +1,201 @@
+diff --git a/src/lib.rs b/src/lib.rs
+index d524adf..4baeb78 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -59,6 +59,8 @@
+ //! including earlier steps of a user-defined word that failed part-way) is
+ //! kept.
+ 
++use std::collections::HashMap;
++
+ /// The type of every stack entry.
+ pub type Value = i64;
+ 
+@@ -76,22 +78,183 @@ pub enum Error {
+ }
+ 
+ /// An interpreter instance: a stack plus the current dictionary.
+-pub struct Forth {}
++pub struct Forth {
++    stack: Vec<Value>,
++    /// Every definition ever made. Bodies refer to earlier entries by index,
++    /// so redefining a name never changes existing bodies.
++    defs: Vec<Vec<Op>>,
++    /// Current meaning of each user-defined name (lowercase) as an index into `defs`.
++    names: HashMap<String, usize>,
++}
++
++#[derive(Debug, Clone, Copy)]
++enum Builtin {
++    Add,
++    Sub,
++    Mul,
++    Div,
++    Dup,
++    Drop,
++    Swap,
++    Over,
++}
++
++#[derive(Debug, Clone, Copy)]
++enum Op {
++    Push(Value),
++    Builtin(Builtin),
++    Call(usize),
++}
++
++fn builtin(name: &str) -> Option<Builtin> {
++    Some(match name {
++        "+" => Builtin::Add,
++        "-" => Builtin::Sub,
++        "*" => Builtin::Mul,
++        "/" => Builtin::Div,
++        "dup" => Builtin::Dup,
++        "drop" => Builtin::Drop,
++        "swap" => Builtin::Swap,
++        "over" => Builtin::Over,
++        _ => return None,
++    })
++}
++
++fn parse_number(token: &str) -> Option<Value> {
++    let digits = token.strip_prefix('-').unwrap_or(token);
++    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
++        return None;
++    }
++    // Wrap like the arithmetic does rather than failing on huge literals.
++    let mut value: Value = 0;
++    for b in digits.bytes() {
++        value = value.wrapping_mul(10).wrapping_add(Value::from(b - b'0'));
++    }
++    Some(if token.starts_with('-') { value.wrapping_neg() } else { value })
++}
+ 
+ impl Forth {
+     /// A fresh interpreter: empty stack, only the built-in words.
+     pub fn new() -> Forth {
+-        todo!()
++        Forth {
++            stack: Vec::new(),
++            defs: Vec::new(),
++            names: HashMap::new(),
++        }
+     }
+ 
+     /// The stack, bottom first.
+     pub fn stack(&self) -> &[Value] {
+-        todo!()
++        &self.stack
+     }
+ 
+     /// Evaluate `input`. See the module docs for the language.
+     pub fn eval(&mut self, input: &str) -> Result<(), Error> {
+-        todo!("evaluate {input:?}")
++        let mut tokens = input.split_whitespace();
++        while let Some(token) = tokens.next() {
++            if token == ":" {
++                self.define(&mut tokens)?;
++                continue;
++            }
++            if token == ";" {
++                return Err(Error::InvalidWord);
++            }
++            let op = self.resolve(token)?;
++            self.run(op)?;
++        }
++        Ok(())
++    }
++
++    fn resolve(&self, token: &str) -> Result<Op, Error> {
++        if let Some(n) = parse_number(token) {
++            return Ok(Op::Push(n));
++        }
++        let name = token.to_lowercase();
++        if let Some(&id) = self.names.get(&name) {
++            return Ok(Op::Call(id));
++        }
++        builtin(&name).map(Op::Builtin).ok_or(Error::UnknownWord)
++    }
++
++    fn define<'a>(&mut self, tokens: &mut impl Iterator<Item = &'a str>) -> Result<(), Error> {
++        let name = tokens.next().ok_or(Error::InvalidWord)?;
++        if name == ":" || name == ";" || parse_number(name).is_some() {
++            return Err(Error::InvalidWord);
++        }
++        let mut body = Vec::new();
++        loop {
++            let token = tokens.next().ok_or(Error::InvalidWord)?;
++            match token {
++                ";" => break,
++                ":" => return Err(Error::InvalidWord),
++                _ => body.push(self.resolve(token)?),
++            }
++        }
++        self.defs.push(body);
++        self.names.insert(name.to_lowercase(), self.defs.len() - 1);
++        Ok(())
++    }
++
++    fn run(&mut self, op: Op) -> Result<(), Error> {
++        // Explicit call stack of (definition, next op index).
++        let mut frames: Vec<(usize, usize)> = Vec::new();
++        let mut current = op;
++        loop {
++            match current {
++                Op::Push(n) => self.stack.push(n),
++                Op::Builtin(b) => self.apply(b)?,
++                Op::Call(id) => frames.push((id, 0)),
++            }
++            let next = loop {
++                let Some(frame) = frames.last_mut() else {
++                    return Ok(());
++                };
++                let body = &self.defs[frame.0];
++                if frame.1 < body.len() {
++                    frame.1 += 1;
++                    break body[frame.1 - 1];
++                }
++                frames.pop();
++            };
++            current = next;
++        }
++    }
++
++    fn apply(&mut self, b: Builtin) -> Result<(), Error> {
++        let need = match b {
++            Builtin::Dup | Builtin::Drop => 1,
++            _ => 2,
++        };
++        let len = self.stack.len();
++        if len < need {
++            return Err(Error::StackUnderflow);
++        }
++        let s = &mut self.stack;
++        match b {
++            Builtin::Dup => s.push(s[len - 1]),
++            Builtin::Drop => {
++                s.pop();
++            }
++            Builtin::Swap => s.swap(len - 1, len - 2),
++            Builtin::Over => s.push(s[len - 2]),
++            Builtin::Add | Builtin::Sub | Builtin::Mul | Builtin::Div => {
++                let (a, b2) = (s[len - 2], s[len - 1]);
++                let v = match b {
++                    Builtin::Add => a.wrapping_add(b2),
++                    Builtin::Sub => a.wrapping_sub(b2),
++                    Builtin::Mul => a.wrapping_mul(b2),
++                    _ => {
++                        if b2 == 0 {
++                            return Err(Error::DivisionByZero);
++                        }
++                        a.wrapping_div(b2)
++                    }
++                };
++                s.truncate(len - 2);
++                s.push(v);
++            }
++        }
++        Ok(())
+     }
+ }
+ 

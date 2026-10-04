@@ -1,0 +1,213 @@
+diff --git a/docs/configuration.md b/docs/configuration.md
+index 6310469..c655652 100644
+--- a/docs/configuration.md
++++ b/docs/configuration.md
+@@ -24,6 +24,8 @@ tool exits with status 2.
+ | `upstream.headers` | object | `{}` | (none) | valid header names |
+ | `queue.size` | int | `1000` | `TOOL_QUEUE_SIZE` | 1 to 100000 |
+ | `queue.workers` | int | `4` | `TOOL_QUEUE_WORKERS` | 1 to 64 |
++| `retry.max_attempts` | int | `3` | `TOOL_RETRY_MAX_ATTEMPTS` | 1 to 10; total attempts per delivery |
++| `retry.backoff_ms` | int | `200` | `TOOL_RETRY_BACKOFF_MS` | 0 to 60000; doubles after each retry |
+ 
+ Example:
+ 
+@@ -43,7 +45,10 @@ Example:
+ Each delivery is POSTed to `upstream.url` with `Content-Type:
+ application/json`, an `X-Delivery-ID` header and any `upstream.headers`. A
+ 2xx/3xx status is success. A 4xx status means the upstream rejected the
+-delivery; a 5xx status or a transport error means the upstream failed.
++delivery and is final; a 5xx status or a transport error means the upstream
++failed and is retried, up to `retry.max_attempts` attempts in total. Before
++attempt n+1 the client waits `retry.backoff_ms` × 2^(n−1) milliseconds
++(200, 400, 800 ms with the defaults).
+ 
+ ## Printing the effective configuration
+ 
+@@ -51,7 +56,7 @@ delivery; a 5xx status or a transport error means the upstream failed.
+ order: `listen_addr`, `log.*`, `upstream.url`, `upstream.timeout_ms`, one
+ `upstream.headers.<Name>` line per header (sorted by name; values of
+ `Authorization`, `Proxy-Authorization` and `X-Api-Key` are shown as
+-`<redacted>`), then `queue.*`. With the defaults:
++`<redacted>`), then `retry.*`, then `queue.*`. With the defaults:
+ 
+ ```
+ listen_addr = :8080
+@@ -59,6 +64,8 @@ log.level = info
+ log.format = text
+ upstream.url = http://localhost:9000/hooks
+ upstream.timeout_ms = 5000
++retry.max_attempts = 3
++retry.backoff_ms = 200
+ queue.size = 1000
+ queue.workers = 4
+ ```
+diff --git a/internal/app/client.go b/internal/app/client.go
+index 56ebb86..863691e 100644
+--- a/internal/app/client.go
++++ b/internal/app/client.go
+@@ -51,6 +51,7 @@ type Result struct {
+ // Client forwards deliveries to the configured upstream.
+ type Client struct {
+ 	upstream config.UpstreamConfig
++	retry    config.RetryConfig
+ 	sender   Sender
+ 	clock    Clock
+ }
+@@ -60,19 +61,43 @@ func NewClient(cfg config.Config, sender Sender, clock Clock) *Client {
+ 	if clock == nil {
+ 		clock = SystemClock
+ 	}
+-	return &Client{upstream: cfg.Upstream, sender: sender, clock: clock}
++	return &Client{upstream: cfg.Upstream, retry: cfg.Retry, sender: sender, clock: clock}
+ }
+ 
+ // Deliver sends d upstream. Each attempt is bounded by upstream.timeout_ms.
+-// It returns an error wrapping ErrUpstream or ErrRejected on failure.
++// Upstream failures (transport errors, 5xx) are retried up to
++// retry.max_attempts attempts in total, waiting retry.backoff_ms before the
++// second attempt and doubling the wait each time. It returns an error wrapping
++// ErrUpstream or ErrRejected on failure, or the context's error if ctx ends
++// between attempts.
+ func (c *Client) Deliver(ctx context.Context, d Delivery) (Result, error) {
+ 	start := c.clock.Now()
+ 	res := Result{ID: d.ID}
+-	status, err := c.attempt(ctx, d)
+-	res.Attempts = 1
+-	res.Status = status
++	maxAttempts := c.retry.MaxAttempts
++	if maxAttempts < 1 {
++		maxAttempts = 1
++	}
++	var err error
++	for n := 1; ; n++ {
++		status, sendErr := c.attempt(ctx, d)
++		res.Attempts = n
++		res.Status = status
++		err = classify(status, sendErr)
++		if err == nil || !errors.Is(err, ErrUpstream) || n >= maxAttempts {
++			break
++		}
++		if ctxErr := ctx.Err(); ctxErr != nil {
++			err = ctxErr
++			break
++		}
++		c.clock.Sleep(time.Duration(c.retry.BackoffMS) * time.Millisecond << (n - 1))
++		if ctxErr := ctx.Err(); ctxErr != nil {
++			err = ctxErr
++			break
++		}
++	}
+ 	res.Duration = c.clock.Now().Sub(start)
+-	return res, classify(status, err)
++	return res, err
+ }
+ 
+ func (c *Client) attempt(ctx context.Context, d Delivery) (int, error) {
+diff --git a/internal/config/config.go b/internal/config/config.go
+index d75861a..ab613fe 100644
+--- a/internal/config/config.go
++++ b/internal/config/config.go
+@@ -10,6 +10,7 @@ type Config struct {
+ 	Log        LogConfig      `json:"log"`
+ 	Upstream   UpstreamConfig `json:"upstream"`
+ 	Queue      QueueConfig    `json:"queue"`
++	Retry      RetryConfig    `json:"retry"`
+ }
+ 
+ // LogConfig controls the logger.
+@@ -31,6 +32,12 @@ type QueueConfig struct {
+ 	Workers int `json:"workers"`
+ }
+ 
++// RetryConfig controls how failed deliveries are retried.
++type RetryConfig struct {
++	MaxAttempts int `json:"max_attempts"` // total attempts, including the first
++	BackoffMS   int `json:"backoff_ms"`   // wait before the second attempt; doubles each retry
++}
++
+ // Default returns the configuration used when nothing overrides it.
+ func Default() Config {
+ 	return Config{
+@@ -42,5 +49,6 @@ func Default() Config {
+ 			Headers:   map[string]string{},
+ 		},
+ 		Queue: QueueConfig{Size: 1000, Workers: 4},
++		Retry: RetryConfig{MaxAttempts: 3, BackoffMS: 200},
+ 	}
+ }
+diff --git a/internal/config/env.go b/internal/config/env.go
+index 0b1840c..a9b89cf 100644
+--- a/internal/config/env.go
++++ b/internal/config/env.go
+@@ -39,6 +39,8 @@ var envOverrides = []envOverride{
+ 	{"TOOL_UPSTREAM_TIMEOUT_MS", intField(func(c *Config) *int { return &c.Upstream.TimeoutMS })},
+ 	{"TOOL_QUEUE_SIZE", intField(func(c *Config) *int { return &c.Queue.Size })},
+ 	{"TOOL_QUEUE_WORKERS", intField(func(c *Config) *int { return &c.Queue.Workers })},
++	{"TOOL_RETRY_MAX_ATTEMPTS", intField(func(c *Config) *int { return &c.Retry.MaxAttempts })},
++	{"TOOL_RETRY_BACKOFF_MS", intField(func(c *Config) *int { return &c.Retry.BackoffMS })},
+ }
+ 
+ // EnvVars lists the environment variables Load understands, sorted.
+diff --git a/internal/config/validate.go b/internal/config/validate.go
+index ee19e63..a9f1bfc 100644
+--- a/internal/config/validate.go
++++ b/internal/config/validate.go
+@@ -83,6 +83,8 @@ func Validate(cfg Config) error {
+ 	}
+ 	c.intRange("queue.size", cfg.Queue.Size, 1, 100000)
+ 	c.intRange("queue.workers", cfg.Queue.Workers, 1, 64)
++	c.intRange("retry.max_attempts", cfg.Retry.MaxAttempts, 1, 10)
++	c.intRange("retry.backoff_ms", cfg.Retry.BackoffMS, 0, 60000)
+ 	if len(c.problems) > 0 {
+ 		return &ValidationError{Problems: c.problems}
+ 	}
+diff --git a/internal/render/render.go b/internal/render/render.go
+index 3b33dcb..57f46b9 100644
+--- a/internal/render/render.go
++++ b/internal/render/render.go
+@@ -28,6 +28,8 @@ func Config(w io.Writer, cfg config.Config) error {
+ 	}
+ 	lines = append(lines, headerLines(cfg.Upstream.Headers)...)
+ 	lines = append(lines,
++		line("retry.max_attempts", cfg.Retry.MaxAttempts),
++		line("retry.backoff_ms", cfg.Retry.BackoffMS),
+ 		line("queue.size", cfg.Queue.Size),
+ 		line("queue.workers", cfg.Queue.Workers),
+ 	)
+diff --git a/internal/render/render_test.go b/internal/render/render_test.go
+index 9720627..441d8d4 100644
+--- a/internal/render/render_test.go
++++ b/internal/render/render_test.go
+@@ -17,6 +17,8 @@ log.level = info
+ log.format = text
+ upstream.url = http://localhost:9000/hooks
+ upstream.timeout_ms = 5000
++retry.max_attempts = 3
++retry.backoff_ms = 200
+ queue.size = 1000
+ queue.workers = 4
+ `
+@@ -40,8 +42,23 @@ func TestHeadersSortedAndRedacted(t *testing.T) {
+ 		"upstream.headers.Authorization = <redacted>\n" +
+ 		"upstream.headers.X-Team = core\n" +
+ 		"upstream.headers.x-api-key = <redacted>\n" +
++		"retry.max_attempts = 3\n" +
++		"retry.backoff_ms = 200\n" +
+ 		"queue.size = 1000\n"
+ 	if !strings.Contains(out, want) {
+ 		t.Fatalf("got:\n%s", out)
+ 	}
+ }
++
++func TestRetryValues(t *testing.T) {
++	cfg := config.Default()
++	cfg.Retry = config.RetryConfig{MaxAttempts: 7, BackoffMS: 0}
++	var sb strings.Builder
++	if err := Config(&sb, cfg); err != nil {
++		t.Fatal(err)
++	}
++	want := "upstream.timeout_ms = 5000\nretry.max_attempts = 7\nretry.backoff_ms = 0\nqueue.size = 1000\n"
++	if !strings.Contains(sb.String(), want) {
++		t.Fatalf("got:\n%s", sb.String())
++	}
++}

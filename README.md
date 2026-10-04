@@ -53,7 +53,8 @@ EXO_DEBUG=1 pi -e /path/to/exocortex/packages/pi-adapter
 ## Eval
 
 ```sh
-npm run eval -- --model <provider>/<model-id> --repeat 3        # baseline: every module off
+npm run eval -- --model <provider>/<model-id> --repeat 3        # baseline: every module off, all tasks
+npm run eval -- --model <provider>/<model-id> --tags hard       # only the hard tier (or --tags smoke)
 npm run eval -- --config all-off,supervisor --tasks 'py-*'      # A/B configs on a subset
 npm run eval -- --validate                                      # fixture QA: pristine fails, solution passes
 ```
@@ -66,9 +67,10 @@ npm run eval -- --validate                                      # fixture QA: pr
 To add a task, create `tasks/<id>/` with:
 - `task.json`: id, language, prompt, check command, limits;
 - `repo/`: the starting code;
-- `solution.patch`: a reference fix.
+- `solution.patch`: a reference fix;
+- optionally `hidden/`: acceptance tests the agent never sees.
 
-Then run `--validate`.
+Then run `--validate`. See [`docs/EVAL_TASKS.md`](docs/EVAL_TASKS.md) for the tiers and authoring rules.
 
 ## Load test
 
