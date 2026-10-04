@@ -1,4 +1,5 @@
 import type {
+	CompactionRequest,
 	ExoModule,
 	ModuleContext,
 	ModuleFactory,
@@ -72,7 +73,7 @@ afterEach(() => {
 function setup(
 	modules: Record<string, ModuleFactory>,
 	enabled: Record<string, Record<string, unknown>>,
-	options: { hasUI?: boolean; budgetsMs?: { rewrite?: number; settle?: number } } = {},
+	options: { hasUI?: boolean; budgetsMs?: { rewrite?: number; settle?: number; compact?: number } } = {},
 ) {
 	harness = createAdapterHarness({ modules: enabled }, options);
 	const logs: string[] = [];
@@ -423,5 +424,99 @@ describe("tool-result rewrites", () => {
 		expect(await h.pi.emit("tool_result", bashResult("x"))).toBeUndefined();
 		expect(Date.now() - started).toBeLessThan(2_000);
 		expect(h.errors.map((e) => e.where)).toEqual(["throws.rewriteToolResult"]);
+	});
+});
+
+function compactEvent(signal = new AbortController().signal) {
+	return {
+		reason: "threshold",
+		customInstructions: "focus",
+		willRetry: false,
+		signal,
+		branchEntries: [],
+		preparation: {
+			firstKeptEntryId: "entry-9",
+			tokensBefore: 150_000,
+			isSplitTurn: true,
+			previousSummary: "old summary",
+			messagesToSummarize: [
+				{ role: "user", content: "implement forth", timestamp: 1 },
+				{ role: "assistant", content: [{ type: "text", text: "on it" }], timestamp: 2 },
+			],
+			turnPrefixMessages: [{ role: "user", content: [{ type: "text", text: "and tests" }], timestamp: 3 }],
+			fileOps: { read: new Set(["a.rs", "b.rs"]), written: new Set(["b.rs"]), edited: new Set(["c.rs"]) },
+			settings: { enabled: true, reserveTokens: 1, keepRecentTokens: 1 },
+		},
+	};
+}
+
+describe("compaction hosting", () => {
+	it("passes a harness-agnostic request and returns the first module summary", async () => {
+		const requests: CompactionRequest[] = [];
+		const { h } = setup(
+			{
+				none: () => ({ id: "none", compact: async () => undefined }),
+				writer: () => ({
+					id: "writer",
+					compact: async (request) => {
+						requests.push(request);
+						return "the summary";
+					},
+				}),
+				later: () => ({ id: "later", compact: async () => "never used" }),
+			},
+			{ none: { enabled: true }, writer: { enabled: true }, later: { enabled: true } },
+		);
+		await h.pi.emit("session_start");
+		const result = await h.pi.emit("session_before_compact", compactEvent());
+		expect(result).toEqual({
+			compaction: {
+				summary: "the summary",
+				firstKeptEntryId: "entry-9",
+				tokensBefore: 150_000,
+				details: { exo: { module: "writer" } },
+			},
+		});
+		const [request] = requests;
+		expect(request).toMatchObject({
+			reason: "threshold",
+			userMessages: ["implement forth", "and tests"],
+			previousSummary: "old summary",
+			filesRead: ["a.rs"],
+			filesModified: ["b.rs", "c.rs"],
+			tokensBefore: 150_000,
+			customInstructions: "focus",
+		});
+		expect(request?.conversation).toContain("[User]: implement forth");
+		expect(request?.conversation).toContain("[Assistant]: on it");
+		expect(request?.conversation).toContain("[User]: and tests");
+	});
+
+	it("falls back to pi's compaction on failure, on budget and on pi's abort", async () => {
+		const { h } = setup(
+			{
+				throws: () => ({
+					id: "throws",
+					compact: async () => {
+						throw new Error("bad");
+					},
+				}),
+				hangs: () => ({ id: "hangs", compact: () => new Promise<string | undefined>(() => {}) }),
+			},
+			{ throws: { enabled: true }, hangs: { enabled: true } },
+			{ budgetsMs: { compact: 50 } },
+		);
+		await h.pi.emit("session_start");
+		expect(await h.pi.emit("session_before_compact", compactEvent())).toBeUndefined();
+		expect(h.errors.map((e) => e.where)).toEqual(["throws.compact"]);
+		const aborted = new AbortController();
+		aborted.abort();
+		expect(await h.pi.emit("session_before_compact", compactEvent(aborted.signal))).toBeUndefined();
+	});
+
+	it("does nothing without compacting modules", async () => {
+		const { h: empty } = setup({ a: probeModule("a", newProbe()) }, { a: { enabled: true } });
+		await empty.pi.emit("session_start");
+		expect(await empty.pi.emit("session_before_compact", compactEvent())).toBeUndefined();
 	});
 });

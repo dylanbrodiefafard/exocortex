@@ -46,6 +46,7 @@ export {
 } from "./modules/output.ts";
 export { loadPrompt, type PromptTemplate, renderPrompt } from "./modules/prompts.ts";
 export type {
+	CompactionRequest,
 	ExoModule,
 	ModuleContext,
 	ModuleFactory,

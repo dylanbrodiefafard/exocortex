@@ -1,8 +1,11 @@
-import type {
-	AgentBeforeSettleEvent,
-	ExtensionAPI,
-	ExtensionContext,
-	ToolResultEvent,
+import {
+	type AgentBeforeSettleEvent,
+	convertToLlm,
+	type ExtensionAPI,
+	type ExtensionContext,
+	type SessionBeforeCompactEvent,
+	serializeConversation,
+	type ToolResultEvent,
 } from "@earendil-works/pi-coding-agent";
 import {
 	type ExoModule,
@@ -13,9 +16,9 @@ import {
 	type SettleAction,
 	type ToolOutcome,
 	type ToolResultDraft,
-	type ToolRewrite,
 	toJsonValue,
 } from "@exocortex/core";
+import { COMPACTION_ID, createCompaction } from "@exocortex/mod-compaction";
 import { createSupervisor, SUPERVISOR_ID } from "@exocortex/mod-supervisor";
 import { createTriage, TRIAGE_ID } from "@exocortex/mod-triage";
 import { createTrimmer, TRIMMER_ID } from "@exocortex/mod-trimmer";
@@ -30,12 +33,15 @@ const MODULES: Readonly<Record<string, ModuleFactory>> = {
 	[TRIMMER_ID]: createTrimmer,
 	[TRIAGE_ID]: createTriage,
 	[SUPERVISOR_ID]: createSupervisor,
+	[COMPACTION_ID]: createCompaction,
 };
 
 /** Hard cap on how long settle hooks may hold pi before it settles (checks + verdict). */
 const SETTLE_BUDGET_MS = 5 * 60_000;
 /** Hard cap on how long tool-result rewrites may hold the agent loop, across all modules. */
 const REWRITE_BUDGET_MS = 20_000;
+/** Hard cap on a module-written compaction summary; pi's default compaction runs after it. */
+const COMPACT_BUDGET_MS = 120_000;
 const STATUS_KEY = "exo";
 
 export interface ModuleHostOptions {
@@ -45,7 +51,7 @@ export interface ModuleHostOptions {
 	/** Module factories by config id; defaults to every module Exocortex ships. */
 	readonly modules?: Readonly<Record<string, ModuleFactory>>;
 	/** Overrides the hold-the-loop budgets (tests). */
-	readonly budgetsMs?: { readonly rewrite?: number; readonly settle?: number };
+	readonly budgetsMs?: { readonly rewrite?: number; readonly settle?: number; readonly compact?: number };
 }
 
 /**
@@ -61,6 +67,7 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 	const factories = options.modules ?? MODULES;
 	const rewriteBudgetMs = options.budgetsMs?.rewrite ?? REWRITE_BUDGET_MS;
 	const settleBudgetMs = options.budgetsMs?.settle ?? SETTLE_BUDGET_MS;
+	const compactBudgetMs = options.budgetsMs?.compact ?? COMPACT_BUDGET_MS;
 	let modules: ExoModule[] = [];
 	let cwd = process.cwd();
 
@@ -145,6 +152,15 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 		}
 	});
 
+	pi.on("session_before_compact", async (event) => {
+		try {
+			return await compact(event);
+		} catch (error) {
+			onError("modules.session_before_compact", error);
+			return undefined;
+		}
+	});
+
 	pi.on("session_shutdown", () => {
 		modules = [];
 		return undefined;
@@ -196,6 +212,55 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 			});
 		}
 		return { text: current, notes };
+	}
+
+	/**
+	 * Offers compaction to modules (D-017): the first summary wins and is traced as
+	 * `exo.compaction`; otherwise (or on any failure) pi compacts as usual.
+	 */
+	async function compact(event: SessionBeforeCompactEvent) {
+		const compactors = modules.filter((m) => m.compact);
+		if (compactors.length === 0) return undefined;
+		const { preparation } = event;
+		const span = [...preparation.messagesToSummarize, ...preparation.turnPrefixMessages];
+		const modified = new Set([...preparation.fileOps.written, ...preparation.fileOps.edited]);
+		const request = {
+			reason: event.reason,
+			conversation: serializeConversation(convertToLlm(span)),
+			userMessages: span.filter((m) => m.role === "user").map((m) => textOf(m.content)),
+			previousSummary: preparation.previousSummary ?? null,
+			filesRead: [...preparation.fileOps.read].filter((f) => !modified.has(f)),
+			filesModified: [...modified],
+			tokensBefore: preparation.tokensBefore,
+			customInstructions: event.customInstructions ?? null,
+		};
+		const controller = new AbortController();
+		const abort = () => controller.abort();
+		event.signal.addEventListener("abort", abort, { once: true });
+		const budget = setTimeout(abort, compactBudgetMs);
+		try {
+			for (const module of compactors) {
+				const summary = await untilAborted(module.compact?.(request, controller.signal), controller.signal).catch(
+					(error: unknown) => {
+						onError(`${module.id}.compact`, error);
+						return undefined;
+					},
+				);
+				if (!summary) continue;
+				return {
+					compaction: {
+						summary,
+						firstKeptEntryId: preparation.firstKeptEntryId,
+						tokensBefore: preparation.tokensBefore,
+						details: { exo: { module: module.id } },
+					},
+				};
+			}
+			return undefined;
+		} finally {
+			clearTimeout(budget);
+			event.signal.removeEventListener("abort", abort);
+		}
 	}
 
 	async function settle(event: AgentBeforeSettleEvent, ctx: ExtensionContext) {
@@ -321,10 +386,7 @@ function fullOutputPathOf(details: unknown, structured: unknown): string | null 
 }
 
 /** Resolves with `promise`, or with undefined once `signal` aborts (a module that ignores its signal cannot hold pi). */
-function untilAborted(
-	promise: Promise<ToolRewrite | undefined> | undefined,
-	signal: AbortSignal,
-): Promise<ToolRewrite | undefined> {
+function untilAborted<T>(promise: Promise<T | undefined> | undefined, signal: AbortSignal): Promise<T | undefined> {
 	if (!promise) return Promise.resolve(undefined);
 	return new Promise((resolve, reject) => {
 		const onAbort = () => resolve(undefined);
