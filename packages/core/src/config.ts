@@ -5,7 +5,69 @@ import { type ParseError, parse as parseJsonc, printParseErrorCode } from "jsonc
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 
-const ModuleConfig = Type.Object({ enabled: Type.Boolean({ default: false }) }, { additionalProperties: true });
+const ModuleConfig = Type.Object(
+	{
+		enabled: Type.Boolean({ default: false }),
+		/** Sidecar calls this module may start per user turn (brief §5.2). Default 4. */
+		maxCallsPerTurn: Type.Optional(Type.Integer({ minimum: 0 })),
+		/** Upper bound on `max_tokens` for each of this module's sidecar calls. Default 1024. */
+		maxTokensPerCall: Type.Optional(Type.Integer({ minimum: 1 })),
+	},
+	{ additionalProperties: true },
+);
+
+const FeatureFlags = Type.Object(
+	{
+		prefixCaching: Type.Optional(Type.Boolean()),
+		cachedTokens: Type.Optional(Type.Boolean()),
+		jsonSchema: Type.Optional(Type.Boolean()),
+		thinkingToggle: Type.Optional(Type.Boolean()),
+		priority: Type.Optional(Type.Boolean()),
+		logprobs: Type.Optional(Type.Boolean()),
+		n: Type.Optional(Type.Boolean()),
+	},
+	{ additionalProperties: false },
+);
+
+/** Where sidecar calls go (docs/INFERENCE_ENGINES.md, D-032). Unset fields fall back to the harness's main model. */
+const EngineConfig = Type.Object(
+	{
+		/** OpenAI-compatible base URL including `/v1`. */
+		baseUrl: Type.Optional(Type.String({ minLength: 1 })),
+		model: Type.Optional(Type.String({ minLength: 1 })),
+		/** Literal key, or `$NAME` / `${NAME}` to read an environment variable. */
+		apiKey: Type.Optional(Type.String()),
+		profile: Type.Union(
+			[
+				Type.Literal("generic"),
+				Type.Literal("vllm"),
+				Type.Literal("sglang"),
+				Type.Literal("llamacpp"),
+				Type.Literal("ninfer"),
+			],
+			{ default: "generic" },
+		),
+		/** Per-feature overrides of the profile (F1–F7). */
+		features: Type.Optional(FeatureFlags),
+	},
+	{ default: {}, additionalProperties: false },
+);
+
+const PoolConfig = Type.Object(
+	{
+		/** Requests the engine serves at once (its decode slots). */
+		maxConcurrent: Type.Integer({ minimum: 1, default: 6 }),
+		/** Slots sidecars never use, so the main agent is never queued behind them. */
+		reservedForMain: Type.Integer({ minimum: 0, default: 2 }),
+		/** Default end-to-end deadline (queue + generation) per sidecar call. */
+		timeoutMs: Type.Integer({ minimum: 1, default: 20_000 }),
+		/** Sidecar tokens (prompt + output) allowed per session; 0 = unlimited. */
+		sessionTokenBudget: Type.Integer({ minimum: 0, default: 0 }),
+		/** Hold `background` calls until the main agent is idle. */
+		backgroundWhenIdleOnly: Type.Boolean({ default: true }),
+	},
+	{ default: {}, additionalProperties: false },
+);
 
 const ExoConfigSchema = Type.Object(
 	{
@@ -19,6 +81,8 @@ const ExoConfigSchema = Type.Object(
 			},
 			{ default: {}, additionalProperties: false },
 		),
+		engine: EngineConfig,
+		pool: PoolConfig,
 		/** Per-module settings keyed by module id. Modules are off unless enabled here (D-001). */
 		modules: Type.Record(Type.String(), ModuleConfig, { default: {} }),
 	},
@@ -90,6 +154,9 @@ export function loadConfig(options: LoadConfigOptions): LoadedConfig {
 		...withDefaults,
 		trace: { ...withDefaults.trace, dbPath: expandPath(withDefaults.trace.dbPath, home) },
 	};
+	if (config.pool.reservedForMain >= config.pool.maxConcurrent) {
+		problems.push("config /pool: reservedForMain must be less than maxConcurrent (sidecars need at least one slot)");
+	}
 	return { config: problems.length > 0 ? { ...config, enabled: false } : config, sources, problems };
 }
 

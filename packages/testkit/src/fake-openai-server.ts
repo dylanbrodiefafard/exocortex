@@ -2,9 +2,16 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from "node:net";
 
 /** One scripted assistant reply. Replies are consumed in order, one per chat-completions request. */
-export type ScriptedReply =
+export type ScriptedReply = (
 	| { readonly kind: "text"; readonly text: string }
-	| { readonly kind: "tool_calls"; readonly calls: readonly ScriptedToolCall[] };
+	| { readonly kind: "tool_calls"; readonly calls: readonly ScriptedToolCall[] }
+	| { readonly kind: "error"; readonly status: number; readonly message: string }
+) & {
+	/** Delay before responding, to simulate generation time. */
+	readonly delayMs?: number;
+	/** Reported as usage.prompt_tokens_details.cached_tokens. */
+	readonly cachedTokens?: number;
+};
 
 export interface ScriptedToolCall {
 	readonly name: string;
@@ -16,6 +23,10 @@ export interface FakeOpenAIServer {
 	readonly baseUrl: string;
 	/** Parsed JSON bodies of every chat-completions request received, in arrival order. */
 	readonly requests: readonly unknown[];
+	/** Chat-completions requests currently being answered. */
+	readonly inFlight: number;
+	/** Highest {@link inFlight} observed. */
+	readonly maxInFlight: number;
 	close(): Promise<void>;
 }
 
@@ -23,6 +34,8 @@ export interface FakeOpenAIServerOptions {
 	readonly model?: string;
 	/** Reply used once the script is exhausted. */
 	readonly fallback?: ScriptedReply;
+	/** Computes replies dynamically; takes precedence over the script. */
+	readonly respond?: (body: unknown, index: number) => ScriptedReply;
 }
 
 const DEFAULT_MODEL = "fake-model";
@@ -40,6 +53,8 @@ export async function startFakeOpenAIServer(
 	const fallback = options.fallback ?? { kind: "text", text: "(script exhausted)" };
 	const requests: unknown[] = [];
 	let next = 0;
+	let inFlight = 0;
+	let maxInFlight = 0;
 
 	const server = createServer((req, res) => {
 		handle(req, res).catch((error: unknown) => {
@@ -60,13 +75,25 @@ export async function startFakeOpenAIServer(
 		}
 		const body: unknown = JSON.parse(await readBody(req));
 		requests.push(body);
-		const reply = script[next] ?? fallback;
+		const index = next;
 		next += 1;
+		const reply = options.respond?.(body, index) ?? script[index] ?? fallback;
 		const id = `chatcmpl-fake-${next}`;
-		if (isStreaming(body)) {
-			streamReply(res, id, model, reply);
-		} else {
-			sendJson(res, completionObject(id, model, reply));
+		inFlight += 1;
+		maxInFlight = Math.max(maxInFlight, inFlight);
+		try {
+			if (reply.delayMs) await delay(reply.delayMs, res);
+			if (res.destroyed) return;
+			if (reply.kind === "error") {
+				res.writeHead(reply.status, { "content-type": "application/json" });
+				res.end(JSON.stringify({ error: { message: reply.message } }));
+			} else if (isStreaming(body)) {
+				streamReply(res, id, model, reply);
+			} else {
+				sendJson(res, completionObject(id, model, reply));
+			}
+		} finally {
+			inFlight -= 1;
 		}
 	}
 
@@ -75,12 +102,29 @@ export async function startFakeOpenAIServer(
 	return {
 		baseUrl: `http://127.0.0.1:${port}/v1`,
 		requests,
+		get inFlight() {
+			return inFlight;
+		},
+		get maxInFlight() {
+			return maxInFlight;
+		},
 		close: () => closeServer(server),
 	};
 }
 
 function isStreaming(body: unknown): boolean {
 	return typeof body === "object" && body !== null && (body as { stream?: unknown }).stream === true;
+}
+
+/** Waits `ms`, ending early if the client disconnects (as a real engine cancels on disconnect). */
+function delay(ms: number, res: ServerResponse): Promise<void> {
+	return new Promise((resolve) => {
+		const timer = setTimeout(resolve, ms);
+		res.once("close", () => {
+			clearTimeout(timer);
+			resolve();
+		});
+	});
 }
 
 function readBody(req: IncomingMessage): Promise<string> {
@@ -97,7 +141,14 @@ function sendJson(res: ServerResponse, value: unknown): void {
 	res.end(JSON.stringify(value));
 }
 
-const USAGE = { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 };
+function usageOf(reply: ScriptedReply) {
+	return {
+		prompt_tokens: 10,
+		completion_tokens: 5,
+		total_tokens: 15,
+		...(reply.cachedTokens === undefined ? {} : { prompt_tokens_details: { cached_tokens: reply.cachedTokens } }),
+	};
+}
 
 function toolCallsPayload(calls: readonly ScriptedToolCall[]) {
 	return calls.map((call, index) => ({
@@ -108,7 +159,9 @@ function toolCallsPayload(calls: readonly ScriptedToolCall[]) {
 	}));
 }
 
-function completionObject(id: string, model: string, reply: ScriptedReply) {
+type ContentReply = Exclude<ScriptedReply, { kind: "error" }>;
+
+function completionObject(id: string, model: string, reply: ContentReply) {
 	const message =
 		reply.kind === "text"
 			? { role: "assistant", content: reply.text }
@@ -119,11 +172,11 @@ function completionObject(id: string, model: string, reply: ScriptedReply) {
 		created: 0,
 		model,
 		choices: [{ index: 0, message, finish_reason: reply.kind === "text" ? "stop" : "tool_calls" }],
-		usage: USAGE,
+		usage: usageOf(reply),
 	};
 }
 
-function streamReply(res: ServerResponse, id: string, model: string, reply: ScriptedReply): void {
+function streamReply(res: ServerResponse, id: string, model: string, reply: ContentReply): void {
 	res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
 	const chunk = (delta: object, finishReason: string | null, usage?: object) => {
 		const payload = {
@@ -144,7 +197,7 @@ function streamReply(res: ServerResponse, id: string, model: string, reply: Scri
 		chunk({ tool_calls: toolCallsPayload(reply.calls) }, null);
 		chunk({}, "tool_calls");
 	}
-	chunk({}, null, USAGE);
+	chunk({}, null, usageOf(reply));
 	res.write("data: [DONE]\n\n");
 	res.end();
 }

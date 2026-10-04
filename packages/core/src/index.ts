@@ -1,6 +1,38 @@
 export { type ConfigSource, type ExoConfig, type LoadConfigOptions, type LoadedConfig, loadConfig } from "./config.ts";
 export { createDebugLog, type DebugFields, type DebugLog, type DebugLogOptions, type DebugValue } from "./debug-log.ts";
 export { type ChatRequestFingerprint, canonicalJson, fingerprintChatRequest, sharedPrefix } from "./fingerprint.ts";
+export {
+	type ChatMessage,
+	type ChatRequest,
+	type ChatResponse,
+	type ChatUsage,
+	createOpenAIClient,
+	type InferenceClient,
+	InferenceError,
+} from "./inference/client.ts";
+export {
+	ENGINE_PROFILES,
+	type EngineFallback,
+	type EngineFeatures,
+	type EngineProfile,
+	type EngineTarget,
+	resolveEngine,
+} from "./inference/engine.ts";
+export {
+	createSidecarPool,
+	type ModuleLimits,
+	moduleLimitsFrom,
+	type PoolStats,
+	type SidecarCall,
+	type SidecarCallRecord,
+	type SidecarOutcome,
+	type SidecarPool,
+	type SidecarPoolOptions,
+	type SidecarPriority,
+	type SidecarResult,
+	type SidecarUsage,
+} from "./inference/pool.ts";
+export { completeStructured, extractJson, StructuredOutputError } from "./inference/structured.ts";
 export { type ToJsonOptions, toJsonValue } from "./json.ts";
 export {
 	type JsonValue,
