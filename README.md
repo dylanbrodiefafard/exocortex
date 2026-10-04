@@ -2,7 +2,7 @@
 
 An exocortex for small models. Exocortex makes a weak local LLM behave like a stronger coding agent by making cheap, parallel sidecar calls around it: supervision, context hygiene, error triage, reasoning-only parallel attempts, and learned memory. None of this adds cognitive load to the main model.
 
-It runs as a [pi](https://github.com/badlogic/pi-mono) extension and targets a local Qwen 27B served by [ninfer](https://github.com/dylanbrodiefafard/ninfer).
+It runs as a [pi](https://github.com/badlogic/pi-mono) extension and targets a local Qwen 27B behind any OpenAI-compatible engine (primarily [ninfer](https://github.com/dylanbrodiefafard/ninfer); vLLM, SGLang and llama.cpp also work).
 
 **Status:** Phase 0 (scaffold and verify). Today the extension only traces pi events.
 
@@ -13,7 +13,7 @@ It runs as a [pi](https://github.com/badlogic/pi-mono) extension and targets a l
 | [`docs/BRIEF.md`](docs/BRIEF.md) | Original project brief |
 | [`docs/DECISIONS.md`](docs/DECISIONS.md) | Every design decision; it overrides the brief where they differ |
 | [`docs/PI_API_NOTES.md`](docs/PI_API_NOTES.md) | Pi's extension API as verified from source |
-| [`docs/NINFER_REQUIREMENTS.md`](docs/NINFER_REQUIREMENTS.md) | What the inference server needs to provide |
+| [`docs/INFERENCE_ENGINES.md`](docs/INFERENCE_ENGINES.md) | Inference-engine features Exocortex uses, with fallbacks and engine support |
 
 ## Develop
 
