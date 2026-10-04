@@ -1,0 +1,257 @@
+diff --git a/cron.go b/cron.go
+index 7fd9b42..495423d 100644
+--- a/cron.go
++++ b/cron.go
+@@ -10,48 +10,84 @@ import (
+ 
+ // Schedule is a parsed cron expression.
+ type Schedule struct {
+-	expr   string
+-	minute uint64 // bit i set: minute i matches
+-	hour   uint64
+-	dom    uint64
+-	month  uint64
+-	dow    uint64
++	expr    string
++	minute  uint64 // bit i set: minute i matches
++	hour    uint64
++	dom     uint64
++	month   uint64
++	dow     uint64
++	domStar bool
++	dowStar bool
+ }
+ 
+ type field struct {
+ 	name     string
+ 	min, max int
++	names    map[string]int
++}
++
++var monthNames = map[string]int{
++	"JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
++	"JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12,
++}
++
++var dayNames = map[string]int{
++	"SUN": 0, "MON": 1, "TUE": 2, "WED": 3, "THU": 4, "FRI": 5, "SAT": 6,
+ }
+ 
+ var fields = [5]field{
+-	{"minute", 0, 59},
+-	{"hour", 0, 23},
+-	{"day-of-month", 1, 31},
+-	{"month", 1, 12},
+-	{"day-of-week", 0, 6},
++	{"minute", 0, 59, nil},
++	{"hour", 0, 23, nil},
++	{"day-of-month", 1, 31, nil},
++	{"month", 1, 12, monthNames},
++	{"day-of-week", 0, 7, dayNames},
++}
++
++var macros = map[string]string{
++	"@yearly":   "0 0 1 1 *",
++	"@annually": "0 0 1 1 *",
++	"@monthly":  "0 0 1 * *",
++	"@weekly":   "0 0 * * 0",
++	"@daily":    "0 0 * * *",
++	"@midnight": "0 0 * * *",
++	"@hourly":   "0 * * * *",
+ }
+ 
+ // Parse parses a cron expression.
+ func Parse(expr string) (*Schedule, error) {
+-	parts := strings.Fields(expr)
++	text := strings.TrimSpace(expr)
++	if strings.HasPrefix(text, "@") {
++		m, ok := macros[text]
++		if !ok {
++			return nil, &ParseError{Expr: expr, Msg: "unknown macro " + strconv.Quote(text)}
++		}
++		text = m
++	}
++	parts := strings.Fields(text)
+ 	if len(parts) != 5 {
+-		return nil, &ParseError{Expr: expr, Field: "", Msg: "expected 5 fields, got " + strconv.Itoa(len(parts))}
++		return nil, &ParseError{Expr: expr, Msg: "expected 5 fields, got " + strconv.Itoa(len(parts))}
+ 	}
+ 	var sets [5]uint64
+ 	for i, p := range parts {
+-		set, err := parseField(p, fields[i])
+-		if err != nil {
+-			return nil, err
++		set, msg := parseField(p, fields[i])
++		if msg != "" {
++			return nil, &ParseError{Expr: expr, Field: fields[i].name, Msg: msg}
+ 		}
+ 		sets[i] = set
+ 	}
++	dow := sets[4]
++	if dow&(1<<7) != 0 {
++		dow = (dow &^ (1 << 7)) | 1
++	}
+ 	return &Schedule{
+-		expr:   expr,
+-		minute: sets[0],
+-		hour:   sets[1],
+-		dom:    sets[2],
+-		month:  sets[3],
+-		dow:    sets[4],
++		expr:    expr,
++		minute:  sets[0],
++		hour:    sets[1],
++		dom:     sets[2],
++		month:   sets[3],
++		dow:     dow,
++		domStar: parts[2] == "*",
++		dowStar: parts[4] == "*",
+ 	}, nil
+ }
+ 
+@@ -64,53 +100,126 @@ func MustParse(expr string) *Schedule {
+ 	return s
+ }
+ 
+-func parseField(text string, f field) (uint64, error) {
++func isDigits(s string) bool {
++	for _, c := range s {
++		if c < '0' || c > '9' {
++			return false
++		}
++	}
++	return s != ""
++}
++
++func parseValue(text string, f field) (int, string) {
++	if text == "" {
++		return 0, "missing value"
++	}
++	if f.names != nil {
++		if v, ok := f.names[strings.ToUpper(text)]; ok {
++			return v, ""
++		}
++	}
++	if !isDigits(text) {
++		return 0, "bad value " + strconv.Quote(text)
++	}
++	v, err := strconv.Atoi(text)
++	if err != nil || v < f.min || v > f.max {
++		return 0, "value " + strconv.Quote(text) + " out of range"
++	}
++	return v, ""
++}
++
++func parseField(text string, f field) (uint64, string) {
+ 	var set uint64
+ 	for _, item := range strings.Split(text, ",") {
+-		lo, hi := f.min, f.max
+-		if item != "*" {
+-			a, b, isRange := strings.Cut(item, "-")
+-			var err error
+-			lo, err = strconv.Atoi(a)
+-			if err != nil {
+-				return 0, &ParseError{Field: f.name, Msg: "bad value " + strconv.Quote(a)}
++		if item == "" {
++			return 0, "empty item"
++		}
++		base, stepText, hasStep := strings.Cut(item, "/")
++		step := 1
++		if hasStep {
++			if !isDigits(stepText) {
++				return 0, "bad step " + strconv.Quote(stepText)
++			}
++			n, err := strconv.Atoi(stepText)
++			if err != nil || n < 1 {
++				return 0, "bad step " + strconv.Quote(stepText)
++			}
++			step = n
++		}
++		var lo, hi int
++		if base == "*" {
++			lo, hi = f.min, f.max
++		} else {
++			a, b, isRange := strings.Cut(base, "-")
++			var msg string
++			if lo, msg = parseValue(a, f); msg != "" {
++				return 0, msg
+ 			}
+ 			hi = lo
+ 			if isRange {
+-				hi, err = strconv.Atoi(b)
+-				if err != nil {
+-					return 0, &ParseError{Field: f.name, Msg: "bad value " + strconv.Quote(b)}
++				if hi, msg = parseValue(b, f); msg != "" {
++					return 0, msg
++				}
++				if lo > hi {
++					return 0, "range " + strconv.Quote(base) + " is backwards"
+ 				}
++			} else if hasStep {
++				hi = f.max
+ 			}
+ 		}
+-		for v := lo; v <= hi; v++ {
++		for v := lo; v <= hi; v += step {
+ 			set |= 1 << uint(v)
+ 		}
+ 	}
+-	return set, nil
++	return set, ""
+ }
+ 
+ // String returns the expression the schedule was parsed from.
+ func (s *Schedule) String() string { return s.expr }
+ 
++func (s *Schedule) dayMatches(t time.Time) bool {
++	domOK := s.dom&(1<<uint(t.Day())) != 0
++	dowOK := s.dow&(1<<uint(t.Weekday())) != 0
++	switch {
++	case s.domStar && s.dowStar:
++		return true
++	case s.domStar:
++		return dowOK
++	case s.dowStar:
++		return domOK
++	default:
++		return domOK || dowOK
++	}
++}
++
+ // Matches reports whether t (ignoring seconds) is a time the schedule fires.
+ func (s *Schedule) Matches(t time.Time) bool {
+ 	return s.minute&(1<<uint(t.Minute())) != 0 &&
+ 		s.hour&(1<<uint(t.Hour())) != 0 &&
+ 		s.month&(1<<uint(t.Month())) != 0 &&
+-		s.dom&(1<<uint(t.Day())) != 0 &&
+-		s.dow&(1<<uint(t.Weekday())) != 0
++		s.dayMatches(t)
+ }
+ 
+ // Next returns the first time after `after` at which the schedule fires.
+ func (s *Schedule) Next(after time.Time) time.Time {
+-	t := after.Truncate(time.Minute)
+-	limit := after.AddDate(1, 0, 0)
++	loc := after.Location()
++	limit := after.AddDate(5, 0, 0)
++	y, mo, d := after.Date()
++	t := time.Date(y, mo, d, after.Hour(), after.Minute(), 0, 0, loc).Add(time.Minute)
+ 	for !t.After(limit) {
+-		if s.Matches(t) {
++		y, mo, d = t.Date()
++		switch {
++		case s.month&(1<<uint(mo)) == 0:
++			t = time.Date(y, mo+1, 1, 0, 0, 0, 0, loc)
++		case !s.dayMatches(t):
++			t = time.Date(y, mo, d+1, 0, 0, 0, 0, loc)
++		case s.hour&(1<<uint(t.Hour())) == 0:
++			t = time.Date(y, mo, d, t.Hour()+1, 0, 0, 0, loc)
++		case s.minute&(1<<uint(t.Minute())) == 0:
++			t = t.Add(time.Minute)
++		default:
+ 			return t
+ 		}
+-		t = t.Add(time.Minute)
+ 	}
+ 	return time.Time{}
+ }

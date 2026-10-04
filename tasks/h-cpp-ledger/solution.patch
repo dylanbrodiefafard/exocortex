@@ -1,0 +1,268 @@
+diff --git a/ledger.cpp b/ledger.cpp
+index fc8a4e2..46f75d5 100644
+--- a/ledger.cpp
++++ b/ledger.cpp
+@@ -1,7 +1,27 @@
+ #include "ledger.hpp"
+ 
++#include <set>
++
+ namespace bank {
+ 
++namespace {
++
++bool valid_id(const std::string& id) {
++    if (id.empty() || id.size() > 32) return false;
++    for (char c : id) {
++        bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
++                  c == '_' || c == '-';
++        if (!ok) return false;
++    }
++    return true;
++}
++
++void require_positive(Cents amount) {
++    if (amount <= 0) throw std::invalid_argument("amount must be positive");
++}
++
++}  // namespace
++
+ Ledger::Account& Ledger::get(const std::string& id) {
+     auto it = accounts_.find(id);
+     if (it == accounts_.end()) throw std::out_of_range("no such account: " + id);
+@@ -15,41 +35,80 @@ const Ledger::Account& Ledger::get(const std::string& id) const {
+ }
+ 
+ void Ledger::open(const std::string& id, Cents overdraft_limit) {
++    if (!valid_id(id)) throw std::invalid_argument("invalid account id: " + id);
++    if (accounts_.count(id)) throw std::invalid_argument("account exists: " + id);
++    if (overdraft_limit < 0) throw std::invalid_argument("negative overdraft limit");
+     Account account;
+     account.overdraft_limit = overdraft_limit;
+-    accounts_[id] = account;
++    accounts_.emplace(id, account);
+ }
+ 
+ void Ledger::deposit(const std::string& id, Cents amount) {
+     Account& a = get(id);
++    require_positive(amount);
+     a.balance += amount;
+     a.entries.push_back({next_seq_++, Kind::Deposit, amount, a.balance, ""});
+ }
+ 
++static void check_funds(const std::string& id, Cents balance, Cents limit, Cents amount) {
++    if (balance - amount < -limit) throw InsufficientFunds("insufficient funds in " + id);
++}
++
+ void Ledger::withdraw(const std::string& id, Cents amount) {
+     Account& a = get(id);
+-    if (a.balance < amount) throw InsufficientFunds("insufficient funds in " + id);
++    require_positive(amount);
++    check_funds(id, a.balance, a.overdraft_limit, amount);
+     a.balance -= amount;
+     a.entries.push_back({next_seq_++, Kind::Withdrawal, -amount, a.balance, ""});
+ }
+ 
+ void Ledger::transfer(const std::string& from, const std::string& to, Cents amount) {
+     Account& src = get(from);
+-    if (src.balance < amount) throw InsufficientFunds("insufficient funds in " + from);
+-    src.balance -= amount;
+-    src.entries.push_back({next_seq_++, Kind::TransferOut, -amount, src.balance, to});
+     Account& dst = get(to);
++    if (from == to) throw std::invalid_argument("transfer to the same account");
++    require_positive(amount);
++    check_funds(from, src.balance, src.overdraft_limit, amount);
++    long long seq = next_seq_++;
++    src.balance -= amount;
++    src.entries.push_back({seq, Kind::TransferOut, -amount, src.balance, to});
+     dst.balance += amount;
+-    dst.entries.push_back({next_seq_++, Kind::TransferIn, amount, dst.balance, from});
++    dst.entries.push_back({seq, Kind::TransferIn, amount, dst.balance, from});
+ }
+ 
+-void Ledger::split(const std::string&, const std::vector<std::string>&, Cents) {
+-    throw std::logic_error("split: not implemented");
++void Ledger::split(const std::string& from, const std::vector<std::string>& to, Cents amount) {
++    Account& src = get(from);
++    std::vector<Account*> dsts;
++    for (const auto& id : to) dsts.push_back(&get(id));
++    if (to.empty()) throw std::invalid_argument("split needs at least one recipient");
++    std::set<std::string> seen(to.begin(), to.end());
++    if (seen.size() != to.size()) throw std::invalid_argument("duplicate recipient");
++    if (seen.count(from)) throw std::invalid_argument("payer cannot be a recipient");
++    require_positive(amount);
++    check_funds(from, src.balance, src.overdraft_limit, amount);
++
++    long long seq = next_seq_++;
++    Cents n = static_cast<Cents>(to.size());
++    Cents share = amount / n;
++    Cents extra = amount % n;
++    for (std::size_t i = 0; i < to.size(); ++i) {
++        Cents part = share + (static_cast<Cents>(i) < extra ? 1 : 0);
++        if (part == 0) continue;
++        src.balance -= part;
++        src.entries.push_back({seq, Kind::TransferOut, -part, src.balance, to[i]});
++        dsts[i]->balance += part;
++        dsts[i]->entries.push_back({seq, Kind::TransferIn, part, dsts[i]->balance, from});
++    }
+ }
+ 
+ void Ledger::apply_interest(const std::string& id, int basis_points) {
+     Account& a = get(id);
+-    Cents interest = a.balance * basis_points / 10000;
++    if (basis_points < 0) throw std::invalid_argument("negative interest rate");
++    if (a.balance <= 0) return;
++    Cents product = a.balance * basis_points;
++    Cents interest = product / 10000;
++    Cents rem = product % 10000;
++    if (rem > 5000 || (rem == 5000 && interest % 2 == 1)) ++interest;
++    if (interest == 0) return;
+     a.balance += interest;
+     a.entries.push_back({next_seq_++, Kind::Interest, interest, a.balance, ""});
+ }
+@@ -58,8 +117,23 @@ Cents Ledger::balance(const std::string& id) const { return get(id).balance; }
+ 
+ std::vector<Entry> Ledger::history(const std::string& id) const { return get(id).entries; }
+ 
+-std::string Ledger::statement(const std::string&) const {
+-    throw std::logic_error("statement: not implemented");
++std::string Ledger::statement(const std::string& id) const {
++    const Account& a = get(id);
++    std::string out = "Statement for " + id + "\n";
++    for (const Entry& e : a.entries) {
++        std::string desc;
++        switch (e.kind) {
++            case Kind::Deposit: desc = "deposit"; break;
++            case Kind::Withdrawal: desc = "withdrawal"; break;
++            case Kind::TransferIn: desc = "transfer from " + e.counterparty; break;
++            case Kind::TransferOut: desc = "transfer to " + e.counterparty; break;
++            case Kind::Interest: desc = "interest"; break;
++        }
++        out += "#" + std::to_string(e.seq) + " " + desc + " " + format_amount(e.amount) + " -> " +
++               format_amount(e.balance_after) + "\n";
++    }
++    out += "Balance " + format_amount(a.balance) + "\n";
++    return out;
+ }
+ 
+ }  // namespace bank
+diff --git a/money.cpp b/money.cpp
+index 071bb1a..66e16cf 100644
+--- a/money.cpp
++++ b/money.cpp
+@@ -1,48 +1,90 @@
+ #include "money.hpp"
+ 
+ #include <cctype>
++#include <limits>
+ #include <stdexcept>
+ 
+ namespace bank {
+ 
++namespace {
++
++bool is_digit(char c) { return std::isdigit(static_cast<unsigned char>(c)) != 0; }
++
++[[noreturn]] void invalid(const std::string& text) {
++    throw std::invalid_argument("invalid amount: \"" + text + "\"");
++}
++
++}  // namespace
++
+ Cents parse_amount(const std::string& text) {
+     std::size_t i = 0;
++    const std::size_t n = text.size();
+     bool negative = false;
+-    if (i < text.size() && text[i] == '-') {
++    if (i < n && text[i] == '-') {
+         negative = true;
+         ++i;
+     }
+-    Cents whole = 0;
+-    std::size_t digits = 0;
+-    while (i < text.size() && std::isdigit(static_cast<unsigned char>(text[i]))) {
+-        whole = whole * 10 + (text[i] - '0');
+-        ++i;
+-        ++digits;
+-    }
+-    if (digits == 0) throw std::invalid_argument("invalid amount: " + text);
+-    Cents frac = 0;
+-    if (i < text.size() && text[i] == '.') {
+-        ++i;
+-        int n = 0;
+-        while (i < text.size() && std::isdigit(static_cast<unsigned char>(text[i]))) {
+-            if (n < 2) frac = frac * 10 + (text[i] - '0');
+-            ++n;
++    // Integer part.
++    std::string digits;
++    std::size_t start = i;
++    while (i < n && is_digit(text[i])) digits += text[i++];
++    std::size_t first_group = i - start;
++    if (first_group == 0) invalid(text);
++    if (i < n && text[i] == ',') {
++        if (first_group > 3) invalid(text);
++        while (i < n && text[i] == ',') {
+             ++i;
++            std::size_t g = 0;
++            while (i < n && is_digit(text[i])) {
++                digits += text[i++];
++                ++g;
++            }
++            if (g != 3) invalid(text);
+         }
+-        if (n == 1) frac *= 10;
+     }
+-    if (i != text.size()) throw std::invalid_argument("invalid amount: " + text);
+-    Cents value = whole * 100 + frac;
+-    return negative ? -value : value;
++    // Fraction.
++    std::string frac;
++    if (i < n && text[i] == '.') {
++        ++i;
++        while (i < n && is_digit(text[i])) frac += text[i++];
++        if (frac.empty()) invalid(text);
++    }
++    if (i != n) invalid(text);
++
++    const Cents max = std::numeric_limits<Cents>::max();
++    Cents whole = 0;
++    for (char c : digits) {
++        if (whole > (max - 9) / 10) invalid(text);
++        whole = whole * 10 + (c - '0');
++    }
++    if (whole > max / 100 - 1) invalid(text);
++    Cents cents = whole * 100;
++    if (!frac.empty()) cents += (frac[0] - '0') * 10;
++    if (frac.size() > 1) cents += frac[1] - '0';
++    if (frac.size() > 2) {
++        char d = frac[2];
++        bool rest_nonzero = frac.find_first_not_of('0', 3) != std::string::npos;
++        bool up = d > '5' || (d == '5' && (rest_nonzero || cents % 2 == 1));
++        if (up) ++cents;
++    }
++    return negative ? -cents : cents;
+ }
+ 
+ std::string format_amount(Cents cents) {
+     bool negative = cents < 0;
+-    if (negative) cents = -cents;
+-    std::string frac = std::to_string(cents % 100);
+-    if (frac.size() < 2) frac = "0" + frac;
+-    std::string s = std::to_string(cents / 100) + "." + frac;
+-    return negative ? "-" + s : s;
++    unsigned long long v = negative ? 0ULL - static_cast<unsigned long long>(cents)
++                                    : static_cast<unsigned long long>(cents);
++    std::string whole = std::to_string(v / 100);
++    std::string grouped;
++    int count = 0;
++    for (auto it = whole.rbegin(); it != whole.rend(); ++it) {
++        if (count > 0 && count % 3 == 0) grouped.insert(grouped.begin(), ',');
++        grouped.insert(grouped.begin(), *it);
++        ++count;
++    }
++    unsigned long long f = v % 100;
++    std::string s = grouped + "." + static_cast<char>('0' + f / 10) + static_cast<char>('0' + f % 10);
++    return negative ? "(" + s + ")" : s;
+ }
+ 
+ }  // namespace bank
