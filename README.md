@@ -116,7 +116,7 @@ To add a task, create `tasks/<id>/` with:
 - `solution.patch`: a reference fix;
 - optionally `hidden/`: acceptance tests the agent never sees.
 
-Then run `--validate`. See [`docs/EVAL_TASKS.md`](docs/EVAL_TASKS.md) for the tiers and authoring rules.
+Then run `--validate`. See [`docs/EVAL_TASKS.md`](docs/EVAL_TASKS.md) for the tiers and authoring rules, and [`docs/AB_PLAN.md`](docs/AB_PLAN.md) for the order to A/B the modules in.
 
 ## Load test
 
