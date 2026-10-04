@@ -5,5 +5,5 @@
 	"check": "python3 -m unittest discover -q -s tests -t .",
 	"maxTurns": 30,
 	"timeoutSec": 900,
-	"tags": ["feature", "multi-file"]
+	"tags": ["smoke", "feature", "multi-file"]
 }

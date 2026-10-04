@@ -1,0 +1,10 @@
+{
+	"id": "h-cpp-build-log",
+	"language": "cpp",
+	"prompt": "`make test` is failing on CI for the latency library. Get it building and passing. Fix the actual problems in the library code; don't touch the tests, and don't silence warnings or change the compiler/warning flags in the Makefile (the existing warnings are known and harmless).",
+	"check": "make -s test",
+	"maxTurns": 40,
+	"timeoutSec": 1200,
+	"checkTimeoutSec": 180,
+	"tags": ["hard", "noisy-output", "cpp"]
+}

@@ -1,0 +1,10 @@
+{
+	"id": "h-go-ratelimiter",
+	"language": "go",
+	"prompt": "Finish the token-bucket rate limiter in limiter.go (package ratelimit). Required semantics:\n\n- `New(rate, burst, clock)`: rate is tokens per second and may be fractional (0.5 = one token every 2s); burst is the bucket capacity. The bucket starts full. New panics if rate <= 0 or burst < 1. A nil clock means RealClock.\n- Tokens accrue continuously, so partial tokens count toward the next whole one, and the bucket never holds more than burst no matter how long it sits idle. Take all time from the Clock (tests use FakeClock from fakeclock.go; don't change it).\n- `Allow()`: if at least one whole token is available, consume it and return true; otherwise return false immediately without changing anything.\n- `Wait(ctx)`: if ctx is already done, return ctx.Err() without consuming a token. If a token is available, consume it and return nil. Otherwise block, using a timer from the Clock, until a token can be consumed (return nil) or ctx is done (return ctx.Err()). A Wait that returns an error must not consume a token or reduce what is available to anyone else, and must stop any timer it created. Each successful Wait consumes exactly one token, so concurrent waiters never share one.\n- `SetRate(rate)`: tokens accrued up to now at the old rate are kept (the level neither jumps nor resets); from then on the bucket refills at the new rate. Panics if rate <= 0.\n- Every method is safe for concurrent use.\n\n`go test -race ./...` must pass.",
+	"check": "go test -race -count=1 -timeout 90s ./...",
+	"maxTurns": 40,
+	"timeoutSec": 1200,
+	"checkTimeoutSec": 180,
+	"tags": ["hard", "spec-compliance", "go"]
+}

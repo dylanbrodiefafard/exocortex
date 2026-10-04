@@ -1,0 +1,75 @@
+diff --git a/src/csv.cpp b/src/csv.cpp
+index 8176a13..00d9520 100644
+--- a/src/csv.cpp
++++ b/src/csv.cpp
+@@ -5,23 +5,41 @@ namespace latency::csv {
+ std::vector<std::string> split_line(std::string_view line) {
+     std::vector<std::string> fields;
+     std::string current;
+-    bool in_quotes = false;
+-    for (char c : line) {
+-        if (c == '"') {
+-            in_quotes = !in_quotes;
+-            continue;
++    size_t i = 0;
++    while (true) {
++        current.clear();
++        if (i < line.size() && line[i] == '"') {
++            ++i;
++            bool closed = false;
++            while (i < line.size()) {
++                char c = line[i++];
++                if (c != '"') {
++                    current.push_back(c);
++                } else if (i < line.size() && line[i] == '"') {
++                    current.push_back('"');
++                    ++i;
++                } else {
++                    closed = true;
++                    break;
++                }
++            }
++            if (!closed) {
++                throw ParseError("unterminated quoted field");
++            }
++            while (i < line.size() && line[i] != ',') {
++                current.push_back(line[i++]);
++            }
++        } else {
++            while (i < line.size() && line[i] != ',') {
++                current.push_back(line[i++]);
++            }
+         }
+-        if (c == ',' && !in_quotes) {
+-            fields.push_back(std::move(current));
+-            current.clear();
+-            continue;
++        fields.push_back(current);
++        if (i >= line.size()) {
++            break;
+         }
+-        current.push_back(c);
+-    }
+-    if (in_quotes) {
+-        throw ParseError("unterminated quoted field");
++        ++i;
+     }
+-    fields.push_back(std::move(current));
+     return fields;
+ }
+ 
+diff --git a/src/stats.cpp b/src/stats.cpp
+index 30a429a..3291c8b 100644
+--- a/src/stats.cpp
++++ b/src/stats.cpp
+@@ -42,8 +42,10 @@ T max_value(const std::vector<T>& values) {
+ 
+ template double mean<int>(const std::vector<int>&);
+ template double mean<double>(const std::vector<double>&);
++template double mean<long>(const std::vector<long>&);
+ template int percentile<int>(std::vector<int>, double);
+ template double percentile<double>(std::vector<double>, double);
++template long percentile<long>(std::vector<long>, double);
+ template int max_value<int>(const std::vector<int>&);
+ template double max_value<double>(const std::vector<double>&);
+ template long max_value<long>(const std::vector<long>&);

@@ -1,0 +1,13 @@
+diff --git a/pipeline/pipeline.go b/pipeline/pipeline.go
+index ac7fa20..eaa7d84 100644
+--- a/pipeline/pipeline.go
++++ b/pipeline/pipeline.go
+@@ -41,7 +41,7 @@ func Run(entries []parser.Entry, opts Options) []parser.Entry {
+ 
+ func where(keep func(parser.Entry) bool) stage {
+ 	return func(in []parser.Entry) []parser.Entry {
+-		out := in[:0]
++		out := make([]parser.Entry, 0, len(in))
+ 		for _, e := range in {
+ 			if keep(e) {
+ 				out = append(out, e)

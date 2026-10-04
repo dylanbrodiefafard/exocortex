@@ -1,0 +1,10 @@
+{
+	"id": "h-go-aliasing-bug",
+	"language": "go",
+	"prompt": "The monthly report sometimes double counts entries (and other months come out wrong too) when I feed it more than one export. `go test ./...` shows it in the report tests. Find the real cause and fix it; don't change the existing tests. The documented behavior of every package must still hold.",
+	"check": "go test -count=1 ./...",
+	"maxTurns": 40,
+	"timeoutSec": 1200,
+	"checkTimeoutSec": 180,
+	"tags": ["hard", "error-recovery", "go"]
+}

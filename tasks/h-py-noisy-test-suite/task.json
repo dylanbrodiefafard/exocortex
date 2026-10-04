@@ -1,0 +1,10 @@
+{
+	"id": "h-py-noisy-test-suite",
+	"language": "python",
+	"prompt": "CI is red: `python3 -m unittest discover -q -s tests -t .` has failures. Find the root causes and fix them in the storefront package so the suite passes. Don't modify the tests, and don't silence or filter the warnings or log output; fix the underlying bugs properly rather than special-casing the inputs the tests happen to use.",
+	"check": "python3 -m unittest discover -q -s tests -t .",
+	"maxTurns": 40,
+	"timeoutSec": 1200,
+	"checkTimeoutSec": 120,
+	"tags": ["hard", "noisy-output", "python"]
+}

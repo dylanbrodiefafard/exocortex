@@ -1,0 +1,10 @@
+{
+	"id": "h-py-mini-framework",
+	"language": "python",
+	"prompt": "Two things in wisp (this repo):\n\n1. Routing bug. Some URLs reach the wrong handler or hand it the wrong parameter values. Examples against the bookshop example app: `GET /books/42/` is answered by the catch-all pages route with a 404 instead of the book detail handler; `GET /authors/Andr%C3%A9%20Gide` reaches the author handler with a garbled name; `GET /tags/ac%2Fdc` is a 404 instead of listing the `ac/dc` tag; `GET /tags/c++` gives the handler the tag \"c  \". Fix routing so it follows the rules in docs/routing.md for every route, not just these URLs.\n\n2. Add `Request.query`, the parsed query string. The bookshop's `/search` handler already uses it and currently crashes. API: `request.query.get(name, default=None)` returns the first value for `name` (or `default` if absent); `request.query.getlist(name)` returns all values in order (an empty list if absent); `request.query[name]` returns the first value or raises KeyError; `name in request.query` works. Parsing rules: `&`-separated `name=value` pairs; empty pairs are skipped; a pair without `=` has the value \"\"; split on `&` and the first `=` before decoding, so `%26` and `%3D` stay literal; `+` means a space; percent-escapes are decoded as UTF-8 in both names and values; malformed escapes are kept as-is.\n\nKeep the existing tests passing. Run them with `python3 -m unittest discover -q -s tests -t .`.",
+	"check": "python3 -m unittest discover -q -s tests -t .",
+	"maxTurns": 50,
+	"timeoutSec": 1500,
+	"checkTimeoutSec": 120,
+	"tags": ["hard", "navigation", "python"]
+}

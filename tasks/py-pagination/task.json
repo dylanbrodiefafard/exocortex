@@ -5,5 +5,5 @@
 	"check": "python3 -m unittest -q test_pagination",
 	"maxTurns": 20,
 	"timeoutSec": 600,
-	"tags": ["bugfix", "small"]
+	"tags": ["smoke", "bugfix"]
 }

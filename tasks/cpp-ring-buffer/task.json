@@ -5,5 +5,5 @@
 	"check": "make -s test",
 	"maxTurns": 25,
 	"timeoutSec": 900,
-	"tags": ["bugfix", "small"]
+	"tags": ["smoke", "bugfix"]
 }

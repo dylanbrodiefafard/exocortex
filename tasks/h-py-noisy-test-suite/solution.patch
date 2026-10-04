@@ -1,0 +1,60 @@
+diff --git a/storefront/catalog.py b/storefront/catalog.py
+index 1e8dc37..867a866 100644
+--- a/storefront/catalog.py
++++ b/storefront/catalog.py
+@@ -9,12 +9,14 @@ from storefront.money import format_money
+ log = get_logger(__name__)
+ 
+ 
+-def normalize_tags(tags, into=[]):
++def normalize_tags(tags, into=None):
+     """Lower-case, strip and de-duplicate ``tags``, preserving first-seen order.
+ 
+     Returns a new list unless ``into`` is given, in which case the tags are
+     appended to it.
+     """
++    if into is None:
++        into = []
+     for tag in tags:
+         tag = tag.strip().lower()
+         if tag and tag not in into:
+diff --git a/storefront/money.py b/storefront/money.py
+index ddcaef2..5277ae9 100644
+--- a/storefront/money.py
++++ b/storefront/money.py
+@@ -6,6 +6,7 @@ storefront. Formatting rounds to whole cents, half away from zero, so
+ """
+ 
+ import warnings
++from decimal import ROUND_HALF_UP, Decimal
+ 
+ from storefront._log import get_logger
+ 
+@@ -26,10 +27,10 @@ def format_money(amount, currency="USD"):
+         log.warning("unknown currency %r, formatting without symbol", currency)
+         symbol = currency + " "
+     places = 0 if currency in ZERO_DECIMAL else 2
+-    sign = "-" if amount < 0 else ""
+-    body = f"{abs(amount):,.{places}f}"
+-    if sign and float(body.replace(",", "")) == 0:
+-        sign = ""
++    quantum = Decimal(1).scaleb(-places)
++    rounded = Decimal(repr(float(amount))).quantize(quantum, rounding=ROUND_HALF_UP)
++    sign = "-" if rounded < 0 else ""
++    body = f"{abs(rounded):,.{places}f}"
+     log.debug("format_money(%r, %s) -> %s%s%s", amount, currency, sign, symbol, body)
+     return f"{sign}{symbol}{body}"
+ 
+diff --git a/storefront/periods.py b/storefront/periods.py
+index 68179d0..fdfa502 100644
+--- a/storefront/periods.py
++++ b/storefront/periods.py
+@@ -25,7 +25,7 @@ def to_local(instant, utc_offset_minutes):
+     """Wall-clock time at a store with the given UTC offset (a naive datetime)."""
+     utc = _as_utc(instant)
+     shift = timedelta(minutes=utc_offset_minutes)
+-    return (utc - shift).replace(tzinfo=None)
++    return (utc + shift).replace(tzinfo=None)
+ 
+ 
+ def local_date(instant, utc_offset_minutes):

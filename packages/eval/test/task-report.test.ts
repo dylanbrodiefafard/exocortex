@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { summarize } from "../src/report.ts";
 import type { RunRecord } from "../src/run.ts";
+import { validateTasks } from "../src/run.ts";
 import { loadTasks } from "../src/task.ts";
 
 const REPO = join(import.meta.dirname, "..", "..", "..");
@@ -67,5 +68,32 @@ describe("summarize", () => {
 		expect(off).toMatchObject({ config: "off", runs: 3, successes: 2, medianWallClockSec: 20, abnormal: 1 });
 		expect(off?.successRate).toBeCloseTo(2 / 3);
 		expect(on).toMatchObject({ config: "on", runs: 1, successes: 0, meanTurns: null });
+	});
+});
+
+describe("tags and hidden overlays", () => {
+	it("filters by tag", () => {
+		const smoke = loadTasks(join(REPO, "tasks"), [], ["smoke"]);
+		expect(smoke.length).toBeGreaterThanOrEqual(6);
+		expect(smoke.every((t) => t.spec.tags.includes("smoke"))).toBe(true);
+		expect(loadTasks(join(REPO, "tasks"), [], ["no-such-tag"])).toEqual([]);
+	});
+
+	it("scores hidden acceptance tests the agent never saw", async () => {
+		fixture("hid", { id: "hid", language: "other", prompt: "x", check: "test -f visible.txt && bash hidden_check.sh" });
+		const dir = join(tmp ?? "", "hid");
+		writeFileSync(join(dir, "repo", "visible.txt"), "v");
+		writeFileSync(join(dir, "repo", "hidden_check.sh"), "exit 0\n");
+		mkdirSync(join(dir, "hidden"));
+		writeFileSync(join(dir, "hidden", "hidden_check.sh"), "grep -q fixed visible.txt\n");
+		writeFileSync(
+			join(dir, "solution.patch"),
+			"diff --git a/visible.txt b/visible.txt\n--- a/visible.txt\n+++ b/visible.txt\n@@ -1 +1 @@\n-v\n\\ No newline at end of file\n+fixed\n",
+		);
+		const [task] = loadTasks(tmp ?? "");
+		expect(task?.hiddenDir).toBe(join(dir, "hidden"));
+		const [result] = await validateTasks(task ? [task] : [], join(tmp ?? "", "scratch"));
+		// Without the overlay the pristine repo would pass (hidden_check.sh exits 0).
+		expect(result).toMatchObject({ pristineFails: true, solutionPasses: true });
 	});
 });

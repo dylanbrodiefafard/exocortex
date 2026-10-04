@@ -1,0 +1,92 @@
+diff --git a/duration.hpp b/duration.hpp
+index a3339ff..a16a2d2 100644
+--- a/duration.hpp
++++ b/duration.hpp
+@@ -23,6 +23,7 @@ public:
+     friend constexpr Duration operator-(Duration a, Duration b) { return Duration(a.us_ - b.us_); }
+     friend constexpr bool operator==(Duration a, Duration b) { return a.us_ == b.us_; }
+     friend constexpr bool operator!=(Duration a, Duration b) { return a.us_ != b.us_; }
++    friend constexpr bool operator<(Duration a, Duration b) { return a.us_ < b.us_; }
+ 
+     friend std::ostream& operator<<(std::ostream& os, Duration d) { return os << d.us_ << "us"; }
+ 
+diff --git a/stats.hpp b/stats.hpp
+index 425fd1a..80c729c 100644
+--- a/stats.hpp
++++ b/stats.hpp
+@@ -46,6 +46,22 @@ T from_scalar(double value, type_tag<T>) {
+     }
+ }
+ 
++namespace detail {
++
++template <typename T>
++double scalar(const T& value) {
++    using stats::to_scalar;
++    return to_scalar(value);
++}
++
++template <typename T>
++T unscalar(double value) {
++    using stats::from_scalar;
++    return from_scalar(value, type_tag<T>{});
++}
++
++}  // namespace detail
++
+ template <typename T>
+ class Summary {
+ public:
+@@ -64,10 +80,10 @@ public:
+             min_ = std::min(min_, value);
+             max_ = std::max(max_, value);
+         }
+-        sum_ += value;
++        sum_ = sum_ + value;
+         ++count_;
+         // Welford's online update, in scalar space.
+-        const double x = stats::to_scalar(value);
++        const double x = detail::scalar(value);
+         const double delta = x - mean_;
+         mean_ += delta / static_cast<double>(count_);
+         m2_ += delta * (x - mean_);
+@@ -84,7 +100,7 @@ public:
+         }
+         min_ = std::min(min_, other.min_);
+         max_ = std::max(max_, other.max_);
+-        sum_ += other.sum_;
++        sum_ = sum_ + other.sum_;
+         const double n_a = static_cast<double>(count_);
+         const double n_b = static_cast<double>(other.count_);
+         const double n = n_a + n_b;
+@@ -100,7 +116,7 @@ public:
+     T sum() const { return sum_; }
+     T min() const { return require_nonempty(), min_; }
+     T max() const { return require_nonempty(), max_; }
+-    T mean() const { return require_nonempty(), stats::from_scalar(mean_, type_tag<T>{}); }
++    T mean() const { return require_nonempty(), detail::unscalar<T>(mean_); }
+ 
+     // Population variance, in squared scalar units.
+     double variance() const {
+@@ -108,7 +124,7 @@ public:
+         return m2_ / static_cast<double>(count_);
+     }
+ 
+-    T stddev() const { return stats::from_scalar(std::sqrt(variance()), type_tag<T>{}); }
++    T stddev() const { return detail::unscalar<T>(std::sqrt(variance())); }
+ 
+     // Linear-interpolated quantile, q in [0, 1]. quantile(0.5) is the median.
+     T quantile(double q) const {
+@@ -120,9 +136,9 @@ public:
+         const std::size_t lo = static_cast<std::size_t>(std::floor(pos));
+         const std::size_t hi = static_cast<std::size_t>(std::ceil(pos));
+         if (lo == hi) return sorted[lo];
+-        const double a = stats::to_scalar(sorted[lo]);
+-        const double b = stats::to_scalar(sorted[hi]);
+-        return stats::from_scalar(a + (b - a) * (pos - static_cast<double>(lo)), type_tag<T>{});
++        const double a = detail::scalar(sorted[lo]);
++        const double b = detail::scalar(sorted[hi]);
++        return detail::unscalar<T>(a + (b - a) * (pos - static_cast<double>(lo)));
+     }
+ 
+     T median() const { return quantile(0.5); }
