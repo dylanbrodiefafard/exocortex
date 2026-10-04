@@ -17,6 +17,7 @@ import {
 	toJsonValue,
 } from "@exocortex/core";
 import { createSupervisor, SUPERVISOR_ID } from "@exocortex/mod-supervisor";
+import { createTriage, TRIAGE_ID } from "@exocortex/mod-triage";
 import { createTrimmer, TRIMMER_ID } from "@exocortex/mod-trimmer";
 import type { Runtime } from "./runtime.ts";
 import { exitCodeOf } from "./trace-recorder.ts";
@@ -27,6 +28,7 @@ import { exitCodeOf } from "./trace-recorder.ts";
  */
 const MODULES: Readonly<Record<string, ModuleFactory>> = {
 	[TRIMMER_ID]: createTrimmer,
+	[TRIAGE_ID]: createTriage,
 	[SUPERVISOR_ID]: createSupervisor,
 };
 

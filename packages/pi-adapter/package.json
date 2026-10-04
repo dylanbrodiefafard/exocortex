@@ -15,7 +15,8 @@
 	"dependencies": {
 		"@exocortex/core": "*",
 		"@exocortex/mod-supervisor": "*",
-		"@exocortex/mod-trimmer": "*"
+		"@exocortex/mod-trimmer": "*",
+		"@exocortex/mod-triage": "*"
 	},
 	"peerDependencies": {
 		"@earendil-works/pi-coding-agent": "*"
