@@ -28,6 +28,12 @@ export interface ConfigSummary {
 	readonly completePrecision: number | null;
 	/** Runs whose last verdict was `complete`. */
 	readonly judgedComplete: number;
+	/** Per-run mean of every token spent: main input, cached and output, plus sidecars (research R7.3). */
+	readonly meanTotalTokens: number | null;
+	/** Runs where the agent changed or deleted fixture tests (restored before the check). */
+	readonly tampered: number;
+	/** Passing runs with no verification after the last edit, or 3+ identical failed commands (R7.6). */
+	readonly luckyPasses: number;
 	/** Of failing runs with a last verdict, the share the supervisor did not call complete. */
 	readonly failureRecall: number | null;
 }
@@ -62,6 +68,12 @@ export function summarize(records: readonly RunRecord[]): ConfigSummary[] {
 				.join("/"),
 			sidecarFailures: sum(withMetrics.map((m) => m.sidecarFailures)),
 			abnormal: runs.filter((r) => r.outcome !== "settled").length,
+			meanTotalTokens: mean(withMetrics.map((m) => m.inputTokens + m.cachedTokens + m.outputTokens + m.sidecarTokens)),
+			tampered: runs.filter((r) => (r.tamperedTests?.length ?? 0) > 0).length,
+			luckyPasses: runs.filter(
+				(r) =>
+					r.success && r.metrics && (r.metrics.verifiedAfterLastEdit === false || r.metrics.maxRepeatedFailures >= 3),
+			).length,
 			...verdictQuality(runs),
 		};
 	});
@@ -85,8 +97,8 @@ export function renderMarkdown(records: readonly RunRecord[], title: string): st
 	const lines = [
 		`# ${title}`,
 		"",
-		"| config | success | turns | input tok | cached tok | output tok | cache hit | prefix kept | median wall | repeated err | injections | continuations | sidecar tok | sidecar fail | verdicts c/i/f/u | abnormal |",
-		"|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+		"| config | success | turns | input tok | cached tok | output tok | cache hit | prefix kept | median wall | repeated err | injections | continuations | sidecar tok | total tok | sidecar fail | verdicts c/i/f/u | abnormal | tampered | lucky passes |",
+		"|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
 		...summaries
 			.map((s) =>
 				[
@@ -103,14 +115,17 @@ export function renderMarkdown(records: readonly RunRecord[], title: string): st
 					String(s.injections),
 					String(s.continuations),
 					fixed(s.meanSidecarTokens, 0),
+					fixed(s.meanTotalTokens, 0),
 					String(s.sidecarFailures),
 					s.verdicts,
 					String(s.abnormal),
+					String(s.tampered),
+					String(s.luckyPasses),
 				].join(" | "),
 			)
 			.map((row) => `| ${row} |`),
 		"",
-		"Token columns are per-run means of main-model usage; *sidecar tok* is the per-run mean of Exocortex's own calls. *abnormal* counts runs that hit max turns, timed out or crashed.",
+		"Token columns are per-run means of main-model usage; *sidecar tok* is the per-run mean of Exocortex's own calls. *total tok* adds main and sidecar tokens, the cost to weigh against success. *abnormal* counts runs that hit max turns, timed out or crashed. *tampered* counts runs that changed or deleted fixture tests (restored before the check, so they could not pass that way). *lucky passes* are passing runs that never verified after their last edit or retried one failing command 3+ times.",
 		"",
 		"## Per task",
 		"",

@@ -105,3 +105,11 @@ export function errorSignature(toolName: string, exitCode: number | null, output
 	const line = firstErrorLine(output)?.line ?? output.split("\n").find((l) => l.trim() !== "") ?? "";
 	return `${toolName}|${exitCode ?? ""}|${normalizeErrorLine(line)}`;
 }
+
+const TEST_PATH =
+	/(^|\/)(tests?|__tests__|spec|testdata)\/|_test\.(go|py|rs|cc|cpp)$|(^|\/)test_[^/]*\.(py|cpp|cc|c|hpp|h)$|\.(test|spec)\.[jt]sx?$|(^|\/)[^/]*tests?\.rs$/;
+
+/** Whether a repo-relative path looks like a test file (Rust, Go, C/C++, Python, JS/TS conventions). */
+export function isTestPath(path: string): boolean {
+	return TEST_PATH.test(path);
+}

@@ -92,6 +92,8 @@ describe("computeTraceMetrics", () => {
 			verdicts: { complete: 0, incomplete: 0, failed: 0, uncertain: 0 },
 			lastVerdict: null,
 			deterministicVerdicts: 0,
+			verifiedAfterLastEdit: null,
+			maxRepeatedFailures: 0, // the fixture's tool results carry no matching tool.call commands
 		});
 	});
 
@@ -137,6 +139,28 @@ describe("computeTraceMetrics", () => {
 		expect(metrics.verdicts).toEqual({ complete: 1, incomplete: 2, failed: 0, uncertain: 0 });
 		expect(metrics.lastVerdict).toBe("complete");
 		expect(metrics.deterministicVerdicts).toBe(1);
+	});
+
+	it("flags process smells: no verification after the last edit, and blind retries", () => {
+		const call = (id: string, toolName: string, command?: string) =>
+			event("tool.call", { toolCallId: id, toolName, input: command === undefined ? { path: "a" } : { command } });
+		const result = (id: string, toolName: string, isError: boolean) =>
+			event("tool.result", { toolCallId: id, toolName, isError });
+		const unverified = computeTraceMetrics([
+			call("1", "bash", "cargo test"),
+			result("1", "bash", false),
+			call("2", "edit"),
+			result("2", "edit", false),
+		]);
+		expect(unverified).toMatchObject({ verifiedAfterLastEdit: false, maxRepeatedFailures: 0 });
+		const retried = computeTraceMetrics([
+			call("1", "edit"),
+			result("1", "edit", false),
+			...["3", "4", "5"].flatMap((id) => [call(id, "bash", "make test"), result(id, "bash", true)]),
+			call("6", "bash", "make test"),
+			result("6", "bash", false),
+		]);
+		expect(retried).toMatchObject({ verifiedAfterLastEdit: true, maxRepeatedFailures: 3 });
 	});
 
 	it("handles an empty trace", () => {

@@ -1,8 +1,7 @@
-import type { ToolOutcome } from "@exocortex/core";
+import { isTestPath, type ToolOutcome } from "@exocortex/core";
 import { describe, expect, it } from "vitest";
 import {
 	extractClaims,
-	isTestPath,
 	madeNoChanges,
 	narrowTestSignal,
 	parseDiff,
@@ -72,6 +71,7 @@ describe("isTestPath", () => {
 		["src/a.test.ts", true],
 		["tests/integration.rs", true],
 		["test_page.py", true],
+		["test_ring_buffer.cpp", true],
 		["src/lib.rs", false],
 		["src/testing_utils.go", false],
 		["README.md", false],

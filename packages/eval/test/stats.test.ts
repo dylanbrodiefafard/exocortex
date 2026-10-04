@@ -114,6 +114,27 @@ describe("report", () => {
 		expect(markdown).toContain("| sup | 2 | 50% | 50% |");
 	});
 
+	it("counts tampered runs, lucky passes and total tokens", () => {
+		const metrics = (verifiedAfterLastEdit: boolean | null, maxRepeatedFailures: number) => ({
+			...computeTraceMetrics([]),
+			inputTokens: 100,
+			outputTokens: 10,
+			sidecarTokens: 40,
+			verifiedAfterLastEdit,
+			maxRepeatedFailures,
+		});
+		const markdown = renderMarkdown(
+			[
+				run("a", "x", true, { metrics: metrics(false, 0), tamperedTests: ["tests/t.py"] }),
+				run("b", "x", true, { metrics: metrics(true, 3) }),
+				run("c", "x", true, { metrics: metrics(true, 0) }),
+				run("d", "x", false, { metrics: metrics(false, 5) }),
+			],
+			"t",
+		);
+		expect(markdown).toMatch(/\| 150 \| 0 \| 0\/0\/0\/0 \| 0 \| 1 \| 2 \|/);
+	});
+
 	it("omits it for a single config", () => {
 		expect(renderMarkdown([run("a", "off", true)], "t")).not.toContain("Paired");
 	});

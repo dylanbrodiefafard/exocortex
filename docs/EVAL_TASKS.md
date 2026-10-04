@@ -47,6 +47,7 @@ Failure-mode tags, so results can be sliced by what a module targets:
 2. **Hidden tests:**
    - Put acceptance tests the agent should not see in `hidden/`. They may overwrite a visible test file with a superset.
    - Every hidden requirement must be stated in the prompt or in the code's docs. Hidden tests check what was asked; they don't invent new requirements.
+   - The fixture's test files are restored before the check (tamper guard, D-048), so "don't change the tests" is enforced. If the prompt asks the agent to change existing tests, set `"protectTests": false` and put the expected tests in `hidden/`. `--validate` fails when `solution.patch` edits protected tests.
 3. **No network:** Python stdlib only, Go stdlib only, Rust with no crates (`cargo test --offline`), C++17 with `g++`/`make` only.
 4. **Fast checks:** under ~60 s on a laptop. Prefer `-q` flags.
 5. **No hints:** no comments pointing at the bug, no TODOs that give away the fix, no solution in git history (the repo is committed fresh).

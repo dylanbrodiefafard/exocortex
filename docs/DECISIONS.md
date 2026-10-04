@@ -592,6 +592,21 @@ Open check: Exocortex's injected `custom_message` reaches ninfer as a second con
 
 ---
 
+### D-048 — Eval rigor: tamper guard, lucky passes, total cost · accepted
+- **Tamper guard (research R7.4):**
+  - After the agent stops and before the hidden overlay and the check, the fixture's original test files are restored (`isTestPath`, shared with the supervisor's warning signals). Editing, skipping or deleting tests can no longer make a run pass.
+  - The run records `tamperedTests`, and the report counts tampered runs per config. New test files the agent adds are kept.
+  - `protectTests: false` opts a task out when its prompt asks for test changes. `h-go-multi-package-config` is the only one: its hidden overlay supplies the updated tests.
+  - `--validate` now fails a fixture whose `solution.patch` edits protected tests. That is how it found this task.
+- **Lucky passes (R7.6):** a passing run counts as "lucky" when either:
+  - no test or build command succeeded after the last file edit; or
+  - one identical command failed 3+ times.
+
+  They are reported per config, because success alone hides reliability gaps.
+- **Cost (R7.3):** a *total tok* column (main input + cached + output + sidecar, per-run mean) shows what each config costs, to weigh against success.
+
+---
+
 ## Open questions (carried from brief §10, updated)
 
 1. ~~Resolved by D-029.~~ Exact pi mechanism for injecting into the current user turn without altering prior messages. *(Phase 0)*

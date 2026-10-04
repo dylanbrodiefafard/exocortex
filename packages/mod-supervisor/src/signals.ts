@@ -1,4 +1,4 @@
-import type { ToolOutcome } from "@exocortex/core";
+import { isTestPath, type ToolOutcome } from "@exocortex/core";
 
 /**
  * Deterministic warning signs for the verdict (research R1.2 #4–#7): things a same-model judge
@@ -6,8 +6,6 @@ import type { ToolOutcome } from "@exocortex/core";
  * agent's commands and its final message.
  */
 
-const TEST_PATH =
-	/(^|\/)(tests?|__tests__|spec|testdata)\/|_test\.(go|py|rs|cc|cpp)$|(^|\/)test_[^/]*\.py$|\.(test|spec)\.[jt]sx?$|(^|\/)[^/]*tests?\.rs$/;
 const SKIP_MARKER =
 	/@pytest\.mark\.(skip|xfail)|pytest\.skip\(|@unittest\.skip|#\[ignore\]|\bt\.Skip(Now|f)?\(|\b(it|describe|test)\.(skip|todo)\(|\bx(it|describe)\(|GTEST_SKIP|\bDISABLED_\w+/;
 const ASSERTION =
@@ -44,10 +42,6 @@ export function parseDiff(diff: string): DiffFile[] {
 		else if (line.startsWith("-") && !line.startsWith("---")) current.removed.push(line.slice(1));
 	}
 	return files;
-}
-
-export function isTestPath(path: string): boolean {
-	return TEST_PATH.test(path);
 }
 
 /** Tests deleted, skipped or with assertions removed (ImpossibleBench-style shortcuts). */

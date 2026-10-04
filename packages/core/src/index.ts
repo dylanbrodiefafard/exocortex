@@ -42,6 +42,7 @@ export {
 	errorLineIndices,
 	errorSignature,
 	firstErrorLine,
+	isTestPath,
 	normalizeErrorLine,
 } from "./modules/output.ts";
 export { loadPrompt, type PromptTemplate, renderPrompt } from "./modules/prompts.ts";

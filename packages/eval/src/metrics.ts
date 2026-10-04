@@ -36,6 +36,13 @@ export interface TraceMetrics {
 	readonly lastVerdict: "complete" | "incomplete" | "failed" | "uncertain" | null;
 	/** Verdicts reached without an LLM call (supervisor preVerdict, D-046). */
 	readonly deterministicVerdicts: number;
+	/**
+	 * Whether a test or build command succeeded after the agent's last file edit; null when it
+	 * edited nothing. A pass without it is a "lucky pass" candidate (research R7.6).
+	 */
+	readonly verifiedAfterLastEdit: boolean | null;
+	/** Most times one identical command failed: blind retrying (research R7.6). */
+	readonly maxRepeatedFailures: number;
 	readonly compactions: number;
 	/** Sidecar calls Exocortex made (all outcomes). */
 	readonly sidecarCalls: number;
@@ -102,6 +109,7 @@ export function computeTraceMetrics(
 			).length,
 		verdicts: countVerdicts(events),
 		lastVerdict: lastVerdict(events),
+		...processQuality(events),
 		deterministicVerdicts: events.filter(
 			(e) => e.kind === "exo.verdict" && record(e.data)["source"] === "deterministic",
 		).length,
@@ -111,6 +119,35 @@ export function computeTraceMetrics(
 		sidecarFailures: sidecarCalls.filter(
 			(c) => c.outcome !== "ok" && c.outcome !== "rejected_turn_cap" && c.outcome !== "rejected_budget",
 		).length,
+	};
+}
+
+const EDIT_TOOL = /^(edit|write|multi_?edit|apply_?patch)$/i;
+const VERIFY_COMMAND =
+	/\b(pytest|unittest|cargo (test|build|check)|go (test|build|vet)|ctest|make\b|cmake --build|npm (run )?(test|build)|npx (vitest|jest|tsc)|tox|g\+\+|clang\+\+)/;
+
+function processQuality(events: readonly StoredTraceEvent[]) {
+	const commands = new Map<string, string>();
+	for (const e of events) {
+		const data = record(e.data);
+		if (e.kind === "tool.call")
+			commands.set(String(data["toolCallId"]), String(record(data["input"])["command"] ?? ""));
+	}
+	let lastEdit = -1;
+	let lastVerified = -1;
+	const failures = new Map<string, number>();
+	events.forEach((e, index) => {
+		if (e.kind !== "tool.result") return;
+		const data = record(e.data);
+		const command = commands.get(String(data["toolCallId"])) ?? "";
+		const failed = data["isError"] === true;
+		if (EDIT_TOOL.test(String(data["toolName"])) && !failed) lastEdit = index;
+		if (!failed && VERIFY_COMMAND.test(command)) lastVerified = index;
+		if (failed && command !== "") failures.set(command, (failures.get(command) ?? 0) + 1);
+	});
+	return {
+		verifiedAfterLastEdit: lastEdit === -1 ? null : lastVerified > lastEdit,
+		maxRepeatedFailures: Math.max(0, ...failures.values()),
 	};
 }
 

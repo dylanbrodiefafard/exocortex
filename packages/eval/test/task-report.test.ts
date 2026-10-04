@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -6,6 +6,7 @@ import { summarize } from "../src/report.ts";
 import type { RunRecord } from "../src/run.ts";
 import { validateTasks } from "../src/run.ts";
 import { loadTasks } from "../src/task.ts";
+import { prepareWorkspace, restoreProtectedTests } from "../src/workspace.ts";
 
 const REPO = join(import.meta.dirname, "..", "..", "..");
 let tmp: string | undefined;
@@ -96,5 +97,38 @@ describe("tags and hidden overlays", () => {
 		const [result] = await validateTasks(task ? [task] : [], join(tmp ?? "", "scratch"));
 		// Without the overlay the pristine repo would pass (hidden_check.sh exits 0).
 		expect(result).toMatchObject({ pristineFails: true, solutionPasses: true });
+	});
+
+	it("restores tampered fixture tests before the check, and flags solutions that edit them", async () => {
+		fixture("tamper", { id: "tamper", language: "python", prompt: "x", check: "python3 tests/test_x.py" });
+		const dir = join(tmp ?? "", "tamper");
+		mkdirSync(join(dir, "repo", "tests"));
+		writeFileSync(join(dir, "repo", "tests", "test_x.py"), "import sys; sys.exit(1)\n");
+		writeFileSync(join(dir, "repo", "tests", "test_y.py"), "pass\n");
+		writeFileSync(join(dir, "repo", "lib.py"), "x = 1\n");
+		const [task] = loadTasks(tmp ?? "");
+		if (!task) throw new Error("no task");
+		expect(task.spec.protectTests).toBe(true);
+		const work = mkdtempSync(join(tmpdir(), "exo-work-"));
+		await prepareWorkspace(task, work);
+		writeFileSync(join(work, "tests", "test_x.py"), "pass\n");
+		rmSync(join(work, "tests", "test_y.py"));
+		writeFileSync(join(work, "tests", "test_new.py"), "pass\n");
+		writeFileSync(join(work, "lib.py"), "x = 2\n");
+		expect(restoreProtectedTests(task, work).sort()).toEqual(["tests/test_x.py", "tests/test_y.py"]);
+		expect(readFileSync(join(work, "tests", "test_x.py"), "utf8")).toBe("import sys; sys.exit(1)\n");
+		expect(existsSync(join(work, "tests", "test_new.py"))).toBe(true);
+		expect(readFileSync(join(work, "lib.py"), "utf8")).toBe("x = 2\n");
+		expect(restoreProtectedTests(task, work)).toEqual([]);
+		rmSync(work, { recursive: true, force: true });
+
+		writeFileSync(
+			join(dir, "solution.patch"),
+			"diff --git a/tests/test_x.py b/tests/test_x.py\n--- a/tests/test_x.py\n+++ b/tests/test_x.py\n@@ -1 +1 @@\n-import sys; sys.exit(1)\n+pass\n",
+		);
+		const [reloaded] = loadTasks(tmp ?? "");
+		const [result] = await validateTasks(reloaded ? [reloaded] : [], join(tmp ?? "", "scratch"));
+		expect(result?.solutionPasses).toBe(false);
+		expect(result?.detail).toContain("solution.patch edits protected tests (tests/test_x.py)");
 	});
 });

@@ -3,7 +3,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { renderMarkdown } from "./report.ts";
-import { type RunRecord, runEval, validateTasks } from "./run.ts";
+import { type RunRecord, runEval, type ValidationResult, validateTasks } from "./run.ts";
 import { loadTasks, type Task } from "./task.ts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..", "..", "..");
@@ -74,10 +74,14 @@ async function validate(tasks: readonly Task[], scratchDir: string): Promise<num
 		const solution =
 			r.solutionPasses === null ? "no solution.patch" : r.solutionPasses ? "solution passes" : "SOLUTION FAILS";
 		const pristine = r.pristineFails ? "pristine fails" : "PRISTINE PASSES";
-		const mark = r.pristineFails && r.solutionPasses !== false ? "✓" : "✗";
+		const mark = valid(r) ? "✓" : "✗";
 		process.stdout.write(`${mark} ${r.taskId}: ${pristine}, ${solution}${r.detail ? ` — ${r.detail}` : ""}\n`);
 	}
-	return results.every((r) => r.pristineFails && r.solutionPasses !== false) ? 0 : 1;
+	return results.every(valid) ? 0 : 1;
+}
+
+function valid(r: ValidationResult): boolean {
+	return r.pristineFails && r.solutionPasses !== false && !r.solutionEditsProtectedTests;
 }
 
 async function run(tasks: readonly Task[], values: CliValues, runDir: string, stamp: string): Promise<number> {
