@@ -1,0 +1,9 @@
+{
+	"id": "py-pagination",
+	"language": "python",
+	"prompt": "The pagination helpers in pagination.py return wrong results and the tests in test_pagination.py fail. Fix the bugs in pagination.py without changing the tests.",
+	"check": "python3 -m unittest -q test_pagination",
+	"maxTurns": 20,
+	"timeoutSec": 600,
+	"tags": ["bugfix", "small"]
+}

@@ -1,0 +1,16 @@
+// Exocortex configuration (JSONC). Copy to ~/.exocortex/config.jsonc; a project can override any
+// key in <repo>/.exocortex/config.jsonc. EXO_CONFIG=<path> replaces the global file. Unknown keys
+// or invalid values disable Exocortex entirely (fail closed) and pi shows a warning.
+{
+	// Master kill switch.
+	"enabled": true,
+
+	// Append-only SQLite trace of every session (brief §5.1). Needed by eval and, later, memory.
+	"trace": {
+		"enabled": true,
+		"dbPath": "~/.exocortex/exocortex.db"
+	},
+
+	// Modules are off unless enabled here (none exist yet; the supervisor arrives in Phase 3).
+	"modules": {}
+}

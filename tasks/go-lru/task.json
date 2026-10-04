@@ -1,0 +1,9 @@
+{
+	"id": "go-lru",
+	"language": "go",
+	"prompt": "The LRU cache in lru.go evicts the wrong entries and the tests in lru_test.go fail. Fix lru.go so the cache behaves as a correct least-recently-used cache. Do not change the tests.",
+	"check": "go test ./...",
+	"maxTurns": 25,
+	"timeoutSec": 600,
+	"tags": ["bugfix", "small"]
+}

@@ -185,15 +185,15 @@ Findings from reading `dylanbrodiefafard/ninfer` at `e04fad3` (paths are relativ
   - Phase 5 ships with FTS5 BM25 + structured triggers (file globs, normalized error signatures) only.
   - Add embeddings only if eval shows retrieval recall is the bottleneck. They'd go behind `InferenceClient.embed()` against any OpenAI-compatible `/v1/embeddings` server, e.g. a small CPU-hosted embedding model.
 
-### D-027 — Candidate ninfer features (owner's call, not blocking) · superseded by D-028 / `docs/NINFER_REQUIREMENTS.md`
+### D-027 — Candidate ninfer features (owner's call, not blocking) · superseded by D-032
 Ranked by value to Exocortex. None of these is required for v0.
 1. **Request priority classes** (main > interactive sidecar > background) in admission and prefill ordering, or at least a "low priority: don't preempt main's decode" flag.
 2. **Retained-bundle fork / copy-on-write**, so a sidecar can reuse main's prefix without claiming it. This is the biggest cost lever for fork-prefix sidecars. Upstream notes say it needs a redesign (`paged-kv-cache.md:840-842`).
 3. **User-supplied `json_schema` structured output**, reusing the existing XGrammar tool-argument path.
 4. An `/v1/embeddings` endpoint (lowest; D-026 doesn't need it).
 
-### D-028 — Design for the best-case ninfer; degrade by capability · accepted (supersedes D-024, D-027; amends D-007, D-023, D-025)
-- **Context:** The owner controls the fork and will implement whatever Exocortex needs. The requirements are in `docs/NINFER_REQUIREMENTS.md` (R1–R13).
+### D-028 — Design for the best-case ninfer; degrade by capability · superseded by D-032
+- **Context:** The owner controls the fork and will implement whatever Exocortex needs. The requirements were in `docs/NINFER_REQUIREMENTS.md` (R1–R13, since removed).
 - **Decision:** Exocortex's primary design assumes:
   - **fork-on-reuse** (R1), **priority classes** (R2) and **retention control** (R3);
   - **prompt-neutral `json_schema`** (R4);
@@ -247,7 +247,7 @@ Based on `docs/PI_API_NOTES.md` (pi `@earendil-works/pi-coding-agent` 1.0.2, for
 - **SQLite:** `node:sqlite` (pi requires Node ≥22.19, where it's unflagged). FTS5 is verified available. It prints an `ExperimentalWarning` on Node 22, so how to keep that out of the TUI is a Phase 1 task.
 - **Lint:** Biome's `useLiteralKeys` is off because it conflicts with TypeScript's stricter `noPropertyAccessFromIndexSignature`.
 
-### D-031 — pi ↔ ninfer provider config · proposed (verify in Phase 2)
+### D-031 — pi ↔ ninfer provider config · proposed (verify in Phase 2); generalized by D-032
 Add ninfer to `~/.pi/agent/models.json` as an `openai-completions` provider with:
 - `compat: { supportsDeveloperRole: false, supportsStore: false, supportsReasoningEffort: false, maxTokensField: "max_completion_tokens", thinkingFormat: "qwen-chat-template" }`
 - `contextWindow` set to the `--max-context` ninfer runs with.
@@ -255,6 +255,66 @@ Add ninfer to `~/.pi/agent/models.json` as an `openai-completions` provider with
 `qwen-chat-template` sends `chat_template_kwargs: {enable_thinking, preserve_thinking: true}`. ninfer accepts both keys. Keeping thinking preserved means earlier turns aren't re-rendered, which helps prefix stability (D-023).
 
 Open check: Exocortex's injected `custom_message` reaches ninfer as a second consecutive `user` message. Verify that ninfer's Qwen template renders it.
+
+---
+
+### D-032 — Engine-agnostic: standard OpenAI API + engine profiles; ninfer asks limited to parity · accepted (supersedes D-028, D-027; amends D-023, D-024, D-025)
+- **Context:** The owner pushed back on coupling Exocortex to ninfer. ninfer will add a feature if another mainstream engine (vLLM, SGLang, llama.cpp) has it and it genuinely matters, or if it's a compelling state-of-the-art feature. Nothing Exocortex-specific.
+- **Decision:**
+  - Exocortex uses only the standard OpenAI Chat Completions API plus widely supported extensions. These are the F1–F9 list in `docs/INFERENCE_ENGINES.md`: prefix caching, `cached_tokens`, `json_schema`, `chat_template_kwargs`, `priority`, `logprobs`, `n`.
+  - No `ninfer` body fields, no custom endpoints, no session or retention APIs.
+  - An **engine profile** in config states which features the deployed engine supports. Modules take documented fallbacks when a feature is missing.
+- **Fork-prefix sidecars** don't need a server API. The adapter captures main's exact outgoing request in `before_provider_request` (D-029). A sidecar resends it byte for byte plus an appended message, and the engine's automatic prefix cache does the rest.
+  - The suffix goes in as a `user` or `system` message, whichever the template renders as a pure suffix. Eval checks this via `cached_tokens`.
+  - Fork-prefix is enabled per module only when the profile claims F1 *and* eval confirms the hits.
+- **Without F1** (ninfer today): D-024's rules apply: isolated prompts by default, at most one serialized fork while main is idle, and a cap on prompt size.
+- **Without F5:** Exocortex's own queue (caps on in-flight sidecars and sidecar prompt size, `reservedForMain`) protects main.
+- **ninfer parity asks** are in `docs/INFERENCE_ENGINES.md`, ranked: F1 concurrent prefix sharing, then F3 `json_schema`, F4 template conformance, F6 logprobs, F5 priority, F7 `n>1`. No non-standard features are requested; two "beyond parity" ideas are parked until eval evidence justifies them.
+
+---
+
+## Phase 1 (2026-10-04)
+
+### D-033 — Trace store, config and eval harness as built · accepted (Phase 1; resolves open question 15)
+- **Config:**
+  - Sources: defaults ← `~/.exocortex/config.jsonc` (or `EXO_CONFIG`) ← `<cwd>/.exocortex/config.jsonc`, deep-merged and TypeBox-validated.
+  - Unknown keys or invalid values **disable Exocortex** (fail closed), and pi shows a warning in UI modes. A missing `EXO_CONFIG` file counts as a problem.
+  - Example: `exocortex.config.example.jsonc`.
+- **Trace store (`@exocortex/core`):**
+  - One SQLite DB per user by default; eval uses one per run. WAL mode, `node:sqlite`.
+  - Only Node's SQLite `ExperimentalWarning` is suppressed, and only while the module loads.
+  - Schema v1 has just `sessions` and `events`. The brief's `injections`, `verdicts` and `sidecar_calls` tables arrive as migrations in the phases that write them.
+  - Appends are buffered in memory and written in one transaction per flush (after 50 ms, or at 256 ops, at `agent_settled`, or at shutdown). Write errors go to a callback and never throw into pi.
+- **Event mapping (pi → trace):**
+  - Kinds: `session.start/end`, `user.input`, `llm.request`, `message`, `tool.call`, `tool.result`, `turn.end`, `agent.settled`, `compaction`, `model.change`.
+  - `llm.request` stores a **fingerprint**, not the payload: a hash per message, the tools hash, total characters and params. That keeps the DB small and still lets eval measure prefix stability.
+  - `message` stores the full message, minus inline binary data.
+  - `tool.result` stores the **original** tool output plus the bash `exit_code`.
+  - `exo.*` custom messages are tagged `synthetic` with their module.
+- **Eval harness (`@exocortex/eval`):**
+  - **Own RPC driver** instead of pi's `RpcClient`, because it must auto-dismiss extension dialogs, enforce turn and wall-clock limits, kill whole process groups, and keep pi's stderr out of the console.
+  - **Runs** go sequentially, one main agent at a time, so they don't compete for the inference server.
+  - **Workspace** per run: copy the fixture's `repo/` into the run dir and `git init` + commit it, so diffs are visible.
+  - **pi flags:** `-ne -ns -np -nc --no-themes`, `--session-dir` per run, Exocortex loaded with `-e`. The user's `~/.pi/agent` supplies models and auth unless `--pi-agent-dir` is given.
+  - **Metrics** come only from the trace: turns, tokens (input/cached/output), cache-hit rate, prefix-kept rate, tool errors, repeated-error rate (deterministic normalized signatures), injections, continuations, compactions. The check command decides success.
+  - **Fixtures:** `tasks/<id>/{task.json, repo/, solution.patch}`. `npm run eval -- --validate` (also run in CI) requires the pristine repo to fail the check and the solution to pass. Six seed tasks: 3 Python, 1 Go, 1 Rust, 1 C++.
+- **Phase 1 acceptance status:**
+  - Mechanics are verified end to end against a scripted fake model: success, failure and max-turns paths, plus the report for all 6 tasks.
+  - The required baseline table on a real model has to be run on the owner's machine: `npm run eval -- --model <provider>/<model> --repeat 3`. Tag `phase-1` after that table exists (it now does: D-034).
+
+---
+
+### D-034 — Phase 1 baseline: fixtures are at ceiling · accepted (2026-10-04)
+- **Run:** owner's machine, model `ninfer/coding` (Qwen3.8-27B on ninfer), config `all-off`, 6 tasks × 3 repeats.
+- **Result:**
+  - **Success:** 18/18 (100%), every task 3/3.
+  - **Per run (mean):** 5.3 turns, 3.1k uncached input tokens, 17.6k cached input tokens, 2.7k output tokens, 7 s median wall clock.
+  - **Cache hit 85%, prefix kept 100%:** pi's main loop is prefix-stable and ninfer's prefix reuse works for append-only conversations.
+  - **0 repeated errors, 0 abnormal runs.**
+- **Phase 1 acceptance:** met. The baseline table exists for ≥5 tasks.
+- **Consequence:** the seed tasks are **too easy to measure any module**. At 100% success, the supervisor, trimmer, triage and memory can only show cost, never benefit.
+  - Before any module's on/off comparison counts as evidence, the task set needs headroom: a baseline success rate of roughly 30–70% on this model.
+  - The seed tasks stay as a fast smoke and regression set (`tags: ["small"]`).
 
 ---
 
@@ -269,9 +329,9 @@ Open check: Exocortex's injected `custom_message` reaches ninfer as a second con
 7. ~~Resolved by D-029 (yes, `ctx.ui.setEditorText`).~~ Can pi's UI API pre-fill the editor or offer one-key accept for supervisor suggestions (D-010)? *(Phase 0)*
 8. ~~ninfer fork details~~ — mostly answered by D-023. Remaining: confirm the 6-slot build vs. the public 1-4 cap.
 9. **New:** Thinking-mode defaults per module (D-008). *(Phase 3+, eval)*
-10. ~~Superseded by R4 in NINFER_REQUIREMENTS.~~ Does a named `tool_choice` enforce the XGrammar schema well enough to use as structured output (D-023)? *(Phase 2)*
+10. ~~Superseded by D-032 (F3 / prompted-JSON fallback).~~ Does a named `tool_choice` enforce the XGrammar schema well enough to use as structured output (D-023)? *(Phase 2)*
 11. ~~Superseded by R1.~~ After a fork-prefix sidecar claims main's retained state, does main's next request still hit cache (D-024)? *(Phase 2)*
 12. **New:** Main's `reasoning_effort` / thinking setting decides which sidecar settings can share its prefix. Pick the main default with this in mind (D-008, D-023). *(Phase 2)*
 13. ~~Resolved by D-029 (yes, both).~~ Can pi attach per-session headers or extra body fields to main's requests (needed to tag main with `session_id`/`retain`, D-028)? *(Phase 0)*
 14. **New:** Does ninfer's Qwen template accept two consecutive `user` messages (injected `custom_message`, D-031)? *(Phase 2)*
-15. **New:** Keep `node:sqlite`'s ExperimentalWarning out of the pi TUI (D-030). *(Phase 1)*
+15. ~~Resolved by D-033.~~ Keep `node:sqlite`'s ExperimentalWarning out of the pi TUI (D-030).

@@ -2,27 +2,39 @@ import { appendFileSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createDebugLog, type DebugLog } from "@exocortex/core";
 import { HIGH_FREQUENCY_EVENTS, PI_EVENT_NAMES, type PiEventName } from "./pi-events.ts";
+import { createRuntime } from "./runtime.ts";
 import { summarizePiEvent } from "./summarize.ts";
+import { registerTraceRecorder } from "./trace-recorder.ts";
 
 const DEBUG_FLAG = "exo-debug";
 
 type DebugLevel = "off" | "events" | "verbose";
 
 /**
- * Exocortex pi extension entrypoint. Phase 0: an event tracer. With `--exo-debug=1` or
- * `EXO_DEBUG=1` it writes one line per pi event to stderr (or to `EXO_DEBUG_FILE`);
- * `EXO_DEBUG=verbose` also logs per-token events. Otherwise it does nothing.
+ * Exocortex pi extension entrypoint.
+ *
+ * - Trace recorder: persists pi events to the SQLite trace store (config `trace`).
+ * - Debug tracer: with `--exo-debug=1` or `EXO_DEBUG=1`, one line per pi event to stderr (or
+ *   `EXO_DEBUG_FILE`); `EXO_DEBUG=verbose` adds per-token events. Swallowed hook errors are
+ *   logged here as `exo.error`.
  */
 export default function exocortex(pi: ExtensionAPI): void {
+	const env = process.env;
 	pi.registerFlag(DEBUG_FLAG, {
 		type: "boolean",
 		default: false,
 		description: "Exocortex: log every pi event (see also EXO_DEBUG, EXO_DEBUG_FILE)",
 	});
 
-	const log = createDebugLog({ enabled: true, write: createWriter(process.env["EXO_DEBUG_FILE"]) });
+	const log = createDebugLog({ enabled: true, write: createWriter(env["EXO_DEBUG_FILE"]) });
 	// Flags are parsed after extensions load, so the level is resolved per event, not here.
-	const level = (): DebugLevel => resolveDebugLevel(process.env["EXO_DEBUG"], pi.getFlag(DEBUG_FLAG));
+	const level = (): DebugLevel => resolveDebugLevel(env["EXO_DEBUG"], pi.getFlag(DEBUG_FLAG));
+	const onError = (where: string, error: unknown): void => {
+		if (level() !== "off") log.event("exo.error", { where, error: String(error) });
+	};
+
+	const runtime = createRuntime({ env, onError });
+	registerTraceRecorder(pi, { runtime, env, onError });
 
 	// `pi.on` is a set of per-event overloads; registering one tracer for all names needs a
 	// single erased signature. Handlers return `undefined` so they never alter pi's behavior.

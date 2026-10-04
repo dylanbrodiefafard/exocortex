@@ -4,3 +4,4 @@ coverage/
 .exocortex/
 .pi/
 *.log
+eval-runs/

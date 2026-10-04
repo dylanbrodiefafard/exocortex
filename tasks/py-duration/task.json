@@ -1,0 +1,9 @@
+{
+	"id": "py-duration",
+	"language": "python",
+	"prompt": "Implement parse_duration in durations.py exactly as its docstring specifies. The tests are in test_durations.py; make them pass without changing them.",
+	"check": "python3 -m unittest -q test_durations",
+	"maxTurns": 20,
+	"timeoutSec": 600,
+	"tags": ["feature", "small"]
+}

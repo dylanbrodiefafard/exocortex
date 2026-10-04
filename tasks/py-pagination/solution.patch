@@ -1,0 +1,19 @@
+diff --git a/pagination.py b/pagination.py
+index b69c367..fdd47ba 100644
+--- a/pagination.py
++++ b/pagination.py
+@@ -8,7 +8,7 @@ def paginate(items, page, per_page):
+     """
+     if page < 1 or per_page < 1:
+         raise ValueError("page and per_page must be >= 1")
+-    start = page * per_page
++    start = (page - 1) * per_page
+     return items[start:start + per_page]
+ 
+ 
+@@ -16,4 +16,4 @@ def page_count(total, per_page):
+     """Number of pages needed to show `total` items, `per_page` at a time."""
+     if per_page < 1:
+         raise ValueError("per_page must be >= 1")
+-    return total // per_page
++    return -(-total // per_page)

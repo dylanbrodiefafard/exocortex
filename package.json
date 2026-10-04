@@ -16,7 +16,8 @@
 		"knip": "knip",
 		"test": "vitest run",
 		"test:watch": "vitest",
-		"check": "npm run lint && npm run typecheck && npm run knip && npm run test"
+		"check": "npm run lint && npm run typecheck && npm run knip && npm run test",
+		"eval": "node packages/eval/src/cli.ts"
 	},
 	"devDependencies": {
 		"@biomejs/biome": "2.5.15",
