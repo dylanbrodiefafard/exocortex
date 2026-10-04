@@ -369,6 +369,69 @@ Open check: Exocortex's injected `custom_message` reaches ninfer as a second con
 
 ---
 
+## Phase 2 (2026-10-04)
+
+### D-036 — Sidecar pool and inference client as built · accepted (Phase 2; refines D-025, D-032)
+- **Engine config:** `engine.{baseUrl, model, apiKey, profile, features}`.
+  - Unset `baseUrl`/`model`/`apiKey` fall back to pi's main model when it is an `openai-completions` provider. Its API key comes from pi's model registry, with a 2 s cap.
+  - `apiKey` accepts `$NAME`.
+  - Profiles (`generic`, `vllm`, `sglang`, `llamacpp`, `ninfer`) map to the F1–F7 flags in `docs/INFERENCE_ENGINES.md`. They're conservative where support depends on server flags, and per-feature overrides win.
+- **Inference client:**
+  - Plain non-streaming `/chat/completions` over `fetch`.
+  - `priority`, `response_format: json_schema` and `chat_template_kwargs.enable_thinking` are sent only when requested; the first two also need the profile to support them.
+  - Usage includes `cached_tokens` when reported.
+  - Errors are typed: `http`, `network`, `aborted`, `bad_response`.
+- **Structured output:**
+  - `json_schema` when the engine supports it; otherwise an appended *user* message with the JSON Schema.
+  - JSON is extracted tolerantly (fences, `<think>` blocks, outermost braces) and TypeBox-validated.
+  - One repair turn quotes the validation error, then it gives up (`invalid_output`).
+- **Pool:**
+  - Slots = `maxConcurrent − reservedForMain`, reserved at all times, because main can start at any moment.
+  - Priority classes `critical > interactive > background`, FIFO within a class.
+  - `background` is held while main is active (`agent_start` … `agent_settled`).
+  - Each call has an end-to-end deadline, queueing included. On expiry the HTTP request is aborted, so the engine stops generating.
+  - Per-module per-turn call caps and `max_tokens` clamps; an optional session token budget; cancellation by signal or filter.
+  - **`run()` never rejects:** every failure resolves `ok:false` with an outcome, so modules degrade to a no-op.
+  - Engine `priority` mapping when supported: critical 0, interactive 1, background 2. Main sends none, which is 0.
+- **Turns:** user input (not extension input) starts a new turn and cancels non-background calls from the previous one.
+- **Trace:** schema v2 adds `sidecar_calls`, one row per call (outcome, prompt hash, queue/latency, attempts, tokens including cached). Eval reports sidecar tokens and failures per config.
+- **`/exo` command:** `status` and `ping` (a one-call engine check). It arrives ahead of Phase 3's toggles because it's the only way to check sidecar connectivity by hand.
+- **Phase 2 acceptance:**
+  - (a) A test submits 20 queued jobs over HTTP and they never exceed the configured concurrency (`maxInFlight` = slots). A fast-check property covers the slot cap and priority order over random job mixes.
+  - (b) **Pending owner run:** the main-agent latency regression is measured by `npm run loadtest`, comparing main alone with main beside 20 sidecars kept in flight. Tag `phase-2` once that report exists (it does: D-038).
+
+---
+
+### D-038 — Load tests on ninfer: pool config must match the engine's real slots; Phase 2 acceptance met · accepted (2026-10-04)
+- **Sidecar check:** `/exo ping` on the owner's machine took 75 ms, with 15 of 19 prompt tokens cached. Sidecars work against ninfer, using pi's main model as the engine.
+- **Load test as run:**
+  - ninfer had **2** slots, but the pool used the defaults (6 slots, 2 reserved, so 4 sidecar slots). Main context was about 16k estimated tokens.
+  - Main alone: TTFT p50 175 ms, total p50 709 ms, about 436 tok/s decode.
+  - With 20 sidecars kept in flight: TTFT p50 1303 ms (+644%), total p50 2083 ms (+194%), decode 305 tok/s.
+  - Sidecars: 47 completed, 0 failed, p50 latency 1976 ms.
+- **Reading:**
+  - The pool believed it had 4 sidecar slots on a 2-slot engine, so sidecars took **both** real slots. ninfer has no request priority and serves requests FIFO, so main queued behind them.
+  - This is the case `reservedForMain` exists to prevent, and it only works when `pool.maxConcurrent` matches the engine's real slot count. It doesn't measure what the pool does when configured correctly. **Phase 2 acceptance stays pending** until a re-run with matching config: `--max-concurrent 2 --reserved 1` now, then `6 / 2` once ninfer runs 6 slots.
+  - Even when configured correctly, a sidecar's prefill still shares the GPU with main's decode. The remaining regression measures what F5 (request priority) and interleaved prefill would buy, which is direct evidence for that ninfer parity ask (`docs/INFERENCE_ENGINES.md`).
+  - Cached tokens were 24,576 on every main request. That's ninfer's first context-checkpoint rung: each load-test request diverges after the shared system prompt, so reuse falls back to the nearest checkpoint. A real agent loop appends instead, and in eval reached 95% cache hit (D-037).
+- **Re-run with matching config** (`--max-concurrent 2 --reserved 1`, so 1 sidecar slot):
+
+  | Main agent | TTFT p50 | TTFT p95 | Total p50 | Total p95 | Decode tok/s |
+  |---|---|---|---|---|---|
+  | Alone | 182 ms | 196 ms | 741 ms | 782 ms | 438 |
+  | With 20 sidecars queued | 177 ms | 505 ms | 791 ms | 887 ms | 381 |
+  | Regression | −3% | **+157%** | +7% | +13% | −13% |
+
+  - Sidecars: 29 completed, 0 failed, p50 latency 484 ms, 1/1 slot used.
+  - **Phase 2 acceptance met:** the regression is measured and reported, and it's small at the median.
+  - The p95 TTFT tail is the expected cost of ninfer's one-prefill-at-a-time, prefill-first scheduling: a main request that arrives while a sidecar prefill is running waits for it. Decode drops about 13% from sharing the batch.
+  - Both costs are what request priority (F5) and interleaved prefill would remove. Re-measure at 6 slots (`--max-concurrent 6 --reserved 2`) when ninfer moves there.
+- **Follow-ups:**
+  - Document that `pool.maxConcurrent` must equal the engine's slot count. The example config and README say so.
+  - `h-rust-forth` validates on the owner's 32-core machine, so its 0/3 is the model's failure, not the environment's. The next calibration run should use `--keep-workdirs` to see why.
+
+---
+
 ## Open questions (carried from brief §10, updated)
 
 1. ~~Resolved by D-029.~~ Exact pi mechanism for injecting into the current user turn without altering prior messages. *(Phase 0)*

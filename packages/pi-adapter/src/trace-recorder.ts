@@ -66,6 +66,7 @@ export function registerTraceRecorder(pi: ExtensionAPI, options: RecorderOptions
 					model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
 				}),
 			});
+			runtime.traceSession = session;
 			record({ kind: "session.start", data: toJsonValue({ reason: event.reason }) });
 		}),
 	);
@@ -76,6 +77,7 @@ export function registerTraceRecorder(pi: ExtensionAPI, options: RecorderOptions
 			record({ kind: "session.end", data: toJsonValue({ reason: event.reason }) });
 			session?.end();
 			session = undefined;
+			runtime.traceSession = undefined;
 			if (event.reason === "quit") runtime.shutdown();
 			else runtime.store?.flush();
 		}),

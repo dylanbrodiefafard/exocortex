@@ -1,10 +1,22 @@
-import { type ExoConfig, type LoadedConfig, loadConfig, openTraceStore, type TraceStore } from "@exocortex/core";
+import {
+	type ExoConfig,
+	type LoadedConfig,
+	loadConfig,
+	openTraceStore,
+	type SidecarPool,
+	type TraceSession,
+	type TraceStore,
+} from "@exocortex/core";
 
 export interface Runtime {
 	/** Loads config for `cwd` (once) and opens the trace store if enabled. Never throws. */
 	activate(cwd: string): LoadedConfig;
 	readonly config: ExoConfig | undefined;
 	readonly store: TraceStore | undefined;
+	/** The current pi session's trace, while one is open. */
+	traceSession: TraceSession | undefined;
+	/** The sidecar pool for the current pi session, when an engine is configured. */
+	pool: SidecarPool | undefined;
 	/** Flushes and closes the store. */
 	shutdown(): void;
 }
@@ -48,6 +60,8 @@ export function createRuntime(options: RuntimeOptions): Runtime {
 		get store() {
 			return store;
 		},
+		traceSession: undefined,
+		pool: undefined,
 		shutdown() {
 			try {
 				store?.close();

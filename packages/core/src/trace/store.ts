@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
+import type { SidecarCallRecord } from "../inference/pool.ts";
 import { migrate } from "./schema.ts";
 import { openDatabase } from "./sqlite.ts";
 
@@ -75,6 +76,8 @@ export interface TraceSession {
 	readonly id: string;
 	/** Buffers the event; it is written on the next flush. Never throws. */
 	append(event: TraceEventInput): void;
+	/** Buffers one sidecar call record (brief §5.2 `sidecar_calls`). Never throws. */
+	recordSidecarCall(record: SidecarCallRecord): void;
 	end(): void;
 }
 
@@ -82,6 +85,7 @@ export interface TraceStore {
 	startSession(info: SessionInfo): TraceSession;
 	sessions(filter?: { readonly label?: string }): StoredSession[];
 	events(sessionId: string, filter?: { readonly kinds?: readonly TraceEventKind[] }): StoredTraceEvent[];
+	sidecarCalls(sessionId: string): SidecarCallRecord[];
 	/** Writes buffered operations in one transaction. Never throws; failures go to `onError`. */
 	flush(): void;
 	/** Flushes and closes. Further appends are dropped. */
@@ -108,7 +112,8 @@ type PendingOp =
 			readonly event: TraceEventInput;
 			readonly ts: number;
 	  }
-	| { readonly op: "end"; readonly id: string; readonly ts: number };
+	| { readonly op: "end"; readonly id: string; readonly ts: number }
+	| { readonly op: "sidecar"; readonly sessionId: string; readonly record: SidecarCallRecord };
 
 const DEFAULT_FLUSH_INTERVAL_MS = 50;
 const DEFAULT_MAX_BUFFERED = 256;
@@ -171,6 +176,10 @@ export function openTraceStore(options: TraceStoreOptions): TraceStore {
 					seq += 1;
 					enqueue({ op: "event", sessionId: id, seq, event, ts: event.ts ?? now() });
 				},
+				recordSidecarCall(record) {
+					if (ended) return;
+					enqueue({ op: "sidecar", sessionId: id, record });
+				},
 				end() {
 					if (ended) return;
 					ended = true;
@@ -191,6 +200,11 @@ export function openTraceStore(options: TraceStoreOptions): TraceStore {
 			const rows = statements.eventsBySession.all({ session_id: sessionId }) as unknown as EventRow[];
 			const kinds = filter.kinds ? new Set<string>(filter.kinds) : undefined;
 			return rows.filter((row) => !kinds || kinds.has(row.kind)).map(toEvent);
+		},
+		sidecarCalls(sessionId) {
+			flush();
+			const rows = statements.sidecarCallsBySession.all({ session_id: sessionId }) as unknown as SidecarRow[];
+			return rows.map(toSidecarCall);
 		},
 		flush,
 		close() {
@@ -214,6 +228,10 @@ function prepare(db: DatabaseSync) {
 		allSessions: db.prepare("SELECT * FROM sessions ORDER BY started_at, rowid"),
 		sessionsByLabel: db.prepare("SELECT * FROM sessions WHERE label = :label ORDER BY started_at, rowid"),
 		eventsBySession: db.prepare("SELECT * FROM events WHERE session_id = :session_id ORDER BY seq"),
+		insertSidecarCall: db.prepare(
+			"INSERT INTO sidecar_calls (session_id, ts, module, priority, outcome, prompt_hash, queue_ms, latency_ms, attempts, max_tokens, prompt_tokens, cached_tokens, completion_tokens, error) VALUES (:session_id, :ts, :module, :priority, :outcome, :prompt_hash, :queue_ms, :latency_ms, :attempts, :max_tokens, :prompt_tokens, :cached_tokens, :completion_tokens, :error)",
+		),
+		sidecarCallsBySession: db.prepare("SELECT * FROM sidecar_calls WHERE session_id = :session_id ORDER BY id"),
 	};
 }
 
@@ -245,6 +263,26 @@ function write(statements: ReturnType<typeof prepare>, op: PendingOp): void {
 		case "end":
 			statements.endSession.run({ id: op.id, ended_at: op.ts });
 			return;
+		case "sidecar": {
+			const r = op.record;
+			statements.insertSidecarCall.run({
+				session_id: op.sessionId,
+				ts: r.startedAt,
+				module: r.module,
+				priority: r.priority,
+				outcome: r.outcome,
+				prompt_hash: r.promptHash,
+				queue_ms: Math.round(r.queueMs),
+				latency_ms: Math.round(r.latencyMs),
+				attempts: r.attempts,
+				max_tokens: r.maxTokens,
+				prompt_tokens: r.usage.promptTokens,
+				cached_tokens: r.usage.cachedTokens,
+				completion_tokens: r.usage.completionTokens,
+				error: r.error,
+			});
+			return;
+		}
 	}
 }
 
@@ -295,5 +333,41 @@ function toEvent(row: EventRow): StoredTraceEvent {
 		synthetic: row.synthetic === 1,
 		module: row.module,
 		data: JSON.parse(row.data) as JsonValue,
+	};
+}
+
+interface SidecarRow {
+	ts: number;
+	module: string;
+	priority: SidecarCallRecord["priority"];
+	outcome: SidecarCallRecord["outcome"];
+	prompt_hash: string;
+	queue_ms: number;
+	latency_ms: number;
+	attempts: number;
+	max_tokens: number;
+	prompt_tokens: number;
+	cached_tokens: number | null;
+	completion_tokens: number;
+	error: string | null;
+}
+
+function toSidecarCall(row: SidecarRow): SidecarCallRecord {
+	return {
+		module: row.module,
+		priority: row.priority,
+		outcome: row.outcome,
+		promptHash: row.prompt_hash,
+		startedAt: row.ts,
+		queueMs: row.queue_ms,
+		latencyMs: row.latency_ms,
+		attempts: row.attempts,
+		maxTokens: row.max_tokens,
+		usage: {
+			promptTokens: row.prompt_tokens,
+			cachedTokens: row.cached_tokens,
+			completionTokens: row.completion_tokens,
+		},
+		error: row.error,
 	};
 }

@@ -15,6 +15,14 @@ describe("loadConfig", () => {
 		expect(config).toEqual({
 			enabled: true,
 			trace: { enabled: true, dbPath: "/home/u/.exocortex/exocortex.db" },
+			engine: { profile: "generic" },
+			pool: {
+				maxConcurrent: 6,
+				reservedForMain: 2,
+				timeoutMs: 20_000,
+				sessionTokenBudget: 0,
+				backgroundWhenIdleOnly: true,
+			},
 			modules: {},
 		});
 		expect(sources).toEqual([
@@ -65,6 +73,14 @@ describe("loadConfig", () => {
 		expect(config.enabled).toBe(false);
 		expect(problems.length).toBeGreaterThanOrEqual(2);
 		expect(config.trace.dbPath).toBe("/home/u/.exocortex/exocortex.db");
+	});
+
+	it("rejects a pool with no sidecar slots", () => {
+		const { config, problems } = load({
+			"/work/repo/.exocortex/config.jsonc": `{ "pool": { "maxConcurrent": 2, "reservedForMain": 2 } }`,
+		});
+		expect(config.enabled).toBe(false);
+		expect(problems[0]).toMatch(/reservedForMain/);
 	});
 
 	it("respects the master switch", () => {

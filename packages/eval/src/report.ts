@@ -15,6 +15,8 @@ export interface ConfigSummary {
 	readonly repeatedErrorRate: number | null;
 	readonly injections: number;
 	readonly continuations: number;
+	readonly meanSidecarTokens: number | null;
+	readonly sidecarFailures: number;
 	readonly abnormal: number;
 }
 
@@ -42,6 +44,8 @@ export function summarize(records: readonly RunRecord[]): ConfigSummary[] {
 			repeatedErrorRate: totalErrors > 0 ? sum(withMetrics.map((m) => m.repeatedToolErrors)) / totalErrors : null,
 			injections: sum(withMetrics.map((m) => m.injections)),
 			continuations: sum(withMetrics.map((m) => m.continuations)),
+			meanSidecarTokens: mean(withMetrics.map((m) => m.sidecarTokens)),
+			sidecarFailures: sum(withMetrics.map((m) => m.sidecarFailures)),
 			abnormal: runs.filter((r) => r.outcome !== "settled").length,
 		};
 	});
@@ -53,8 +57,8 @@ export function renderMarkdown(records: readonly RunRecord[], title: string): st
 	const lines = [
 		`# ${title}`,
 		"",
-		"| config | success | turns | input tok | cached tok | output tok | cache hit | prefix kept | median wall | repeated err | injections | continuations | abnormal |",
-		"|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+		"| config | success | turns | input tok | cached tok | output tok | cache hit | prefix kept | median wall | repeated err | injections | continuations | sidecar tok | sidecar fail | abnormal |",
+		"|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
 		...summaries
 			.map((s) =>
 				[
@@ -70,12 +74,14 @@ export function renderMarkdown(records: readonly RunRecord[], title: string): st
 					s.repeatedErrorRate === null ? "—" : pct(s.repeatedErrorRate),
 					String(s.injections),
 					String(s.continuations),
+					fixed(s.meanSidecarTokens, 0),
+					String(s.sidecarFailures),
 					String(s.abnormal),
 				].join(" | "),
 			)
 			.map((row) => `| ${row} |`),
 		"",
-		"Token columns are per-run means of main-model usage. *abnormal* counts runs that hit max turns, timed out or crashed.",
+		"Token columns are per-run means of main-model usage; *sidecar tok* is the per-run mean of Exocortex's own calls. *abnormal* counts runs that hit max turns, timed out or crashed.",
 		"",
 		"## Per task",
 		"",

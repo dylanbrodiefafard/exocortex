@@ -31,7 +31,11 @@ interface PiRun {
  * Runs the real pi CLI in print mode against a scripted fake model, isolated from user config
  * (pi and Exocortex), with only our extension loaded.
  */
-async function runPi(script: readonly ScriptedReply[], env: Record<string, string> = {}): Promise<PiRun> {
+async function runPi(
+	script: readonly ScriptedReply[],
+	env: Record<string, string> = {},
+	prompt = "do the task",
+): Promise<PiRun> {
 	server = await startFakeOpenAIServer(script);
 	tmp = await mkdtemp(join(tmpdir(), "exo-pi-"));
 	const dbPath = join(tmp, "exo.db");
@@ -61,7 +65,7 @@ async function runPi(script: readonly ScriptedReply[], env: Record<string, strin
 		"fake/fake-model",
 		"-e",
 		ADAPTER_DIR,
-		"do the task",
+		prompt,
 	];
 	const cwd = tmp;
 	return new Promise((resolve, reject) => {
@@ -92,7 +96,8 @@ function readTrace(dbPath: string) {
 	try {
 		const sessions = store.sessions();
 		const events = sessions.flatMap((s) => store.events(s.id));
-		return { sessions, events };
+		const sidecarCalls = sessions.flatMap((s) => store.sidecarCalls(s.id));
+		return { sessions, events, sidecarCalls };
 	} finally {
 		store.close();
 	}
@@ -204,5 +209,37 @@ describe("pi CLI with the Exocortex extension", { timeout: 30_000 }, () => {
 		expect(run.code).toBe(0);
 		expect(run.stdout.trim()).toBe("still works");
 		expect(readTrace(run.dbPath).sessions).toEqual([]);
+	});
+
+	it("runs sidecar calls through the pool against the main model's endpoint and records them", async () => {
+		const run = await runPi([{ kind: "text", text: "pong", cachedTokens: 4 }], {}, "/exo ping");
+		expect(run.code).toBe(0);
+		expect(run.stderr).toMatch(/Exocortex sidecar OK in \d+ ms \(10 prompt tokens, 4 cached\): pong/);
+		// The only request is the sidecar's: non-streaming, thinking off, to the main model's id.
+		expect(server?.requests).toEqual([
+			expect.objectContaining({
+				model: "fake-model",
+				stream: false,
+				max_tokens: 16,
+				chat_template_kwargs: { enable_thinking: false },
+			}),
+		]);
+		const { sidecarCalls } = readTrace(run.dbPath);
+		expect(sidecarCalls).toEqual([
+			expect.objectContaining({
+				module: "exo.ping",
+				priority: "interactive",
+				outcome: "ok",
+				attempts: 1,
+				usage: { promptTokens: 10, cachedTokens: 4, completionTokens: 5 },
+			}),
+		]);
+	});
+
+	it("reports sidecar status", async () => {
+		const run = await runPi([], {}, "/exo status");
+		expect(run.code).toBe(0);
+		expect(run.stderr).toMatch(/Exocortex: enabled/);
+		expect(run.stderr).toMatch(/sidecars: 0 running/);
 	});
 });

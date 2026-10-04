@@ -17,10 +17,13 @@
 		"test": "vitest run",
 		"test:watch": "vitest",
 		"check": "npm run lint && npm run typecheck && npm run knip && npm run test",
-		"eval": "node packages/eval/src/cli.ts"
+		"eval": "node packages/eval/src/cli.ts",
+		"loadtest": "node packages/eval/src/loadtest-cli.ts",
+		"pi": "pi -e ./packages/pi-adapter"
 	},
 	"devDependencies": {
 		"@biomejs/biome": "2.5.15",
+		"@earendil-works/pi-coding-agent": "1.0.2",
 		"@types/node": "22.20.5",
 		"knip": "6.39.0",
 		"typescript": "7.0.2",
