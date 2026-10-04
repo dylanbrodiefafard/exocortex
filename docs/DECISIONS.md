@@ -673,6 +673,17 @@ Open check: Exocortex's injected `custom_message` reaches ninfer as a second con
 
 ---
 
+### D-052 — Merge default-off work without waiting for A/B; tags and defaults stay gated · accepted (amends D-047, D-020, D-022; owner's call, 2026-10-04)
+- **Context:** the owner asked to merge and keep moving while GPU runs are pending.
+- **Decision:**
+  - Work that ships **off by default** merges to `main` once `npm run check` and CI are green.
+  - Two things still wait for their acceptance run in `docs/AB_PLAN.md`:
+    - **phase tags** (`phase-3`, `phase-4`, `phase-5`), D-022;
+    - **turning any module or option on by default.**
+- **Applied:** Phase 3 (#5) and the Phase 4/5/6 branch merge on this basis. Neither is tagged until its A/B passes.
+
+---
+
 ## Open questions (carried from brief §10, updated)
 
 1. ~~Resolved by D-029.~~ Exact pi mechanism for injecting into the current user turn without altering prior messages. *(Phase 0)*
