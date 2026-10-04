@@ -30,6 +30,26 @@ const MIGRATIONS: readonly string[] = [
 	);
 	CREATE INDEX events_kind ON events (kind, session_id);
 	`,
+	`
+	CREATE TABLE sidecar_calls (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		session_id TEXT NOT NULL REFERENCES sessions(id),
+		ts INTEGER NOT NULL,
+		module TEXT NOT NULL,
+		priority TEXT NOT NULL,
+		outcome TEXT NOT NULL,
+		prompt_hash TEXT NOT NULL,
+		queue_ms INTEGER NOT NULL,
+		latency_ms INTEGER NOT NULL,
+		attempts INTEGER NOT NULL,
+		max_tokens INTEGER NOT NULL,
+		prompt_tokens INTEGER NOT NULL,
+		cached_tokens INTEGER,
+		completion_tokens INTEGER NOT NULL,
+		error TEXT
+	);
+	CREATE INDEX sidecar_calls_session ON sidecar_calls (session_id, module);
+	`,
 ];
 
 const SCHEMA_VERSION = MIGRATIONS.length;

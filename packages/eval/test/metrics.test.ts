@@ -86,7 +86,34 @@ describe("computeTraceMetrics", () => {
 			injections: 1,
 			continuations: 1,
 			compactions: 0,
+			sidecarCalls: 0,
+			sidecarTokens: 0,
+			sidecarFailures: 0,
 		});
+	});
+
+	it("counts sidecar cost and failures, excluding cap and budget rejections", () => {
+		const base = {
+			module: "triage",
+			priority: "interactive" as const,
+			promptHash: "h",
+			startedAt: 0,
+			queueMs: 0,
+			latencyMs: 10,
+			attempts: 1,
+			maxTokens: 64,
+			usage: { promptTokens: 100, cachedTokens: null, completionTokens: 20 },
+			error: null,
+		};
+		const metrics = computeTraceMetrics(
+			[],
+			[
+				{ ...base, outcome: "ok" },
+				{ ...base, outcome: "timeout" },
+				{ ...base, outcome: "rejected_turn_cap", usage: { promptTokens: 0, cachedTokens: null, completionTokens: 0 } },
+			],
+		);
+		expect(metrics).toMatchObject({ sidecarCalls: 3, sidecarTokens: 240, sidecarFailures: 1 });
 	});
 
 	it("handles an empty trace", () => {

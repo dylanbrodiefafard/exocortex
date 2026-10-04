@@ -1,4 +1,9 @@
-import { type ChatRequestFingerprint, type StoredTraceEvent, sharedPrefix } from "@exocortex/core";
+import {
+	type ChatRequestFingerprint,
+	type SidecarCallRecord,
+	type StoredTraceEvent,
+	sharedPrefix,
+} from "@exocortex/core";
 
 /** Per-run metrics derived purely from the harness-agnostic trace (brief §7). */
 export interface TraceMetrics {
@@ -22,9 +27,18 @@ export interface TraceMetrics {
 	/** Prompts sent by an extension rather than the user (e.g. supervisor continuations). */
 	readonly continuations: number;
 	readonly compactions: number;
+	/** Sidecar calls Exocortex made (all outcomes). */
+	readonly sidecarCalls: number;
+	/** Sidecar prompt + completion tokens. */
+	readonly sidecarTokens: number;
+	/** Sidecar calls that did not succeed (timeout, error, invalid output, ...), excluding cap/budget rejections. */
+	readonly sidecarFailures: number;
 }
 
-export function computeTraceMetrics(events: readonly StoredTraceEvent[]): TraceMetrics {
+export function computeTraceMetrics(
+	events: readonly StoredTraceEvent[],
+	sidecarCalls: readonly SidecarCallRecord[] = [],
+): TraceMetrics {
 	let inputTokens = 0;
 	let cachedTokens = 0;
 	let outputTokens = 0;
@@ -73,6 +87,11 @@ export function computeTraceMetrics(events: readonly StoredTraceEvent[]): TraceM
 		injections: events.filter((e) => e.kind === "message" && e.synthetic).length,
 		continuations: events.filter((e) => e.kind === "user.input" && record(e.data)["source"] === "extension").length,
 		compactions: events.filter((e) => e.kind === "compaction").length,
+		sidecarCalls: sidecarCalls.length,
+		sidecarTokens: sidecarCalls.reduce((sum, c) => sum + c.usage.promptTokens + c.usage.completionTokens, 0),
+		sidecarFailures: sidecarCalls.filter(
+			(c) => c.outcome !== "ok" && c.outcome !== "rejected_turn_cap" && c.outcome !== "rejected_budget",
+		).length,
 	};
 }
 

@@ -164,7 +164,10 @@ function readMetrics(dbPath: string, label: string): TraceMetrics | null {
 	try {
 		const sessions = store.sessions({ label });
 		if (sessions.length === 0) return null;
-		return computeTraceMetrics(sessions.flatMap((s) => store.events(s.id)));
+		return computeTraceMetrics(
+			sessions.flatMap((s) => store.events(s.id)),
+			sessions.flatMap((s) => store.sidecarCalls(s.id)),
+		);
 	} finally {
 		store.close();
 	}

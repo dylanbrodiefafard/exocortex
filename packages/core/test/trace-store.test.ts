@@ -143,3 +143,35 @@ describe("openDatabase", () => {
 		expect(result.stderr).not.toMatch(/ExperimentalWarning/);
 	});
 });
+
+describe("sidecar call records", () => {
+	it("round-trips sidecar calls per session (schema v2)", () => {
+		const { store } = open();
+		const session = store.startSession({ harness: "pi", cwd: "/" });
+		const record = {
+			module: "triage",
+			priority: "interactive" as const,
+			outcome: "ok" as const,
+			promptHash: "abc",
+			startedAt: 1_234,
+			queueMs: 5,
+			latencyMs: 120,
+			attempts: 1,
+			maxTokens: 256,
+			usage: { promptTokens: 900, cachedTokens: 850, completionTokens: 40 },
+			error: null,
+		};
+		session.recordSidecarCall(record);
+		session.recordSidecarCall({
+			...record,
+			outcome: "timeout",
+			usage: { ...record.usage, cachedTokens: null },
+			error: "late",
+		});
+		const calls = store.sidecarCalls(session.id);
+		expect(calls).toEqual([
+			record,
+			{ ...record, outcome: "timeout", usage: { ...record.usage, cachedTokens: null }, error: "late" },
+		]);
+	});
+});

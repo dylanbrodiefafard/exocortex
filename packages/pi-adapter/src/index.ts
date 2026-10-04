@@ -1,8 +1,10 @@
 import { appendFileSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createDebugLog, type DebugLog } from "@exocortex/core";
+import { registerExoCommand } from "./command.ts";
 import { HIGH_FREQUENCY_EVENTS, PI_EVENT_NAMES, type PiEventName } from "./pi-events.ts";
 import { createRuntime } from "./runtime.ts";
+import { registerSidecars } from "./sidecars.ts";
 import { summarizePiEvent } from "./summarize.ts";
 import { registerTraceRecorder } from "./trace-recorder.ts";
 
@@ -13,7 +15,9 @@ type DebugLevel = "off" | "events" | "verbose";
 /**
  * Exocortex pi extension entrypoint.
  *
+ * - Sidecar pool: one per pi session, for modules' sidecar calls (config `engine`, `pool`).
  * - Trace recorder: persists pi events to the SQLite trace store (config `trace`).
+ * - `/exo` command: status and a sidecar connectivity check.
  * - Debug tracer: with `--exo-debug=1` or `EXO_DEBUG=1`, one line per pi event to stderr (or
  *   `EXO_DEBUG_FILE`); `EXO_DEBUG=verbose` adds per-token events. Swallowed hook errors are
  *   logged here as `exo.error`.
@@ -34,7 +38,11 @@ export default function exocortex(pi: ExtensionAPI): void {
 	};
 
 	const runtime = createRuntime({ env, onError });
+	// Sidecars before the recorder: at shutdown the pool closes (recording in-flight calls)
+	// before the trace session ends.
+	registerSidecars(pi, { runtime, env, onError });
 	registerTraceRecorder(pi, { runtime, env, onError });
+	registerExoCommand(pi, runtime);
 
 	// `pi.on` is a set of per-event overloads; registering one tracer for all names needs a
 	// single erased signature. Handlers return `undefined` so they never alter pi's behavior.
