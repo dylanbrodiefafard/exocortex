@@ -124,7 +124,11 @@ function contentText(content: JsonValue | undefined): string {
 }
 
 function asRecord(value: JsonValue | undefined): { readonly [key: string]: JsonValue } {
-	return typeof value === "object" && value !== null && !Array.isArray(value) ? value : {};
+	return isJsonObject(value) ? value : {};
+}
+
+function isJsonObject(value: JsonValue | undefined): value is { readonly [key: string]: JsonValue } {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function str(value: JsonValue | undefined): string {
