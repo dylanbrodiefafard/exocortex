@@ -335,10 +335,32 @@ Open check: Exocortex's injected `custom_message` reaches ninfer as a second con
   - **Workspaces under the OS temp dir,** so the agent can't read `tasks/` (solutions, hidden tests).
   - **Task id must equal its directory name;** `--tasks` filters by directory before loading anything.
 - **Resource safety:** checks that could blow up on a wrong solution cap their memory. `h-rust-forth` runs its test binary under `ulimit -v 4 GiB`, because a naive exponential expansion would otherwise exhaust host RAM next to the inference server.
-- **Calibration:**
-  - **Pending.** The owner runs `npm run eval -- --tags hard --repeat 3`. Tasks outside a 1/3–2/3 success rate get reworked or dropped, and the decision is recorded here.
+- **Calibration:** see D-037.
+  - **Originally pending.** The owner runs `npm run eval -- --tags hard --repeat 3`. Tasks outside a 1/3–2/3 success rate get reworked or dropped, and the decision is recorded here.
   - **Authors' guesses:** `h-go-multi-package-config`, `h-py-noisy-test-suite` and `h-rust-forth` may land too easy; `h-py-log-analyzer` (six bugs) and `h-py-mini-framework` may land too hard.
 - **Authoring rules:** `docs/EVAL_TASKS.md`.
+
+---
+
+### D-037 — Hard tier calibration, round 1 · accepted (2026-10-04)
+- **Run:** owner's machine, `ninfer/coding`, `all-off`, 12 hard tasks × 3 repeats.
+- **Aggregate:** **23/36 (64%)**, inside the 30–70% band. 14.1 turns, 254k cached and 13.5k uncached input tokens, and 18k output tokens per run (mean); median wall clock 68 s. Cache hit 95%, prefix kept 100%, no abnormal runs.
+- **Per task:**
+
+  | Band | Tasks |
+  |---|---|
+  | In band (1/3–2/3) | `h-cpp-build-log` 1/3, `h-go-multi-package-config` 1/3, `h-go-ratelimiter` 1/3, `h-rust-ini-parser` 2/3 |
+  | 3/3 | `h-cpp-template-errors`, `h-go-aliasing-bug`, `h-py-mini-framework`, `h-py-noisy-test-suite`, `h-py-todo-cli`, `h-rust-borrow-refactor` |
+  | 0/3 | `h-py-log-analyzer`, `h-rust-forth` |
+
+- **Interpretation:**
+  - With 3 repeats, per-task rates are coarse. A task whose true rate is 0.7 scores 3/3 about a third of the time. The tier is judged on its **aggregate**, and that has headroom in both directions.
+  - Statistical power is the real constraint. At 36 runs, the standard error of the aggregate rate is about 8 points, so module comparisons should use `--repeat 5` (60 runs per config) or more. Report a difference as real only when it holds across repeats.
+- **Actions:**
+  1. Keep every task for now; none gets dropped on one round of data.
+  2. **0/3 tasks:** diagnose from their check logs before changing anything, to separate unfair hidden tests from merely hard ones. Then lower the difficulty, e.g. fewer bugs in `h-py-log-analyzer`.
+  3. **3/3 tasks:** re-measure with more repeats once modules exist. Harden only the ones that stay at 100% and belong to the failure mode a phase targets.
+  4. Spec-compliance (the supervisor's tasks) is at 6/9, which is enough headroom for Phase 3.
 
 ---
 
