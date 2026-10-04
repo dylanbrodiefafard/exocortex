@@ -1,0 +1,135 @@
+diff --git a/docs/language.md b/docs/language.md
+index 57cbeac..17c92fb 100644
+--- a/docs/language.md
++++ b/docs/language.md
+@@ -42,6 +42,7 @@ From tightest to loosest binding (`rill ops` prints this table):
+ 
+ | Operator | Precedence | Associativity | Meaning |
+ |---|---|---|---|
++| `**` | 80 | right | exponentiation |
+ | `-x`, `not x` | 70 | prefix | negation, logical not |
+ | `*` `/` `%` | 60 | left | multiplication, division, remainder |
+ | `+` `-` | 50 | left | addition, subtraction |
+@@ -66,6 +67,13 @@ Errors, reported at the operator:
+ The builtins `abs`, `sum` and `pow` follow the same rules and report the
+ same errors.
+ 
++`a ** b` is exponentiation, exactly like `pow(a, b)` (see Builtins): two
++`Int`s give an `Int` and a negative `Int` exponent is the runtime error
++`negative exponent in integer power`; otherwise the result is a `Float`.
++`**` binds tighter than prefix `-`, so `-2 ** 2` is `-(2 ** 2)`, and it is
++right-associative: `2 ** 3 ** 2` is `2 ** (3 ** 2)`. Its right operand may
++start with a prefix operator: `2.0 ** -1` is `0.5`.
++
+ ### Comparison and logic
+ 
+ `==` and `!=` compare values of the same type (an `Int` and a `Float` compare
+diff --git a/src/eval/interp.rs b/src/eval/interp.rs
+index 77161ed..f3c01ec 100644
+--- a/src/eval/interp.rs
++++ b/src/eval/interp.rs
+@@ -104,6 +104,7 @@ fn binary(op: BinOp, l: &Value, r: &Value) -> std::result::Result<Value, String>
+         BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
+             arith::binary(op, l, r).map_err(|e| e.to_string())
+         }
++        BinOp::Pow => arith::power(l, r).map_err(|e| e.to_string()),
+         BinOp::Concat => Ok(match (l, r) {
+             (Value::Str(a), Value::Str(b)) => Value::Str(format!("{a}{b}")),
+             (Value::List(a), Value::List(b)) => Value::List(a.iter().chain(b).cloned().collect()),
+diff --git a/src/syntax/lexer.rs b/src/syntax/lexer.rs
+index db2f26a..29f3fbc 100644
+--- a/src/syntax/lexer.rs
++++ b/src/syntax/lexer.rs
+@@ -142,6 +142,10 @@ impl<'a> Lexer<'a> {
+                 self.bump();
+                 TokenKind::PlusPlus
+             }
++            ('*', Some('*')) => {
++                self.bump();
++                TokenKind::StarStar
++            }
+             ('=', Some('=')) => {
+                 self.bump();
+                 TokenKind::EqEq
+diff --git a/src/syntax/ops.rs b/src/syntax/ops.rs
+index 5c60907..54a161b 100644
+--- a/src/syntax/ops.rs
++++ b/src/syntax/ops.rs
+@@ -22,6 +22,7 @@ pub enum BinOp {
+     Mul,
+     Div,
+     Mod,
++    Pow,
+ }
+ 
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+@@ -80,6 +81,7 @@ pub static BINARY_OPS: &[OpInfo] = &[
+     OpInfo { op: BinOp::Mul, token: TokenKind::Star, symbol: "*", prec: 60, assoc: Assoc::Left, description: "multiplication" },
+     OpInfo { op: BinOp::Div, token: TokenKind::Slash, symbol: "/", prec: 60, assoc: Assoc::Left, description: "division (integers truncate toward zero)" },
+     OpInfo { op: BinOp::Mod, token: TokenKind::Percent, symbol: "%", prec: 60, assoc: Assoc::Left, description: "remainder (sign of the left operand)" },
++    OpInfo { op: BinOp::Pow, token: TokenKind::StarStar, symbol: "**", prec: 80, assoc: Assoc::Right, description: "exponentiation" },
+ ];
+ 
+ /// The table entry for `op`.
+diff --git a/src/syntax/printer.rs b/src/syntax/printer.rs
+index 54c9124..0c37965 100644
+--- a/src/syntax/printer.rs
++++ b/src/syntax/printer.rs
+@@ -30,6 +30,10 @@ fn is_open(expr: &Expr) -> bool {
+     matches!(expr.kind, ExprKind::If { .. } | ExprKind::Let { .. })
+ }
+ 
++fn is_prefix(expr: &Expr) -> bool {
++    matches!(expr.kind, ExprKind::Unary { .. })
++}
++
+ fn write_operand(expr: &Expr, parens: bool, out: &mut String) {
+     if parens {
+         out.push('(');
+@@ -84,8 +88,11 @@ fn write_expr(expr: &Expr, out: &mut String) {
+             let info = ops::info(*op);
+             let left_parens =
+                 is_open(lhs) || prec(lhs) < info.prec || (prec(lhs) == info.prec && info.assoc != Assoc::Left);
+-            let right_parens =
+-                is_open(rhs) || prec(rhs) < info.prec || (prec(rhs) == info.prec && info.assoc != Assoc::Right);
++            // A prefix operator on the right needs no parentheses: the parser
++            // reads one at the start of any operand.
++            let right_parens = is_open(rhs)
++                || (!is_prefix(rhs)
++                    && (prec(rhs) < info.prec || (prec(rhs) == info.prec && info.assoc != Assoc::Right)));
+             write_operand(lhs, left_parens, out);
+             out.push(' ');
+             out.push_str(info.symbol);
+diff --git a/src/syntax/token.rs b/src/syntax/token.rs
+index 5fb458f..1a4b8f5 100644
+--- a/src/syntax/token.rs
++++ b/src/syntax/token.rs
+@@ -26,6 +26,7 @@ pub enum TokenKind {
+     PlusPlus,
+     Minus,
+     Star,
++    StarStar,
+     Slash,
+     Percent,
+     EqEq,
+@@ -86,6 +87,7 @@ impl fmt::Display for TokenKind {
+             TokenKind::PlusPlus => "++",
+             TokenKind::Minus => "-",
+             TokenKind::Star => "*",
++            TokenKind::StarStar => "**",
+             TokenKind::Slash => "/",
+             TokenKind::Percent => "%",
+             TokenKind::EqEq => "==",
+diff --git a/src/types/check.rs b/src/types/check.rs
+index 821e6eb..7ee4e74 100644
+--- a/src/types/check.rs
++++ b/src/types/check.rs
+@@ -109,7 +109,7 @@ impl Checker {
+ fn binary_type(op: BinOp, l: &Type, r: &Type) -> std::result::Result<Type, String> {
+     let sym = op.symbol();
+     match op {
+-        BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
++        BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod | BinOp::Pow => {
+             if l.is_numeric() && r.is_numeric() {
+                 Ok(Type::numeric_result(l, r))
+             } else {

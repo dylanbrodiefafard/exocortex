@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="{{ site.language }}">
+<head><title>{{ site.title }}</title></head>
+<body>
+{% include "partials/header.html" %}
+{% for post in entries %}
+<section>
+<h2><a href="{{ post.url }}">{{ post.title }}</a></h2>
+<p class="meta">{{ post.date | date }}</p>
+<p>{{ post.content | striptags | truncatewords:20 }}</p>
+</section>
+{% empty %}
+<p>No posts yet.</p>
+{% endfor %}
+<nav>{% if pagination.previous %}<a href="{{ pagination.previous }}">Newer</a>{% endif %} {% if pagination.next %}<a href="{{ pagination.next }}">Older</a>{% endif %}</nav>
+</body>
+</html>

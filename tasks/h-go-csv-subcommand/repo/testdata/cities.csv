@@ -1,0 +1,12 @@
+city,country,population,area_km2,coastal
+Lisbon,Portugal,545923,100.05,yes
+Porto,Portugal,231800,41.42,yes
+Madrid,Spain,3332035,604.3,no
+Valencia,Spain,792492,134.65,yes
+Seville,Spain,684234,140.8,no
+Lyon,France,522250,47.87,no
+Marseille,France,873076,240.62,yes
+Nice,France,348085,71.92,yes
+Toulouse,France,504078,118.3,no
+Andorra la Vella,Andorra,22615,12,no
+Bilbao,Spain,,41.6,yes

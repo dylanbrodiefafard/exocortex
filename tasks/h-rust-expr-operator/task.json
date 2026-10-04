@@ -1,0 +1,10 @@
+{
+	"id": "h-rust-expr-operator",
+	"language": "rust",
+	"prompt": "Add an exponentiation operator `**` to rill.\n\n- `a ** b` means exactly what `pow(a, b)` means: the same result type and the same runtime errors, reported at the operator the way the other operators report theirs. Type errors read like those of the other arithmetic operators, e.g. ``operator `**` expects numbers, found Str and Int``.\n- It is right-associative and binds tighter than every other binary operator and than the prefix operators: `2 ** 3 ** 2` is `2 ** (3 ** 2)` and `-2 ** 2` is `-(2 ** 2)`. Its right operand may start with a prefix operator: `2.0 ** -1` is `0.5`. Calls and indexing still bind tighter than `**`.\n- Its precedence level is 80, and `rill ops` lists it with the description `exponentiation`.\n- `rill fmt` must keep all of its documented guarantees for programs that use `**`.\n- Document the operator in docs/language.md.\n\n`cargo test --offline` must pass.",
+	"check": "cargo test --offline -q",
+	"maxTurns": 50,
+	"timeoutSec": 1500,
+	"checkTimeoutSec": 180,
+	"tags": ["hard", "navigation", "rust", "uncalibrated"]
+}

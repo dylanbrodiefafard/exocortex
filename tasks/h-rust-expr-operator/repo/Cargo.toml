@@ -1,0 +1,14 @@
+[package]
+name = "rill"
+version = "0.3.0"
+edition = "2021"
+description = "A small typed expression language"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "rill"
+path = "src/main.rs"
+
+[dependencies]

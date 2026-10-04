@@ -1,0 +1,10 @@
+{
+	"id": "h-cpp-audio-stage",
+	"language": "cpp",
+	"prompt": "Add an `echo` stage to tapeline: a feedback delay.\n\n- In a pipeline file it is `[echo]`, with three parameters: `delay_ms` (float, default 250, range 1 to 2000), `feedback` (float, default 0.4, range 0 to 0.95) and `mix` (float, default 0.5, range 0 to 1). `tapeline --describe echo` lists them in that order.\n- Its one-line summary in `tapeline --list-stages` is `Repeat the signal after a delay, with feedback`.\n- Processing, per channel, with D the delay in samples: `w[n] = x[n] + feedback * w[n - D]` and `y[n] = x[n] + mix * w[n - D]`, where w is zero before the stream starts (and again after a reset). `delay_ms` is converted to samples the same way every other time parameter in tapeline is, except that D is never less than 1.\n- It must behave like the existing stages: invalid parameters are reported the same way, the output must not depend on the pipeline's `block_size`, and it must be documented with the other stages.\n\n`make test` must pass.",
+	"check": "make -s -j4 test",
+	"maxTurns": 50,
+	"timeoutSec": 1500,
+	"checkTimeoutSec": 180,
+	"tags": ["hard", "navigation", "cpp", "uncalibrated"]
+}

@@ -1,0 +1,125 @@
+diff --git a/docs/stages.md b/docs/stages.md
+index e968c61..a017662 100644
+--- a/docs/stages.md
++++ b/docs/stages.md
+@@ -84,3 +84,18 @@ channels.
+ | Parameter | Type | Default | Range |
+ |---|---|---|---|
+ | `position` | float | 0 | -1 to 1 |
++
++## echo
++
++Repeats the signal after `delay_ms` (converted to samples, at least 1),
++feeding the repeats back into the delay line. Per channel, with D the delay
++in samples and w zero before the stream starts:
++
++    w[n] = x[n] + feedback * w[n - D]
++    y[n] = x[n] + mix * w[n - D]
++
++| Parameter | Type | Default | Range |
++|---|---|---|---|
++| `delay_ms` | float | 250 | 1 to 2000 |
++| `feedback` | float | 0.4 | 0 to 0.95 |
++| `mix` | float | 0.5 | 0 to 1 |
+diff --git a/src/pipeline/builtin_stages.cpp b/src/pipeline/builtin_stages.cpp
+index 2c903c7..bf8f09d 100644
+--- a/src/pipeline/builtin_stages.cpp
++++ b/src/pipeline/builtin_stages.cpp
+@@ -11,6 +11,7 @@ void register_builtin_stages(StageRegistry& registry) {
+     registry.add(stages::dcblock_descriptor());
+     registry.add(stages::gate_descriptor());
+     registry.add(stages::pan_descriptor());
++    registry.add(stages::echo_descriptor());
+ }
+ 
+ }  // namespace tapeline
+diff --git a/src/stages/echo.cpp b/src/stages/echo.cpp
+new file mode 100644
+index 0000000..57923cf
+--- /dev/null
++++ b/src/stages/echo.cpp
+@@ -0,0 +1,73 @@
++#include <algorithm>
++#include <vector>
++
++#include "dsp/util.hpp"
++#include "stages/stages.hpp"
++
++namespace tapeline::stages {
++
++namespace {
++
++// Feedback delay. Per channel, with D the delay in samples:
++//   w[n] = x[n] + feedback * w[n - D]
++//   y[n] = x[n] + mix * w[n - D]
++// where w is zero before the stream starts.
++class Echo : public Stage {
++public:
++    Echo(double delay_ms, double feedback, double mix)
++        : delay_ms_(delay_ms), feedback_(static_cast<float>(feedback)), mix_(static_cast<float>(mix)) {}
++
++    void prepare(const StreamInfo& info) override {
++        delay_ = std::max<std::size_t>(1, dsp::ms_to_samples(delay_ms_, info.sample_rate));
++        lines_.assign(static_cast<std::size_t>(info.channels), std::vector<float>(delay_, 0.0f));
++        pos_ = 0;
++    }
++
++    void process(AudioBuffer& block) override {
++        std::size_t pos = pos_;
++        for (int c = 0; c < block.channels(); ++c) {
++            std::vector<float>& line = lines_[static_cast<std::size_t>(c)];
++            float* x = block.channel(c);
++            pos = pos_;
++            for (std::size_t i = 0; i < block.frames(); ++i) {
++                float delayed = line[pos];
++                line[pos] = x[i] + feedback_ * delayed;
++                x[i] += mix_ * delayed;
++                if (++pos == delay_) pos = 0;
++            }
++        }
++        pos_ = pos;
++    }
++
++    void reset() override {
++        for (auto& line : lines_) std::fill(line.begin(), line.end(), 0.0f);
++        pos_ = 0;
++    }
++
++private:
++    double delay_ms_;
++    float feedback_;
++    float mix_;
++    std::size_t delay_ = 1;
++    std::size_t pos_ = 0;
++    std::vector<std::vector<float>> lines_;
++};
++
++}  // namespace
++
++StageDescriptor echo_descriptor() {
++    return StageDescriptor{
++        "echo",
++        "Repeat the signal after a delay, with feedback",
++        {
++            ParamSpec::number("delay_ms", 250.0, 1.0, 2000.0),
++            ParamSpec::number("feedback", 0.4, 0.0, 0.95),
++            ParamSpec::number("mix", 0.5, 0.0, 1.0),
++        },
++        [](const Params& p) {
++            return std::make_unique<Echo>(p.number("delay_ms"), p.number("feedback"), p.number("mix"));
++        },
++    };
++}
++
++}  // namespace tapeline::stages
+diff --git a/src/stages/stages.hpp b/src/stages/stages.hpp
+index b6a390f..0df2d72 100644
+--- a/src/stages/stages.hpp
++++ b/src/stages/stages.hpp
+@@ -13,5 +13,6 @@ StageDescriptor lowpass_descriptor();
+ StageDescriptor dcblock_descriptor();
+ StageDescriptor gate_descriptor();
+ StageDescriptor pan_descriptor();
++StageDescriptor echo_descriptor();
+ 
+ }  // namespace tapeline::stages

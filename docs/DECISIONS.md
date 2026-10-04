@@ -659,6 +659,20 @@ Open check: Exocortex's injected `custom_message` reaches ninfer as a second con
 
 ---
 
+### D-051 — Hard tier grown to 28 tasks, 7 per failure mode; uncalibrated until a GPU run · accepted (research R7.1)
+- **Context:** with 3 tasks per slice, a per-slice comparison could only detect differences of about 49 points (R7.1).
+- **Decision:**
+  - Each failure-mode slice now has 7 hard tasks: `spec-compliance`, `error-recovery`, `noisy-output` and `navigation`. One new task per language per slice.
+  - The 16 new tasks are tagged `uncalibrated`. Step 0 of `docs/AB_PLAN.md` calibrates them: keep tasks between 1/3 and 2/3, rework or drop the rest, then remove the tag.
+- **Quality bar:**
+  - every task passes `--validate` under the tamper guard (D-048);
+  - every hidden requirement is stated in the prompt or the repo's docs;
+  - the authors confirmed the hidden tests catch the obvious shortcuts (special-casing, `reserve()`, `Box::leak`, removing logging, silencing warnings, a single-registry split).
+- **Known gap:** `h-rust-template-lifetimes` would accept re-parsing on every render.
+- **Next:** sibling tasks that share one repo, for memory's cross-task transfer (D-049); long tasks for compaction.
+
+---
+
 ## Open questions (carried from brief §10, updated)
 
 1. ~~Resolved by D-029.~~ Exact pi mechanism for injecting into the current user turn without altering prior messages. *(Phase 0)*
