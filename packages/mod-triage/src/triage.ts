@@ -70,11 +70,13 @@ export function createTriage(raw: Readonly<Record<string, unknown>>, ctx: Module
 			const signature = errorSignature(draft.toolName, draft.exitCode, draft.output);
 			const count = (task.counts.get(signature) ?? 0) + 1;
 			task.counts.set(signature, count);
+			// Signature from the original output; position from what the model will see (maybe trimmed).
 			const first = firstErrorLine(draft.output);
 			if (count === 1) {
-				if (!first || first.index < settings.buriedAfterLines) return undefined;
+				const shown = firstErrorLine(draft.current);
+				if (!shown || shown.index < settings.buriedAfterLines) return undefined;
 				return {
-					text: `[exo triage: first error (line ${first.index + 1}): ${clip(first.line)}]\n${draft.current}`,
+					text: `[exo triage: first error (line ${shown.index + 1} below): ${clip(shown.line)}]\n${draft.current}`,
 					note: "surfaced the first error",
 				};
 			}

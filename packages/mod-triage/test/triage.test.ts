@@ -58,9 +58,15 @@ describe("triage", () => {
 		const noisy = `${Array.from({ length: 30 }, (_, i) => `note ${i}`).join("\n")}\n${RUST_ERROR}`;
 		const rewrite = await fail(triage, draft(noisy));
 		expect(rewrite?.text.split("\n")[0]).toBe(
-			"[exo triage: first error (line 32): error[E0502]: cannot borrow `self.stack` as mutable]",
+			"[exo triage: first error (line 32 below): error[E0502]: cannot borrow `self.stack` as mutable]",
 		);
 		expect(rewrite?.note).toBe("surfaced the first error");
+	});
+
+	it("measures burial in the text the model sees, after earlier rewrites", async () => {
+		const { triage } = setup();
+		const noisy = `${Array.from({ length: 30 }, (_, i) => `note ${i}`).join("\n")}\n${RUST_ERROR}`;
+		expect(await fail(triage, draft(noisy, { current: RUST_ERROR }))).toBeUndefined();
 	});
 
 	it("on a repeat, appends a runtime notice and a grounded hint", async () => {
