@@ -16,7 +16,6 @@
 		"knip": "knip",
 		"test": "vitest run",
 		"test:watch": "vitest",
-		"test:e2e": "vitest run --config vitest.e2e.config.ts",
 		"check": "npm run lint && npm run typecheck && npm run knip && npm run test"
 	},
 	"devDependencies": {

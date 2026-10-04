@@ -216,18 +216,62 @@ Ranked by value to Exocortex. None of these is required for v0.
 
 ---
 
+## Phase 0 (2026-10-04)
+
+### D-029 — Pi integration contract · accepted (resolves open questions 1, 2, 6, 7, 13)
+Based on `docs/PI_API_NOTES.md` (pi `@earendil-works/pi-coding-agent` 1.0.2, formerly `@mariozechner/*`).
+- **User-turn injection:** return a `custom_message` from `before_agent_start` (`customType: "exo.<module>"`, `display: false`, provenance in `details`).
+  - Pi persists it right after the user message and replays it unchanged, so the prefix stays stable.
+  - Mid-run injection uses `custom_message` drafts from `turn_end`/`agent_before_settle`, or `sendMessage({deliverAs:"steer"})`.
+- **Never use these for injection:**
+  - the `context`/`context_with_system` events, which are ephemeral per request and would break prefix caching;
+  - changes to the system prompt or active tool set mid-session (on openai-completions they're folded into the leading system message).
+- **Tool-result rewrites** (trimmer, triage): rewrite in `tool_result`. Pi persists only the rewritten version, so the original goes to the trace store. Merge `details.exo = {module, originalRef}` and never replace `details`, because renderers read it.
+- **Synthetic-content tagging:** `customType` prefix `exo.` for messages; `details.exo` for rewrites. Exocortex's own extraction excludes both.
+- **Main-request tagging for ninfer (D-028):** the `before_provider_request` payload mutation adds the `ninfer` object (`session_id`, `retain`, `priority`); `before_provider_headers` covers header-only fallbacks. This is also where the adapter observes the exact outgoing request.
+- **Completion signal:** `agent_settled`, not `agent_end`, because retries, compaction and continuations can follow `agent_end`.
+- **Supervisor suggestions (D-010):** `ctx.ui.setEditorText` pre-fills the editor, so Enter accepts. In RPC it surfaces as `set_editor_text`, and in print/json mode (`hasUI=false`) as a notify/log only.
+- **Handlers are awaited with no timeout, and an uncaught async error exits interactive pi.** Therefore:
+  - the adapter wraps every hook in try/catch plus a per-hook time budget;
+  - background sidecar work never runs as an unhandled promise.
+- **Sidecar calls** use Exocortex's own `InferenceClient` (fetch), not `ctx.modelRegistry.complete()`, because they need ninfer-specific fields and must stay harness-agnostic. Endpoint and model come from Exocortex config.
+- **Error triage signal:** the bash `exit_code` exists only in `tool_result.structuredContent` and isn't persisted, so the adapter copies it into the trace.
+
+### D-030 — Repo mechanics settled in Phase 0 · accepted (refines D-021, brief §3)
+- **No build step:** packages export `src/index.ts`. Pi's jiti loader runs the TypeScript directly, including across workspace symlinks (verified), and vitest does the same. `tsc` is typecheck only. That's why `erasableSyntaxOnly` is on: no enums or namespaces, only type-strippable TS.
+- **One root `tsconfig.json`** covers all packages instead of project references. That's simpler while there are only a few packages; revisit if typecheck gets slow.
+- **Pi version:** pinned exactly as a dev dependency of `@exocortex/pi-adapter` (a peer at runtime). Upgrades are deliberate, and `pi-events.test.ts` fails to typecheck if pi adds an event the adapter doesn't list.
+- **New package `@exocortex/testkit`:** test-only fakes, starting with a scripted OpenAI-compatible server.
+- **The real-pi integration test is in the default suite:** `pi-cli.integration.test.ts` spawns the actual pi CLI against the fake server in about 1 s. It runs in CI, so pi upgrades can't silently break the contract.
+- **Packages are created when their phase starts** (`worker`, `eval`, modules), not as empty stubs, because knip rejects dead code. Modules will live at `packages/mod-<name>` so the `packages/*` workspace glob covers them. This deviates from the brief's `packages/modules/<name>`.
+- **SQLite:** `node:sqlite` (pi requires Node ≥22.19, where it's unflagged). FTS5 is verified available. It prints an `ExperimentalWarning` on Node 22, so how to keep that out of the TUI is a Phase 1 task.
+- **Lint:** Biome's `useLiteralKeys` is off because it conflicts with TypeScript's stricter `noPropertyAccessFromIndexSignature`.
+
+### D-031 — pi ↔ ninfer provider config · proposed (verify in Phase 2)
+Add ninfer to `~/.pi/agent/models.json` as an `openai-completions` provider with:
+- `compat: { supportsDeveloperRole: false, supportsStore: false, supportsReasoningEffort: false, maxTokensField: "max_completion_tokens", thinkingFormat: "qwen-chat-template" }`
+- `contextWindow` set to the `--max-context` ninfer runs with.
+
+`qwen-chat-template` sends `chat_template_kwargs: {enable_thinking, preserve_thinking: true}`. ninfer accepts both keys. Keeping thinking preserved means earlier turns aren't re-rendered, which helps prefix stability (D-023).
+
+Open check: Exocortex's injected `custom_message` reaches ninfer as a second consecutive `user` message. Verify that ninfer's Qwen template renders it.
+
+---
+
 ## Open questions (carried from brief §10, updated)
 
-1. Exact pi mechanism for injecting into the current user turn without altering prior messages. *(Phase 0)*
-2. Can `tool_result` rewrites preserve the original output for the trace? *(Phase 0)*
+1. ~~Resolved by D-029.~~ Exact pi mechanism for injecting into the current user turn without altering prior messages. *(Phase 0)*
+2. ~~Resolved by D-029 (no; Exocortex keeps the original).~~ Can `tool_result` rewrites preserve the original output for the trace? *(Phase 0)*
 3. ~~Programmatic session branching~~ — no longer needed (D-015).
 4. ~~Embedding model choice/runtime~~ — resolved by D-019; exact model is chosen at Phase 5.
 5. Reliably detecting "agent asked the user a question" vs. "agent claims done". *(Phase 3)*
-6. **New:** Can the pi adapter observe the exact outgoing LLM request (needed for byte-exact `fork-prefix`, D-007)? *(Phase 0)*
-7. **New:** Can pi's UI API pre-fill the editor or offer one-key accept for supervisor suggestions (D-010)? *(Phase 0)*
+6. ~~Resolved by D-029 (yes, `before_provider_request`).~~ Can the pi adapter observe the exact outgoing LLM request (needed for byte-exact `fork-prefix`, D-007)? *(Phase 0)*
+7. ~~Resolved by D-029 (yes, `ctx.ui.setEditorText`).~~ Can pi's UI API pre-fill the editor or offer one-key accept for supervisor suggestions (D-010)? *(Phase 0)*
 8. ~~ninfer fork details~~ — mostly answered by D-023. Remaining: confirm the 6-slot build vs. the public 1-4 cap.
 9. **New:** Thinking-mode defaults per module (D-008). *(Phase 3+, eval)*
 10. ~~Superseded by R4 in NINFER_REQUIREMENTS.~~ Does a named `tool_choice` enforce the XGrammar schema well enough to use as structured output (D-023)? *(Phase 2)*
 11. ~~Superseded by R1.~~ After a fork-prefix sidecar claims main's retained state, does main's next request still hit cache (D-024)? *(Phase 2)*
 12. **New:** Main's `reasoning_effort` / thinking setting decides which sidecar settings can share its prefix. Pick the main default with this in mind (D-008, D-023). *(Phase 2)*
-13. **New:** Can pi attach per-session headers or extra body fields to main's requests (needed to tag main with `session_id`/`retain`, D-028)? *(Phase 0)*
+13. ~~Resolved by D-029 (yes, both).~~ Can pi attach per-session headers or extra body fields to main's requests (needed to tag main with `session_id`/`retain`, D-028)? *(Phase 0)*
+14. **New:** Does ninfer's Qwen template accept two consecutive `user` messages (injected `custom_message`, D-031)? *(Phase 2)*
+15. **New:** Keep `node:sqlite`'s ExperimentalWarning out of the pi TUI (D-030). *(Phase 1)*
