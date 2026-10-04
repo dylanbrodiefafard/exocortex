@@ -52,5 +52,5 @@ Failure-mode tags, so results can be sliced by what a module targets:
 4. **Fast checks:** under ~60 s on a laptop. Prefer `-q` flags.
 5. **No hints:** no comments pointing at the bug, no TODOs that give away the fix, no solution in git history (the repo is committed fresh).
 6. **Realistic prompts:** write the way a developer would: state the goal and requirements, not the steps.
-7. **Deterministic:** no wall-clock, randomness or ordering flakiness. Use injected clocks and fixed seeds. If `setup` generates large inputs, generation must be deterministic.
+7. **Deterministic:** no wall-clock, randomness or ordering flakiness. Use injected clocks and fixed seeds. If `setup` generates large inputs, generation must be deterministic. Results must not depend on the toolchain version either. CI's Python is newer than many dev machines, and Python 3.12 changed float `sum()` to compensated summation, so use `math.fsum` wherever a float sum feeds a stored expected value (`h-py-weather-etl` hit this).
 8. **Hard but fair:** a strong model should solve it in well under `maxTurns`, but it should need several coordinated edits, a non-obvious root cause, or careful handling of many requirements.

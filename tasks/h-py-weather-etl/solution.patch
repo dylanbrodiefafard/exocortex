@@ -1,16 +1,15 @@
 diff --git a/wxetl/pipeline.py b/wxetl/pipeline.py
-index 61ee503..620d0c0 100644
+index 94cd7ad..fb9e0af 100644
 --- a/wxetl/pipeline.py
 +++ b/wxetl/pipeline.py
-@@ -1,5 +1,7 @@
+@@ -1,5 +1,6 @@
  """Reads an observations file, validates every record and aggregates daily statistics."""
  
 +import csv
-+
- from wxetl.log import get_logger
- from wxetl.records import FIELDS, RecordError, parse_record
+ import math
  
-@@ -39,7 +41,7 @@ class _Day:
+ from wxetl.log import get_logger
+@@ -41,7 +42,7 @@ class _Day:
  
  
  def _split(line):

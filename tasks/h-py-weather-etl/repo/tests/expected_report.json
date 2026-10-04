@@ -1793,7 +1793,7 @@
      "obs": 24,
      "precip_mm": 5.7,
      "temp_max": 8.3,
-     "temp_mean": 1.4,
+     "temp_mean": 1.5,
      "temp_min": -6.3,
      "trace_hours": 4,
      "wind_max_kph": 23.4
@@ -2077,7 +2077,7 @@
      "obs": 24,
      "precip_mm": 7.1,
      "temp_max": 12.3,
-     "temp_mean": 0.3,
+     "temp_mean": 0.4,
      "temp_min": -8.9,
      "trace_hours": 2,
      "wind_max_kph": 25.4
@@ -2149,7 +2149,7 @@
      "obs": 24,
      "precip_mm": 0.0,
      "temp_max": 9.3,
-     "temp_mean": -0.0,
+     "temp_mean": 0.0,
      "temp_min": -5.7,
      "trace_hours": 2,
      "wind_max_kph": 35.4

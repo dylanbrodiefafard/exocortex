@@ -1,5 +1,7 @@
 """Reads an observations file, validates every record and aggregates daily statistics."""
 
+import math
+
 from wxetl.log import get_logger
 from wxetl.records import FIELDS, RecordError, parse_record
 
@@ -31,7 +33,7 @@ class _Day:
             "obs": self.obs,
             "temp_min": min(temps) if temps else None,
             "temp_max": max(temps) if temps else None,
-            "temp_mean": round(sum(temps) / len(temps), 1) if temps else None,
+            "temp_mean": round(math.fsum(temps) / len(temps), 1) if temps else None,
             "precip_mm": round(self.precip, 1),
             "trace_hours": self.trace_hours,
             "wind_max_kph": self.wind_max,

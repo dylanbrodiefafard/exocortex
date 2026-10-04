@@ -314,7 +314,7 @@
      "obs": 24,
      "precip_mm": 3.4,
      "temp_max": 16.5,
-     "temp_mean": 6.7,
+     "temp_mean": 6.6,
      "temp_min": -3.7,
      "trace_hours": 2,
      "wind_max_kph": 31.6
@@ -634,7 +634,7 @@
      "obs": 24,
      "precip_mm": 18.2,
      "temp_max": 5.1,
-     "temp_mean": -6.4,
+     "temp_mean": -6.5,
      "temp_min": -13.8,
      "trace_hours": 4,
      "wind_max_kph": 26.4
@@ -661,7 +661,7 @@
      "obs": 23,
      "precip_mm": 9.2,
      "temp_max": 2.4,
-     "temp_mean": -7.3,
+     "temp_mean": -7.2,
      "temp_min": -17.5,
      "trace_hours": 0,
      "wind_max_kph": 34.0
@@ -1450,7 +1450,7 @@
      "obs": 24,
      "precip_mm": 4.0,
      "temp_max": 9.0,
-     "temp_mean": 0.4,
+     "temp_mean": 0.3,
      "temp_min": -7.9,
      "trace_hours": 2,
      "wind_max_kph": 34.0
@@ -1959,7 +1959,7 @@
      "obs": 24,
      "precip_mm": 2.1,
      "temp_max": 11.6,
-     "temp_mean": 3.7,
+     "temp_mean": 3.8,
      "temp_min": -2.2,
      "trace_hours": 3,
      "wind_max_kph": 37.9
@@ -2419,7 +2419,7 @@
      "obs": 24,
      "precip_mm": 3.7,
      "temp_max": 12.2,
-     "temp_mean": 6.6,
+     "temp_mean": 6.5,
      "temp_min": -1.7,
      "trace_hours": 1,
      "wind_max_kph": 27.7
