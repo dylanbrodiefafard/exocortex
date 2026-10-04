@@ -557,6 +557,7 @@ Open check: Exocortex's injected `custom_message` reaches ninfer as a second con
   - **Triage:** repeated-error rate on the `error-recovery` slice.
   - **Compaction:** success on runs with at least one compaction (forced with a smaller context window).
   - **Statistics:** slices of 3 tasks × 5 repeats can only show very large effects (R7.1). Report them as descriptive, pair runs by task, and grow slices toward 10 tasks.
+  - **Report:** with two or more configs, the summary has a "paired by task" section: mean Δ success with a seeded task-bootstrap 95% CI, an exact sign test, Δ turns/tokens/wall-clock, and the minimum detectable effect for the run count. `npm run eval -- --report <dir> --tags <slice>` re-renders any finished run, including the Phase 3 A/B.
 - **Eval configs:** `trimmer`, `trimmer-llm`, `triage`, `compaction`, `phase4`. A test checks every config is valid and names a known module.
 - **Branching (deviation from D-020):** Phase 4 work began on `claude/phase-4-context`, stacked on the Phase 3 branch, while the owner runs the Phase 3 A/B. It merges only after Phase 3 acceptance.
 
