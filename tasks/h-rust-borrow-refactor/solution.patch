@@ -1,0 +1,181 @@
+diff --git a/src/book.rs b/src/book.rs
+index 586728f..c7c2415 100644
+--- a/src/book.rs
++++ b/src/book.rs
+@@ -41,7 +41,7 @@ impl OrderBook {
+     }
+ 
+     pub fn get(&self, id: OrderId) -> Option<&Order> {
+-        self.orders.iter().find(|order| order.id == id)
++        self.orders.get(&id)
+     }
+ 
+     pub fn best_bid(&self) -> Option<Price> {
+@@ -80,18 +80,13 @@ impl OrderBook {
+ 
+     /// Adds `order` to the book behind every order already resting at its price.
+     pub(crate) fn rest(&mut self, order: Order) {
+-        self.orders.push(order);
+         self.levels_mut(order.side).push(order.price, order.id);
++        self.orders.insert(order.id, order);
+     }
+ 
+     /// Removes a resting order and returns it with its remaining quantity.
+     pub fn cancel(&mut self, id: OrderId) -> Result<Order, BookError> {
+-        let index = self
+-            .orders
+-            .iter()
+-            .position(|order| order.id == id)
+-            .ok_or(BookError::UnknownOrder(id))?;
+-        let order = self.orders.remove(index);
++        let order = self.orders.remove(&id).ok_or(BookError::UnknownOrder(id))?;
+         self.levels_mut(order.side).remove(order.price, id);
+         Ok(order)
+     }
+@@ -99,13 +94,16 @@ impl OrderBook {
+     /// Cancels every resting order that belongs to `owner` and returns them in
+     /// time priority (lowest `seq` first).
+     pub fn cancel_all(&mut self, owner: &str) -> Vec<Order> {
+-        let mut cancelled = Vec::new();
+-        for order in self.orders.iter() {
+-            if order.owner == owner {
+-                cancelled.push(self.cancel(order.id).unwrap());
+-            }
+-        }
+-        cancelled
++        let mut ids: Vec<(u64, OrderId)> = self
++            .orders
++            .values()
++            .filter(|order| order.owner == owner)
++            .map(|order| (order.seq, order.id))
++            .collect();
++        ids.sort_unstable();
++        ids.into_iter()
++            .filter_map(|(_, id)| self.cancel(id).ok())
++            .collect()
+     }
+ 
+     /// Changes the open quantity of a resting order. Reducing it keeps the
+@@ -116,13 +114,18 @@ impl OrderBook {
+             return Err(BookError::ZeroQuantity);
+         }
+         let order = self.orders.get_mut(&id).ok_or(BookError::UnknownOrder(id))?;
+-        if new_qty > order.qty {
+-            let levels = self.levels_mut(order.side);
+-            levels.remove(order.price, id);
+-            levels.push(order.price, id);
+-            order.seq = self.next_seq();
+-        }
++        let increased = new_qty > order.qty;
+         order.qty = new_qty;
++        if increased {
++            let (side, price) = (order.side, order.price);
++            let seq = self.next_seq();
++            if let Some(order) = self.orders.get_mut(&id) {
++                order.seq = seq;
++            }
++            let levels = self.levels_mut(side);
++            levels.remove(price, id);
++            levels.push(price, id);
++        }
+         Ok(())
+     }
+ }
+diff --git a/src/matching.rs b/src/matching.rs
+index bd56e22..c361257 100644
+--- a/src/matching.rs
++++ b/src/matching.rs
+@@ -27,31 +27,29 @@ impl OrderBook {
+         let mut fills = Vec::new();
+         let opposite = side.opposite();
+ 
+-        let levels = self.levels_mut(opposite);
+         while remaining > 0 {
++            let levels = self.levels(opposite);
+             let Some(best) = levels.best() else { break };
+             if !side.crosses(price, best) {
+                 break;
+             }
+-            let maker_id = levels.front(best);
+-            let index = self
++            let maker_id = levels.front(best).expect("price levels are never empty");
++            let maker = self
+                 .orders
+-                .iter()
+-                .position(|order| order.id == maker_id)
++                .get_mut(&maker_id)
+                 .expect("indexed order is resting");
+-            let maker = &mut self.orders[index];
+             let traded = remaining.min(maker.qty);
+             maker.qty -= traded;
+             remaining -= traded;
+             fills.push(Fill {
+-                maker: maker.id,
++                maker: maker_id,
+                 taker: id,
+                 price: best,
+                 qty: traded,
+             });
+             if maker.qty == 0 {
+-                self.orders.remove(index);
+-                levels.pop_front(best);
++                self.orders.remove(&maker_id);
++                self.levels_mut(opposite).pop_front(best);
+             }
+         }
+ 
+diff --git a/src/report.rs b/src/report.rs
+index f88c3aa..092afc0 100644
+--- a/src/report.rs
++++ b/src/report.rs
+@@ -12,23 +12,21 @@ pub struct Level {
+ impl OrderBook {
+     /// Aggregated depth on `side`, best price first, at most `max_levels` levels.
+     pub fn depth(&self, side: Side, max_levels: usize) -> Vec<Level> {
+-        let mut levels: Vec<Level> = Vec::new();
+-        for (price, queue) in self.levels(side).iter_best_first().take(max_levels) {
+-            let mut level = Level { price, qty: 0, orders: 0 };
+-            for id in queue {
+-                let order = self.orders.iter().find(|order| order.id == *id).unwrap();
+-                level.qty += order.qty;
+-                level.orders += 1;
+-            }
+-            levels.push(level);
+-        }
+-        levels
++        self.levels(side)
++            .iter_best_first()
++            .take(max_levels)
++            .map(|(price, queue)| Level {
++                price,
++                qty: queue.iter().map(|id| self.orders[id].qty).sum(),
++                orders: queue.len(),
++            })
++            .collect()
+     }
+ 
+     /// Total open quantity resting on `side`.
+     pub fn open_qty(&self, side: Side) -> Qty {
+         self.orders
+-            .iter()
++            .values()
+             .filter(|order| order.side == side)
+             .map(|order| order.qty)
+             .sum()
+@@ -36,10 +34,13 @@ impl OrderBook {
+ 
+     /// Resting orders that belong to `owner`, in time priority (lowest `seq` first).
+     pub fn orders_for(&self, owner: &str) -> Vec<&Order> {
+-        self.orders
+-            .iter()
++        let mut orders: Vec<&Order> = self
++            .orders
++            .values()
+             .filter(|order| order.owner == owner)
+-            .collect()
++            .collect();
++        orders.sort_by_key(|order| order.seq);
++        orders
+     }
+ 
+     /// Best ask minus best bid, if both sides have orders.

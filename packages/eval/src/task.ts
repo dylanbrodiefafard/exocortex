@@ -55,7 +55,11 @@ export function loadTasks(tasksDir: string, filters: readonly string[] = [], tag
 	for (const entry of readdirSync(tasksDir).sort()) {
 		const dir = join(tasksDir, entry);
 		if (!statSync(dir).isDirectory()) continue;
+		// Directory name == task id (enforced below), so filter before reading anything: a
+		// half-written task elsewhere in tasks/ must not break a filtered run.
+		if (patterns.length > 0 && !patterns.some((p) => p.test(entry))) continue;
 		const task = loadTask(dir);
+		if (task.spec.id !== entry) throw new Error(`${dir}: task id "${task.spec.id}" must match its directory name`);
 		const idMatches = patterns.length === 0 || patterns.some((p) => p.test(task.spec.id));
 		const tagMatches = tags.length === 0 || tags.some((tag) => task.spec.tags.includes(tag));
 		if (idMatches && tagMatches) tasks.push(task);
