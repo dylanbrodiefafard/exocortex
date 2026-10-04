@@ -77,6 +77,60 @@ export function renderCalls(calls: readonly SidecarCallRecord[]): string {
 	return [...rows, "", ...totals].join("\n");
 }
 
+export interface SessionData {
+	readonly session: StoredSession;
+	readonly events: readonly StoredTraceEvent[];
+	readonly calls: readonly SidecarCallRecord[];
+}
+
+/**
+ * Real-session metrics (D-014): what the modules did across the user's own sessions, the numbers
+ * that decide whether a module earns its place outside the eval.
+ */
+export function renderStats(data: readonly SessionData[]): string {
+	if (data.length === 0) return "(no sessions)";
+	const metrics = data.map((d) => computeTraceMetrics(d.events, d.calls));
+	const events = data.flatMap((d) => d.events);
+	const sum = (pick: (m: (typeof metrics)[number]) => number) => metrics.reduce((a, m) => a + pick(m), 0);
+	const actions = countBy(
+		events.filter((e) => e.kind === "exo.action"),
+		(e) => str(asRecord(e.data)["action"]),
+	);
+	const rewrites = countBy(
+		events.filter((e) => e.kind === "exo.rewrite"),
+		(e) => e.module ?? "?",
+	);
+	const memory = countBy(
+		events.filter((e) => e.kind === "exo.memory"),
+		(e) => str(asRecord(e.data)["action"]),
+	);
+	const suggested = actions.get("suggested") ?? 0;
+	const accepted = actions.get("accepted") ?? 0;
+	const callsByModule = countBy(
+		data.flatMap((d) => d.calls),
+		(c) => c.module,
+	);
+	const tokensByModule = new Map<string, number>();
+	for (const c of data.flatMap((d) => d.calls)) {
+		tokensByModule.set(c.module, (tokensByModule.get(c.module) ?? 0) + c.usage.promptTokens + c.usage.completionTokens);
+	}
+	const toolErrors = sum((m) => m.toolErrors);
+	return [
+		`${data.length} sessions · ${sum((m) => m.turns)} turns · ${sum((m) => m.toolCalls)} tool calls · ${toolErrors} tool errors (${toolErrors > 0 ? percent(sum((m) => m.repeatedToolErrors) / toolErrors) : "-"} repeats)`,
+		`main tokens: in ${sum((m) => m.inputTokens)} · cached ${sum((m) => m.cachedTokens)} · out ${sum((m) => m.outputTokens)} · compactions ${sum((m) => m.compactions)}`,
+		`supervisor: ${sum((m) => m.verdicts.complete + m.verdicts.incomplete + m.verdicts.failed + m.verdicts.uncertain)} verdicts (c/i/f/u ${["complete", "incomplete", "failed", "uncertain"].map((v) => sum((m) => m.verdicts[v as "complete"])).join("/")}) · ${suggested} suggestions, ${accepted} accepted${suggested > 0 ? ` (${percent(accepted / suggested)})` : ""} · ${actions.get("continued") ?? 0} auto-continued`,
+		`rewrites: ${[...rewrites].map(([module, n]) => `${module} ${n}`).join(", ") || "none"}`,
+		`memory: ${[...memory].map(([action, n]) => `${action} ${n}`).join(", ") || "none"}`,
+		`sidecars: ${[...callsByModule].map(([module, n]) => `${module} ${n} calls/${tokensByModule.get(module) ?? 0} tok`).join(", ") || "none"} · ${sum((m) => m.sidecarFailures)} failed`,
+	].join("\n");
+}
+
+function countBy<T>(items: readonly T[], key: (item: T) => string): Map<string, number> {
+	const counts = new Map<string, number>();
+	for (const item of items) counts.set(key(item), (counts.get(key(item)) ?? 0) + 1);
+	return counts;
+}
+
 /** A one-line, kind-specific summary of an event's data. */
 export function summarizeEvent(event: Pick<StoredTraceEvent, "kind" | "data">): string {
 	const d = asRecord(event.data);

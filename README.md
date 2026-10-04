@@ -76,6 +76,7 @@ Why each works this way, with the research behind it, is in [`docs/DECISIONS.md`
 npm run trace -- sessions                 # newest sessions (--label, --limit)
 npm run trace -- show <id-prefix>         # metrics + event timeline (--kinds tool.result,exo.rewrite)
 npm run trace -- calls <id-prefix>        # sidecar calls and per-module totals
+npm run trace -- stats --since 7d         # what the modules did across your sessions
 ```
 
 Add `--json` for machine-readable output, and `--db <path>` to read a store other than the configured one.

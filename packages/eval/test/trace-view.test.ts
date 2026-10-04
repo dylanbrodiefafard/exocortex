@@ -1,6 +1,13 @@
 import { openTraceStore, type SidecarCallRecord, type StoredSession } from "@exocortex/core";
 import { describe, expect, it } from "vitest";
-import { renderCalls, renderSessions, renderTimeline, resolveSession, summarizeEvent } from "../src/trace-view.ts";
+import {
+	renderCalls,
+	renderSessions,
+	renderStats,
+	renderTimeline,
+	resolveSession,
+	summarizeEvent,
+} from "../src/trace-view.ts";
 
 const session = (id: string, startedAt = 0, extra: Partial<StoredSession> = {}): StoredSession => ({
 	id,
@@ -130,5 +137,41 @@ describe("renderCalls", () => {
 		expect(text).toContain("supervisor: 2 calls, 1 ok, 220 tokens, p50 10 ms, max 30 ms");
 		expect(text).toContain("triage: 1 calls, 1 ok, 110 tokens, p50 5 ms, max 5 ms");
 		expect(renderCalls([])).toBe("(no sidecar calls)");
+	});
+});
+
+describe("renderStats", () => {
+	it("aggregates module activity across sessions", () => {
+		const store = openTraceStore({ path: ":memory:" });
+		for (const accepted of [true, false]) {
+			const trace = store.startSession({ harness: "pi", cwd: "/w" });
+			trace.append({
+				kind: "turn.end",
+				turn: 0,
+				data: { usage: { input: 10, cacheRead: 90, output: 5 }, toolResults: 1 },
+			});
+			trace.append({ kind: "exo.verdict", synthetic: true, module: "supervisor", data: { verdict: "incomplete" } });
+			trace.append({ kind: "exo.action", synthetic: true, module: "supervisor", data: { action: "suggested" } });
+			if (accepted)
+				trace.append({ kind: "exo.action", synthetic: true, module: "supervisor", data: { action: "accepted" } });
+			trace.append({ kind: "exo.rewrite", synthetic: true, module: "trimmer", data: { note: "trimmed" } });
+			trace.append({ kind: "exo.memory", synthetic: true, module: "memory", data: { action: "recalled" } });
+			trace.recordSidecarCall(call("supervisor", "ok", 10));
+		}
+		store.flush();
+		const data = store.sessions().map((session) => ({
+			session,
+			events: store.events(session.id),
+			calls: store.sidecarCalls(session.id),
+		}));
+		const text = renderStats(data);
+		expect(text).toContain("2 sessions · 2 turns");
+		expect(text).toContain("main tokens: in 20 · cached 180 · out 10");
+		expect(text).toContain("2 suggestions, 1 accepted (50%)");
+		expect(text).toContain("rewrites: trimmer 2");
+		expect(text).toContain("memory: recalled 2");
+		expect(text).toContain("sidecars: supervisor 2 calls/220 tok · 0 failed");
+		expect(renderStats([])).toBe("(no sessions)");
+		store.close();
 	});
 });
