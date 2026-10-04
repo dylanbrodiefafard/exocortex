@@ -361,6 +361,11 @@ Open check: Exocortex's injected `custom_message` reaches ninfer as a second con
   2. **0/3 tasks:** diagnose from their check logs before changing anything, to separate unfair hidden tests from merely hard ones. Then lower the difficulty, e.g. fewer bugs in `h-py-log-analyzer`.
   3. **3/3 tasks:** re-measure with more repeats once modules exist. Harden only the ones that stay at 100% and belong to the failure mode a phase targets.
   4. Spec-compliance (the supervisor's tasks) is at 6/9, which is enough headroom for Phase 3.
+- **Follow-up (same day):**
+  - **`h-py-log-analyzer`:** a run-3 check log showed a crash on hidden seed 7, plus 10 failures and 2 errors.
+    - The generator emits every rare format with fixed per-entry probabilities over about 34k entries, so the visible seed-1 log contains every format the hidden seeds use. The task is fair; there are just too many bugs at once.
+    - Two of the six (the nested JSON `error.code`, and timestamp comparison across UTC offsets) are now fixed in the starting code. That leaves four: the invalid-UTF-8 crash, the apostrophe/`shlex` crash, level aliases with continuation lines, and the root-cause exception.
+  - **Python 3.13:** the owner's machine runs it, and all Python tasks re-validate under 3.13 as well as 3.11.
 
 ---
 

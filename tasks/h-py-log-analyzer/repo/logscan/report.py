@@ -1,6 +1,7 @@
 """Aggregate parsed log entries into the summary report described in README.md."""
 
 from collections import Counter
+from datetime import datetime, timezone
 
 from logscan.parsers import exception_class, is_continuation, parse_entry
 
@@ -30,11 +31,12 @@ class _Accumulator:
             cls = exception_class(entry.trace)
             if cls:
                 self.exceptions[cls] += 1
-        if entry.ts:
-            if self.first_ts is None or entry.ts < self.first_ts:
-                self.first_ts = entry.ts
-            if self.last_ts is None or entry.ts > self.last_ts:
-                self.last_ts = entry.ts
+        ts = _parse_ts(entry.ts)
+        if ts is not None:
+            if self.first_ts is None or ts < self.first_ts:
+                self.first_ts = ts
+            if self.last_ts is None or ts > self.last_ts:
+                self.last_ts = ts
 
     def result(self):
         top = sorted(self.error_codes.items(), key=lambda kv: (-kv[1], kv[0]))[:TOP_CODES]
@@ -51,10 +53,20 @@ class _Accumulator:
         }
 
 
+def _parse_ts(raw):
+    try:
+        ts = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return ts.astimezone(timezone.utc)
+
+
 def _format_ts(ts):
     if ts is None:
         return None
-    return ts[:19] + "Z"
+    return ts.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def build_report(lines):

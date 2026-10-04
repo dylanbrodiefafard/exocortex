@@ -80,8 +80,15 @@ def parse_json(line):
         level=normalize_level(str(obj.get("level", ""))),
         service=str(obj.get("service", "")),
         message=str(obj.get("msg", "")),
-        code=obj.get("code") or None,
+        code=_json_code(obj),
     )
+
+
+def _json_code(obj):
+    code = obj.get("code")
+    if not code and isinstance(obj.get("error"), dict):
+        code = obj["error"].get("code")
+    return str(code) if code else None
 
 
 def parse_entry(line):

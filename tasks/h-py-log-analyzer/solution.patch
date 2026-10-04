@@ -1,5 +1,5 @@
 diff --git a/logscan/parsers.py b/logscan/parsers.py
-index 65db93f..d62458f 100644
+index 93b90d4..d62458f 100644
 --- a/logscan/parsers.py
 +++ b/logscan/parsers.py
 @@ -2,7 +2,6 @@
@@ -46,26 +46,7 @@ index 65db93f..d62458f 100644
      return Entry(
          ts=fields.get("ts", ""),
          level=normalize_level(fields.get("level", "")),
-@@ -80,10 +86,17 @@ def parse_json(line):
-         level=normalize_level(str(obj.get("level", ""))),
-         service=str(obj.get("service", "")),
-         message=str(obj.get("msg", "")),
--        code=obj.get("code") or None,
-+        code=_json_code(obj),
-     )
- 
- 
-+def _json_code(obj):
-+    code = obj.get("code")
-+    if not code and isinstance(obj.get("error"), dict):
-+        code = obj["error"].get("code")
-+    return str(code) if code else None
-+
-+
- def parse_entry(line):
-     """Parse a line that starts a new log entry, or return None."""
-     for parser in (parse_text, parse_kv, parse_json):
-@@ -96,14 +109,19 @@ def parse_entry(line):
+@@ -103,14 +109,19 @@ def parse_entry(line):
  def is_continuation(line):
      """True for stack-trace lines that belong to the preceding entry."""
      return (
@@ -88,58 +69,10 @@ index 65db93f..d62458f 100644
          m = EXCEPTION_HEADER_RE.match(line)
          if m:
 diff --git a/logscan/report.py b/logscan/report.py
-index 4042ffc..da420c0 100644
+index af46d27..da420c0 100644
 --- a/logscan/report.py
 +++ b/logscan/report.py
-@@ -1,6 +1,7 @@
- """Aggregate parsed log entries into the summary report described in README.md."""
- 
- from collections import Counter
-+from datetime import datetime, timezone
- 
- from logscan.parsers import exception_class, is_continuation, parse_entry
- 
-@@ -30,11 +31,12 @@ class _Accumulator:
-             cls = exception_class(entry.trace)
-             if cls:
-                 self.exceptions[cls] += 1
--        if entry.ts:
--            if self.first_ts is None or entry.ts < self.first_ts:
--                self.first_ts = entry.ts
--            if self.last_ts is None or entry.ts > self.last_ts:
--                self.last_ts = entry.ts
-+        ts = _parse_ts(entry.ts)
-+        if ts is not None:
-+            if self.first_ts is None or ts < self.first_ts:
-+                self.first_ts = ts
-+            if self.last_ts is None or ts > self.last_ts:
-+                self.last_ts = ts
- 
-     def result(self):
-         top = sorted(self.error_codes.items(), key=lambda kv: (-kv[1], kv[0]))[:TOP_CODES]
-@@ -51,10 +53,20 @@ class _Accumulator:
-         }
- 
- 
-+def _parse_ts(raw):
-+    try:
-+        ts = datetime.fromisoformat(raw)
-+    except ValueError:
-+        return None
-+    if ts.tzinfo is None:
-+        ts = ts.replace(tzinfo=timezone.utc)
-+    return ts.astimezone(timezone.utc)
-+
-+
- def _format_ts(ts):
-     if ts is None:
-         return None
--    return ts[:19] + "Z"
-+    return ts.strftime("%Y-%m-%dT%H:%M:%SZ")
- 
- 
- def build_report(lines):
-@@ -79,5 +91,5 @@ def build_report(lines):
+@@ -91,5 +91,5 @@ def build_report(lines):
  
  
  def analyze_file(path):
