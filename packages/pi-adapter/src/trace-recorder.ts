@@ -9,7 +9,7 @@ import {
 import type { Runtime } from "./runtime.ts";
 
 /** Prefix of `customType` on every message Exocortex injects (D-029). */
-export const EXO_CUSTOM_TYPE_PREFIX = "exo.";
+const EXO_CUSTOM_TYPE_PREFIX = "exo.";
 
 export interface RecorderOptions {
 	readonly runtime: Runtime;
