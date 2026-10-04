@@ -5,5 +5,5 @@
 	"check": "cargo test --offline -q",
 	"maxTurns": 25,
 	"timeoutSec": 900,
-	"tags": ["feature", "small"]
+	"tags": ["smoke", "feature"]
 }

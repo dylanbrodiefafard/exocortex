@@ -37,20 +37,28 @@ export interface Task {
 	readonly dir: string;
 	readonly repoDir: string;
 	readonly solutionPatch: string | undefined;
+	/**
+	 * Optional `hidden/` overlay: copied over the workspace after the agent finishes and before
+	 * the check runs, so acceptance tests the agent never saw can score the result.
+	 */
+	readonly hiddenDir: string | undefined;
 }
 
 /**
  * Loads every task under `tasksDir` (one subdirectory per task) whose id matches one of the
- * glob-ish `filters` (`*` wildcard). No filters means all tasks.
+ * glob-ish `filters` (`*` wildcard) and that carries at least one of `tags`. Empty lists match
+ * everything.
  */
-export function loadTasks(tasksDir: string, filters: readonly string[] = []): Task[] {
+export function loadTasks(tasksDir: string, filters: readonly string[] = [], tags: readonly string[] = []): Task[] {
 	const patterns = filters.map(globToRegExp);
 	const tasks: Task[] = [];
 	for (const entry of readdirSync(tasksDir).sort()) {
 		const dir = join(tasksDir, entry);
 		if (!statSync(dir).isDirectory()) continue;
 		const task = loadTask(dir);
-		if (patterns.length === 0 || patterns.some((p) => p.test(task.spec.id))) tasks.push(task);
+		const idMatches = patterns.length === 0 || patterns.some((p) => p.test(task.spec.id));
+		const tagMatches = tags.length === 0 || tags.some((tag) => task.spec.tags.includes(tag));
+		if (idMatches && tagMatches) tasks.push(task);
 	}
 	return tasks;
 }
@@ -66,7 +74,14 @@ export function loadTask(dir: string): Task {
 	const repoDir = join(dir, "repo");
 	if (!existsSync(repoDir)) throw new Error(`${dir}: missing repo/ directory`);
 	const patchPath = join(dir, "solution.patch");
-	return { spec, dir, repoDir, solutionPatch: existsSync(patchPath) ? patchPath : undefined };
+	const hiddenDir = join(dir, "hidden");
+	return {
+		spec,
+		dir,
+		repoDir,
+		solutionPatch: existsSync(patchPath) ? patchPath : undefined,
+		hiddenDir: existsSync(hiddenDir) ? hiddenDir : undefined,
+	};
 }
 
 function globToRegExp(glob: string): RegExp {
