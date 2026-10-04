@@ -1,0 +1,10 @@
+{
+	"id": "h-go-multi-package-config",
+	"language": "go",
+	"prompt": "Add retry support for upstream deliveries, configurable like the other options:\n\n- A new top-level JSON section `\"retry\": {\"max_attempts\": N, \"backoff_ms\": M}`, exposed as `Config.Retry` of type `config.RetryConfig` with int fields `MaxAttempts` and `BackoffMS`. Defaults: 3 attempts and 200 ms. Keys left out of the file keep their defaults.\n- Environment overrides `TOOL_RETRY_MAX_ATTEMPTS` and `TOOL_RETRY_BACKOFF_MS`, behaving exactly like the existing `TOOL_*` overrides.\n- Validation: `retry.max_attempts` must be between 1 and 10 and `retry.backoff_ms` between 0 and 60000 (0 means retry immediately), reported in the same format as the existing range errors.\n- The upstream client makes at most max_attempts attempts per delivery, counting the first. Only upstream failures (transport error or 5xx) are retried; a 4xx is final. Before attempt n+1 it waits backoff_ms × 2^(n−1) milliseconds (200, 400, 800, ... with the defaults), using the app's Clock rather than real time. If the context is done when a retry is due, stop and return the context's error. `Result.Attempts` is the number of attempts made and `Result.Status` the last status seen.\n- `tool --print-config` prints `retry.max_attempts = N` then `retry.backoff_ms = M`, right after the upstream lines (including any `upstream.headers.*` lines) and before the queue lines.\n- Update docs/configuration.md and the tests.\n\n`go test ./...` must pass.",
+	"check": "go test -count=1 ./...",
+	"maxTurns": 50,
+	"timeoutSec": 1500,
+	"checkTimeoutSec": 180,
+	"tags": ["hard", "navigation", "go"]
+}
