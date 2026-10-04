@@ -24,8 +24,13 @@ export interface TraceMetrics {
 	readonly repeatedToolErrors: number;
 	/** Messages Exocortex injected (synthetic). */
 	readonly injections: number;
-	/** Prompts sent by an extension rather than the user (e.g. supervisor continuations). */
+	/**
+	 * Follow-ups Exocortex caused: extension-sent prompts, supervisor auto-continuations and
+	 * accepted supervisor suggestions.
+	 */
 	readonly continuations: number;
+	/** Supervisor verdicts by kind (brief §6.1: the labels memory will learn from). */
+	readonly verdicts: Readonly<Record<"complete" | "incomplete" | "failed" | "uncertain", number>>;
 	readonly compactions: number;
 	/** Sidecar calls Exocortex made (all outcomes). */
 	readonly sidecarCalls: number;
@@ -85,7 +90,12 @@ export function computeTraceMetrics(
 		toolErrors: errors.length,
 		repeatedToolErrors,
 		injections: events.filter((e) => e.kind === "message" && e.synthetic).length,
-		continuations: events.filter((e) => e.kind === "user.input" && record(e.data)["source"] === "extension").length,
+		continuations:
+			events.filter((e) => e.kind === "user.input" && record(e.data)["source"] === "extension").length +
+			events.filter(
+				(e) => e.kind === "exo.action" && ["accepted", "continued"].includes(String(record(e.data)["action"])),
+			).length,
+		verdicts: countVerdicts(events),
 		compactions: events.filter((e) => e.kind === "compaction").length,
 		sidecarCalls: sidecarCalls.length,
 		sidecarTokens: sidecarCalls.reduce((sum, c) => sum + c.usage.promptTokens + c.usage.completionTokens, 0),
@@ -93,6 +103,18 @@ export function computeTraceMetrics(
 			(c) => c.outcome !== "ok" && c.outcome !== "rejected_turn_cap" && c.outcome !== "rejected_budget",
 		).length,
 	};
+}
+
+function countVerdicts(events: readonly StoredTraceEvent[]): TraceMetrics["verdicts"] {
+	const counts = { complete: 0, incomplete: 0, failed: 0, uncertain: 0 };
+	for (const event of events) {
+		if (event.kind !== "exo.verdict") continue;
+		const verdict = record(event.data)["verdict"];
+		if (verdict === "complete" || verdict === "incomplete" || verdict === "failed" || verdict === "uncertain") {
+			counts[verdict] += 1;
+		}
+	}
+	return counts;
 }
 
 /**

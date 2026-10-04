@@ -1,0 +1,6 @@
+// Supervisor in opt-in auto mode: it continues the agent itself (D-010).
+{
+	"modules": {
+		"supervisor": { "enabled": true, "mode": "auto" }
+	}
+}

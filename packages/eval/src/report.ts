@@ -16,6 +16,8 @@ export interface ConfigSummary {
 	readonly injections: number;
 	readonly continuations: number;
 	readonly meanSidecarTokens: number | null;
+	/** Supervisor verdict totals: complete / incomplete / failed / uncertain. */
+	readonly verdicts: string;
 	readonly sidecarFailures: number;
 	readonly abnormal: number;
 }
@@ -45,6 +47,9 @@ export function summarize(records: readonly RunRecord[]): ConfigSummary[] {
 			injections: sum(withMetrics.map((m) => m.injections)),
 			continuations: sum(withMetrics.map((m) => m.continuations)),
 			meanSidecarTokens: mean(withMetrics.map((m) => m.sidecarTokens)),
+			verdicts: (["complete", "incomplete", "failed", "uncertain"] as const)
+				.map((v) => sum(withMetrics.map((m) => m.verdicts[v])))
+				.join("/"),
 			sidecarFailures: sum(withMetrics.map((m) => m.sidecarFailures)),
 			abnormal: runs.filter((r) => r.outcome !== "settled").length,
 		};
@@ -57,8 +62,8 @@ export function renderMarkdown(records: readonly RunRecord[], title: string): st
 	const lines = [
 		`# ${title}`,
 		"",
-		"| config | success | turns | input tok | cached tok | output tok | cache hit | prefix kept | median wall | repeated err | injections | continuations | sidecar tok | sidecar fail | abnormal |",
-		"|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+		"| config | success | turns | input tok | cached tok | output tok | cache hit | prefix kept | median wall | repeated err | injections | continuations | sidecar tok | sidecar fail | verdicts c/i/f/u | abnormal |",
+		"|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
 		...summaries
 			.map((s) =>
 				[
@@ -76,6 +81,7 @@ export function renderMarkdown(records: readonly RunRecord[], title: string): st
 					String(s.continuations),
 					fixed(s.meanSidecarTokens, 0),
 					String(s.sidecarFailures),
+					s.verdicts,
 					String(s.abnormal),
 				].join(" | "),
 			)

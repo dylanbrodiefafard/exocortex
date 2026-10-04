@@ -1,0 +1,7 @@
+// Supervisor in its default suggest mode. The eval harness accepts each suggestion as the
+// user's next message (as if the user pressed Enter), so this measures suggest mode end to end.
+{
+	"modules": {
+		"supervisor": { "enabled": true, "mode": "suggest" }
+	}
+}
