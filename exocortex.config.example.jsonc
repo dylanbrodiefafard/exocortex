@@ -65,6 +65,7 @@
 			"sidecar": true, // a two-sentence hint when the same failure repeats (never on the first)
 			"loopThreshold": 3, // repeats before the stronger "this approach is not working" warning
 			"hintTimeoutMs": 8000,
+			"hypotheses": 0, // at the loop threshold, this many parallel sidecars propose causes from different angles
 			"benignCommands": ["grep", "egrep", "fgrep", "rg", "ag", "diff", "cmp", "test", "[", "which", "pgrep", "git diff"] // exit 1 = an answer
 		},
 		"memory": {

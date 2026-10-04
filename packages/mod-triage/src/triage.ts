@@ -14,6 +14,20 @@ import { parseSettings, type TriageSettings } from "./settings.ts";
 export const TRIAGE_ID = "triage";
 
 const DIAGNOSE_PROMPT = loadPrompt(new URL("../prompts/diagnose.v1.md", import.meta.url));
+const HYPOTHESIS_PROMPT = loadPrompt(new URL("../prompts/hypothesis.v1.md", import.meta.url));
+/** Diagnostic angles for parallel hypotheses (PlanSearch-style diversity, research R6.1). */
+const FRAMES = loadPrompt(new URL("../prompts/frames.v1.md", import.meta.url))
+	.text.split("\n")
+	.filter((line) => line.startsWith("- "))
+	.map((line) => line.slice(2).trim());
+
+const HypothesisSchema = Type.Object({
+	hypothesis: Type.String({ maxLength: 400 }),
+	check: Type.String({ maxLength: 400 }),
+});
+const HYPOTHESIS_TEMPERATURE = 0.8;
+/** Hypotheses sharing more of their words than this are duplicates. */
+const DUPLICATE_SIMILARITY = 0.6;
 
 const DiagnosisSchema = Type.Object({
 	diagnosis: Type.String({ maxLength: 400 }),
@@ -31,6 +45,7 @@ interface TaskState {
 	readonly counts: Map<string, number>;
 	readonly hints: Map<string, number>;
 	readonly recent: string[];
+	readonly hypothesized: Set<string>;
 }
 
 /**
@@ -81,6 +96,14 @@ export function createTriage(raw: Readonly<Record<string, unknown>>, ctx: Module
 			}
 			repeats += 1;
 			const notice = repeatNotice(count, first?.line, settings.loopThreshold);
+			const hypotheses =
+				count >= settings.loopThreshold ? await hypothesize(signature, count, draft, signal) : undefined;
+			if (hypotheses) {
+				return {
+					text: `${draft.current}\n${notice}\n${renderHypotheses(hypotheses)}`,
+					note: `repeat ${count} + ${hypotheses.length} hypotheses`,
+				};
+			}
 			const hint = await diagnose(signature, count, draft, signal);
 			if (hint) hintsGiven += 1;
 			return {
@@ -93,6 +116,59 @@ export function createTriage(raw: Readonly<Record<string, unknown>>, ctx: Module
 			return repeats === 0 ? TRIAGE_ID : `${TRIAGE_ID} (${repeats} repeats, ${hintsGiven} hints)`;
 		},
 	};
+
+	function promptVars(count: number, draft: ToolResultDraft) {
+		return {
+			count: String(count),
+			goal: goal || "(unknown)",
+			recent: task.recent.map((r) => `- ${r}`).join("\n") || "(none)",
+			command: commandOf(draft.input, draft.toolName),
+			exit_code: draft.exitCode === null ? "unknown" : String(draft.exitCode),
+			excerpt: errorExcerpt(draft.output),
+		};
+	}
+
+	/**
+	 * Phase 6 (D-015): K isolated sidecars, each from a different angle, in parallel. Only distinct,
+	 * grounded hypotheses that name a check are kept, and only a list of 2+ is shown: no LLM picks a
+	 * winner (research R6.1).
+	 */
+	async function hypothesize(signature: string, count: number, draft: ToolResultDraft, signal: AbortSignal) {
+		const pool = ctx.pool();
+		if (settings.hypotheses === 0 || !pool || task.hypothesized.has(signature)) return undefined;
+		task.hypothesized.add(signature);
+		const vars = promptVars(count, draft);
+		const evidence = `${draft.output}\n${goal}\n${task.recent.join("\n")}`;
+		const results = await Promise.all(
+			FRAMES.slice(0, settings.hypotheses).map((frame) =>
+				pool.run({
+					module: TRIAGE_ID,
+					priority: "interactive",
+					timeoutMs: settings.hypothesisTimeoutMs,
+					signal,
+					schema: HypothesisSchema,
+					schemaName: "hypothesis",
+					request: {
+						messages: [{ role: "user", content: HYPOTHESIS_PROMPT.render({ ...vars, frame }) }],
+						maxTokens: 250,
+						temperature: HYPOTHESIS_TEMPERATURE,
+						thinking: settings.thinking,
+					},
+				}),
+			),
+		);
+		const candidates = results.flatMap((r) =>
+			r.ok && r.value.hypothesis.trim() !== "" && r.value.check.trim() !== ""
+				? [{ hypothesis: clip(r.value.hypothesis.trim(), 300), check: clip(r.value.check.trim(), 200) }]
+				: [],
+		);
+		const grounded = candidates.filter(
+			(c) => ungroundedReferences(`${c.hypothesis} ${c.check}`, evidence, ctx.cwd).length === 0,
+		);
+		const distinct = dedupe(grounded);
+		ctx.log(`hypotheses: ${candidates.length} answered, ${grounded.length} grounded, ${distinct.length} distinct`);
+		return distinct.length >= 2 ? distinct : undefined;
+	}
 
 	async function diagnose(signature: string, count: number, draft: ToolResultDraft, signal: AbortSignal) {
 		const given = task.hints.get(signature) ?? 0;
@@ -110,14 +186,7 @@ export function createTriage(raw: Readonly<Record<string, unknown>>, ctx: Module
 				messages: [
 					{
 						role: "user",
-						content: DIAGNOSE_PROMPT.render({
-							count: String(count),
-							goal: goal || "(unknown)",
-							recent: task.recent.map((r) => `- ${r}`).join("\n") || "(none)",
-							command: commandOf(draft.input, draft.toolName),
-							exit_code: draft.exitCode === null ? "unknown" : String(draft.exitCode),
-							excerpt: errorExcerpt(draft.output),
-						}),
+						content: DIAGNOSE_PROMPT.render(promptVars(count, draft)),
 					},
 				],
 				maxTokens: 300,
@@ -142,8 +211,46 @@ export function createTriage(raw: Readonly<Record<string, unknown>>, ctx: Module
 	}
 }
 
+interface Hypothesis {
+	readonly hypothesis: string;
+	readonly check: string;
+}
+
+export function renderHypotheses(hypotheses: readonly Hypothesis[]): string {
+	return [
+		"[exo triage: possible causes to check before the next attempt (unverified):",
+		...hypotheses.map((h, i) => `${i + 1}. ${h.hypothesis} Check: ${h.check}`),
+		"]",
+	].join("\n");
+}
+
+/** Keeps the first of any hypotheses that share most of their words. */
+export function dedupe<T extends Hypothesis>(items: readonly T[]): T[] {
+	const kept: T[] = [];
+	for (const item of items) {
+		const words = wordSet(item.hypothesis);
+		if (kept.every((k) => similarity(words, wordSet(k.hypothesis)) <= DUPLICATE_SIMILARITY)) kept.push(item);
+	}
+	return kept;
+}
+
+function wordSet(text: string): Set<string> {
+	return new Set(
+		text
+			.toLowerCase()
+			.split(/[^a-z0-9_]+/)
+			.filter((w) => w.length >= 3),
+	);
+}
+
+function similarity(a: ReadonlySet<string>, b: ReadonlySet<string>): number {
+	const shared = [...a].filter((w) => b.has(w)).length;
+	const union = new Set([...a, ...b]).size;
+	return union === 0 ? 1 : shared / union;
+}
+
 function newTask(): TaskState {
-	return { counts: new Map(), hints: new Map(), recent: [] };
+	return { counts: new Map(), hints: new Map(), recent: [], hypothesized: new Set() };
 }
 
 function isFailure(draft: ToolResultDraft): boolean {

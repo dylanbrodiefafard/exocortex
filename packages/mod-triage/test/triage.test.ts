@@ -5,7 +5,7 @@ import { type ToolResultDraft, ungroundedReferences } from "@exocortex/core";
 import { createTestModuleContext, type SidecarReply } from "@exocortex/testkit";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { parseSettings } from "../src/settings.ts";
-import { createTriage, errorExcerpt, isBenign } from "../src/triage.ts";
+import { createTriage, dedupe, errorExcerpt, isBenign } from "../src/triage.ts";
 
 let dir: string;
 beforeEach(() => {
@@ -164,9 +164,58 @@ describe("triage", () => {
 		expect(rewrite?.text).toContain("this failed again the same way");
 	});
 
+	it("at the loop threshold, lists distinct grounded hypotheses from parallel angles", async () => {
+		const prompts: string[] = [];
+		const answers = [
+			{ hypothesis: "The borrow of `self.stack` in lib.rs outlives the push.", check: "Read lib.rs around line 42." },
+			{ hypothesis: "The borrow of `self.stack` in lib.rs outlives the push call.", check: "Read lib.rs." },
+			{
+				hypothesis: "Cargo builds a stale target; the error is from an old build.",
+				check: "Run cargo clean then cargo build.",
+			},
+			{ hypothesis: "The bug is in `ghost_module` instead.", check: "Open src/ghost.rs." },
+		];
+		const { triage } = setup({ hypotheses: 4, sidecar: false }, (prompt) => {
+			prompts.push(prompt);
+			return prompt.includes("Angle:") ? (answers[prompts.filter((p) => p.includes("Angle:")).length - 1] ?? {}) : {};
+		});
+		for (let i = 0; i < 2; i++) await fail(triage, draft(RUST_ERROR));
+		const third = await fail(triage, draft(RUST_ERROR));
+		expect(prompts.filter((p) => p.includes("Angle:"))).toHaveLength(4);
+		expect(new Set(prompts.map((p) => /Angle: (.*)/.exec(p)?.[1])).size).toBe(4);
+		expect(third?.text).toContain("[exo triage: possible causes to check before the next attempt (unverified):");
+		expect(third?.text).toContain(
+			"1. The borrow of `self.stack` in lib.rs outlives the push. Check: Read lib.rs around line 42.",
+		);
+		expect(third?.text).toContain("2. Cargo builds a stale target");
+		expect(third?.text).not.toContain("ghost");
+		expect(third?.note).toBe("repeat 3 + 2 hypotheses");
+		// Once per signature per task.
+		expect((await fail(triage, draft(RUST_ERROR)))?.note).toBe("repeat 4");
+	});
+
+	it("falls back to the plain notice when fewer than two hypotheses survive", async () => {
+		const { triage } = setup({ hypotheses: 2, sidecar: false }, () => ({ hypothesis: "", check: "" }));
+		for (let i = 0; i < 2; i++) await fail(triage, draft(RUST_ERROR));
+		expect((await fail(triage, draft(RUST_ERROR)))?.note).toBe("repeat 3");
+	});
+
 	it("reports invalid settings", () => {
 		const { t } = setup({ loopThreshold: 1 });
 		expect(t.logs.some((l) => l.startsWith("triage /loopThreshold"))).toBe(true);
+	});
+});
+
+describe("dedupe", () => {
+	it("keeps the first of near-identical hypotheses", () => {
+		const h = (hypothesis: string) => ({ hypothesis, check: "c" });
+		expect(
+			dedupe([
+				h("the parser drops the last token"),
+				h("the parser drops the last token silently"),
+				h("an env var is missing"),
+			]).map((x) => x.hypothesis),
+		).toEqual(["the parser drops the last token", "an env var is missing"]);
 	});
 });
 

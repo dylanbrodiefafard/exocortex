@@ -642,6 +642,23 @@ Open check: Exocortex's injected `custom_message` reaches ninfer as a second con
 
 ---
 
+### D-050 — Phase 6 starts small: verdict votes and diverse hypotheses for stuck loops · accepted (narrows D-015 per research R6.1–R6.3)
+- **Context:** the research found that best-of-N gains come from executable verification. Without it, a same-model judge picking a winner plateaus early and adds false positives.
+- **Decision:**
+  - **Verdict voting** is the supervisor's `completeVotes` option (D-046), capped at 5 (R6.3).
+  - **Diverse hypotheses** are triage's `hypotheses: k` option (off by default):
+    - **Trigger:** the loop threshold, once per error signature per task.
+    - **Calls:** k isolated sidecars run in parallel at temperature 0.8. Each gets a different diagnostic angle from `prompts/frames.v1.md`: the bug is elsewhere in the call path; a wrong API assumption; the environment or setup; a misread expectation; an earlier change.
+    - **Filtering:** each answer must name a check. Answers that fail the guidance gate are dropped, as are near-duplicates (word-set Jaccard > 0.6).
+    - **Output:** shown only when 2+ distinct hypotheses survive, as an unverified list. **No LLM picks a winner.**
+- **Not done:**
+  - D-015's fork-prefix context;
+  - recording contrasting candidates for memory;
+  - execution-based best-of-K. That would run only in the eval sandbox as a headroom study (R6.2).
+- **Eval:** `triage-hypotheses` vs `triage` on `error-recovery`.
+
+---
+
 ## Open questions (carried from brief §10, updated)
 
 1. ~~Resolved by D-029.~~ Exact pi mechanism for injecting into the current user turn without altering prior messages. *(Phase 0)*

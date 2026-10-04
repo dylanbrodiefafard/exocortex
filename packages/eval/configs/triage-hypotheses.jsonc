@@ -1,0 +1,8 @@
+// Triage with Phase 6 diverse hypotheses (D-050): at the loop threshold, 3 isolated sidecars each
+// propose a cause from a different angle; 2+ distinct, grounded ones are listed. Compare with
+// `triage` on the error-recovery slice: repeated-error rate and turns from first failure to success.
+{
+	"modules": {
+		"triage": { "enabled": true, "hypotheses": 3 }
+	}
+}

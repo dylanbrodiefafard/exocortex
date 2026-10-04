@@ -13,6 +13,12 @@ const SettingsSchema = Type.Object(
 		/** The hint holds the agent loop: keep the deadline short. */
 		hintTimeoutMs: Type.Integer({ minimum: 500, default: 8_000 }),
 		thinking: Type.Boolean({ default: false }),
+		/**
+		 * Phase 6 (D-015, research R6.1): at the loop threshold, this many isolated sidecars each propose
+		 * a cause from a different angle; distinct, grounded ones are listed. 0 = off.
+		 */
+		hypotheses: Type.Integer({ minimum: 0, maximum: 5, default: 0 }),
+		hypothesisTimeoutMs: Type.Integer({ minimum: 500, default: 10_000 }),
 		/** Commands whose exit code 1 means "no match" or "differs", not failure. */
 		benignCommands: Type.Array(Type.String({ minLength: 1 }), {
 			default: ["grep", "egrep", "fgrep", "rg", "ag", "diff", "cmp", "test", "[", "which", "pgrep", "git diff"],
