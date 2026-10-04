@@ -300,7 +300,21 @@ Open check: Exocortex's injected `custom_message` reaches ninfer as a second con
   - **Fixtures:** `tasks/<id>/{task.json, repo/, solution.patch}`. `npm run eval -- --validate` (also run in CI) requires the pristine repo to fail the check and the solution to pass. Six seed tasks: 3 Python, 1 Go, 1 Rust, 1 C++.
 - **Phase 1 acceptance status:**
   - Mechanics are verified end to end against a scripted fake model: success, failure and max-turns paths, plus the report for all 6 tasks.
-  - The required baseline table on a real model has to be run on the owner's machine: `npm run eval -- --model <provider>/<model> --repeat 3`. Tag `phase-1` after that table exists.
+  - The required baseline table on a real model has to be run on the owner's machine: `npm run eval -- --model <provider>/<model> --repeat 3`. Tag `phase-1` after that table exists (it now does: D-034).
+
+---
+
+### D-034 — Phase 1 baseline: fixtures are at ceiling · accepted (2026-10-04)
+- **Run:** owner's machine, model `ninfer/coding` (Qwen3.8-27B on ninfer), config `all-off`, 6 tasks × 3 repeats.
+- **Result:**
+  - **Success:** 18/18 (100%), every task 3/3.
+  - **Per run (mean):** 5.3 turns, 3.1k uncached input tokens, 17.6k cached input tokens, 2.7k output tokens, 7 s median wall clock.
+  - **Cache hit 85%, prefix kept 100%:** pi's main loop is prefix-stable and ninfer's prefix reuse works for append-only conversations.
+  - **0 repeated errors, 0 abnormal runs.**
+- **Phase 1 acceptance:** met. The baseline table exists for ≥5 tasks.
+- **Consequence:** the seed tasks are **too easy to measure any module**. At 100% success, the supervisor, trimmer, triage and memory can only show cost, never benefit.
+  - Before any module's on/off comparison counts as evidence, the task set needs headroom: a baseline success rate of roughly 30–70% on this model.
+  - The seed tasks stay as a fast smoke and regression set (`tags: ["small"]`).
 
 ---
 
