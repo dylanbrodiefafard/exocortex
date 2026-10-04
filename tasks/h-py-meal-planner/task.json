@@ -1,0 +1,10 @@
+{
+	"id": "h-py-meal-planner",
+	"language": "python",
+	"prompt": "I moved the Ingredient dataclass out of meal/units.py into meal/recipe.py, where it belongs, and now the test suite won't even import. Please get `python3 -m unittest discover -s tests -t .` passing again. Constraints: Ingredient must stay defined in meal/recipe.py; everything that is importable today (from meal, meal.units, meal.recipe, meal.planner and meal.shopping) must still be importable from the same place, and each of those modules must import cleanly on its own in a fresh interpreter; don't change the tests; and every function and class must still do what its docstring says.",
+	"check": "python3 -m unittest discover -q -s tests -t .",
+	"maxTurns": 40,
+	"timeoutSec": 1200,
+	"checkTimeoutSec": 120,
+	"tags": ["hard", "error-recovery", "python", "uncalibrated"]
+}

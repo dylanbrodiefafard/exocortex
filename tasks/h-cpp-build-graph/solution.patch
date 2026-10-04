@@ -1,0 +1,41 @@
+diff --git a/include/mkb/graph.hpp b/include/mkb/graph.hpp
+index fced2cf..dd72236 100644
+--- a/include/mkb/graph.hpp
++++ b/include/mkb/graph.hpp
+@@ -1,6 +1,7 @@
+ // The target graph.
+ #pragma once
+ 
++#include <deque>
+ #include <map>
+ #include <stdexcept>
+ #include <string>
+@@ -59,7 +60,7 @@ public:
+     std::vector<std::string> transitive_outputs(const std::string& label) const;
+ 
+ private:
+-    std::vector<Target> targets_;
++    std::deque<Target> targets_;
+     std::unordered_map<std::string, std::size_t> index_;
+ };
+ 
+diff --git a/include/mkb/registry.hpp b/include/mkb/registry.hpp
+index 74262c7..8edd4ca 100644
+--- a/include/mkb/registry.hpp
++++ b/include/mkb/registry.hpp
+@@ -29,13 +29,13 @@ struct RuleKind {
+ 
+ using KindTable = std::map<std::string, RuleKind>;
+ 
+-KindTable& kind_table() {
++inline KindTable& kind_table() {
+     static KindTable table;
+     return table;
+ }
+ 
+ // The registered kind called `name`, or nullptr.
+-const RuleKind* find_kind(const std::string& name) {
++inline const RuleKind* find_kind(const std::string& name) {
+     auto it = kind_table().find(name);
+     return it == kind_table().end() ? nullptr : &it->second;
+ }

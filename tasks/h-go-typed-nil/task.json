@@ -1,0 +1,10 @@
+{
+	"id": "h-go-typed-nil",
+	"language": "go",
+	"prompt": "The telemetry ingester is broken: `go test -race ./...` crashes with a nil pointer panic in the ingest tests, and the ingest command does the same on real gateway files. Find the real cause and fix it so the whole suite passes under the race detector. Don't change the existing tests. ingest.Run must stay concurrent (opts.Workers goroutines), and every exported function and type must still behave as its doc comment says.",
+	"check": "go test -race -count=1 ./...",
+	"maxTurns": 40,
+	"timeoutSec": 1200,
+	"checkTimeoutSec": 180,
+	"tags": ["hard", "error-recovery", "go", "uncalibrated"]
+}

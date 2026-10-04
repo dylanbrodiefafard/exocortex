@@ -1,0 +1,27 @@
+diff --git a/ingest/ingest.go b/ingest/ingest.go
+index 8a6393e..ef9b5ac 100644
+--- a/ingest/ingest.go
++++ b/ingest/ingest.go
+@@ -139,6 +139,8 @@ func (rep *Report) reject(gateway string, r reading.Reading, err error) {
+ 		}
+ 		sort.Strings(rj.Rules)
+ 	}
++	rep.mu.Lock()
++	defer rep.mu.Unlock()
+ 	for _, rule := range rj.Rules {
+ 		rep.ByRule[rule]++
+ 	}
+diff --git a/validate/validate.go b/validate/validate.go
+index fb61c25..880c3e6 100644
+--- a/validate/validate.go
++++ b/validate/validate.go
+@@ -85,6 +85,9 @@ func Check(r reading.Reading, w Window) error {
+ 	if w.NotAfter != 0 && r.Time > w.NotAfter {
+ 		report(RuleTime, "timestamp %d after %d", r.Time, w.NotAfter)
+ 	}
++	if probs == nil {
++		return nil
++	}
+ 	return probs
+ }
+ 
