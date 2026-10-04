@@ -159,7 +159,7 @@ Findings from reading `dylanbrodiefafard/ninfer` at `e04fad3` (paths are relativ
 - **Sampling:** the default "p-less" sampler ignores top_p/top_k/penalties, and Qwen3.8 defaults to temperature 2.0. Sidecars set their own temperature explicitly. Whether low temperature behaves well under p-less is a *Phase 2 check*.
 - **Discrepancy:** the public code caps `--max-concurrency` at 1-4, but the owner runs 6 slots. Presumably that's local or unpushed work; the pool reads the concurrency limit from config and doesn't hard-code it.
 
-### D-024 — Sidecar context under single-owner reuse · accepted (amends D-007)
+### D-024 — Sidecar context under single-owner reuse · superseded by D-028 (kept as the fallback path)
 - **Context:** D-007 assumed fork-prefix sidecars get main's prefix almost free. Under D-023 that's only true when the sidecar runs **while main is idle**, and even then the sidecar *claims* main's saved state. Main resumes via the turn-rollback pin or turn-closure checkpoint, but that is unverified.
 - **Decision:**
   1. **Default is `isolated`**: short prompts, cold prefill, cheap because they're short. Keep them well under ~4k tokens so they don't stall main's decode.
@@ -173,7 +173,7 @@ Findings from reading `dylanbrodiefafard/ninfer` at `e04fad3` (paths are relativ
   4. **Phase 2 must measure it before any module relies on it:** sidecar `cached_tokens`, *and* main's `cached_tokens` on its next request (does main still hit after a sidecar claimed its state?). If main loses its cache, fork-prefix is disabled by default.
 - **Consequences:** Sidecars usually can't see main's full context. Modules get compact, deterministic context from the trace instead (current goal, last command, error lines). That fits the "keep sidecar prompts short" rule anyway.
 
-### D-025 — Pool policy for ninfer · accepted (refines brief §5.2)
+### D-025 — Pool policy for ninfer · amended by D-028
 - Every sidecar sets an explicit small `max_tokens` (admission reserves it) and explicit sampling params.
 - `reservedForMain` stays (default 2 of the configured slots). Since the server has no priority, Exocortex's own queue is the only priority mechanism. Interactive sidecars get tight client-side timeouts and abort through disconnect, which ninfer honours.
 - A per-sidecar prompt-size cap protects main's decode from prefill stalls.
@@ -185,12 +185,34 @@ Findings from reading `dylanbrodiefafard/ninfer` at `e04fad3` (paths are relativ
   - Phase 5 ships with FTS5 BM25 + structured triggers (file globs, normalized error signatures) only.
   - Add embeddings only if eval shows retrieval recall is the bottleneck. They'd go behind `InferenceClient.embed()` against any OpenAI-compatible `/v1/embeddings` server, e.g. a small CPU-hosted embedding model.
 
-### D-027 — Candidate ninfer features (owner's call, not blocking) · proposed
+### D-027 — Candidate ninfer features (owner's call, not blocking) · superseded by D-028 / `docs/NINFER_REQUIREMENTS.md`
 Ranked by value to Exocortex. None of these is required for v0.
 1. **Request priority classes** (main > interactive sidecar > background) in admission and prefill ordering, or at least a "low priority: don't preempt main's decode" flag.
 2. **Retained-bundle fork / copy-on-write**, so a sidecar can reuse main's prefix without claiming it. This is the biggest cost lever for fork-prefix sidecars. Upstream notes say it needs a redesign (`paged-kv-cache.md:840-842`).
 3. **User-supplied `json_schema` structured output**, reusing the existing XGrammar tool-argument path.
 4. An `/v1/embeddings` endpoint (lowest; D-026 doesn't need it).
+
+### D-028 — Design for the best-case ninfer; degrade by capability · accepted (supersedes D-024, D-027; amends D-007, D-023, D-025)
+- **Context:** The owner controls the fork and will implement whatever Exocortex needs. The requirements are in `docs/NINFER_REQUIREMENTS.md` (R1–R13).
+- **Decision:** Exocortex's primary design assumes:
+  - **fork-on-reuse** (R1), **priority classes** (R2) and **retention control** (R3);
+  - **prompt-neutral `json_schema`** (R4);
+  - **append-only `continue_from`** (R5), **decode-time thinking budget** (R6) and **capability discovery** (R7).
+- **Consequences for Exocortex:**
+  - **Sidecar context (restores D-007):**
+    - `fork-prefix` is the default for trimmer, triage, compaction, reasoning-parallel diagnoses (D-015) and memory relevance checks.
+    - It's implemented via `continue_from` (R5), sending only the appended instruction, or via exact-prefix fork (R1) if R5 is missing.
+    - Parallel forks from one frontier are allowed.
+    - The supervisor's verdict stays `isolated` *by design* (anti-bias), not for cost.
+  - **Requests:** sidecars send `retain:"none"`, `priority:"interactive"|"background"`, `thinking_budget_tokens` per module config and `response_format: json_schema`. Main is tagged `retain:"session"` with a per-pi-session `session_id` (body field or `X-Ninfer-*` header — verify in Phase 0 which pi allows).
+  - **Pool:** server priority does the real scheduling. Exocortex's own queue only enforces per-module budgets and caps in-flight sidecars at `maxConcurrent - reservedForMain`.
+  - **Fallbacks:** at startup the `InferenceClient` reads `/v1/ninfer/capabilities`. Each missing feature switches on its fallback:
+    - no R1/R5 → D-024 (isolated, or a single serialized fork);
+    - no R2 → client-side queue + prompt-size cap;
+    - no R4 → forced tool call, else prompted JSON + validate;
+    - no R6 → thinking settings copied from main.
+  - Fallbacks are tested with a fake server that advertises each capability subset.
+  - **Measurement:** the Phase 2 load test doubles as the acceptance test for R1–R3, recording `cached_tokens`, main's inter-token latency and `queue_wait_ms`.
 
 ---
 
@@ -204,7 +226,8 @@ Ranked by value to Exocortex. None of these is required for v0.
 6. **New:** Can the pi adapter observe the exact outgoing LLM request (needed for byte-exact `fork-prefix`, D-007)? *(Phase 0)*
 7. **New:** Can pi's UI API pre-fill the editor or offer one-key accept for supervisor suggestions (D-010)? *(Phase 0)*
 8. ~~ninfer fork details~~ — mostly answered by D-023. Remaining: confirm the 6-slot build vs. the public 1-4 cap.
-10. **New:** Does a named `tool_choice` enforce the XGrammar schema well enough to use as structured output (D-023)? *(Phase 2)*
-11. **New:** After a fork-prefix sidecar claims main's retained state, does main's next request still hit cache (D-024)? *(Phase 2)*
+10. ~~Superseded by R4 in NINFER_REQUIREMENTS.~~ Does a named `tool_choice` enforce the XGrammar schema well enough to use as structured output (D-023)? *(Phase 2)*
+11. ~~Superseded by R1.~~ After a fork-prefix sidecar claims main's retained state, does main's next request still hit cache (D-024)? *(Phase 2)*
 12. **New:** Main's `reasoning_effort` / thinking setting decides which sidecar settings can share its prefix. Pick the main default with this in mind (D-008, D-023). *(Phase 2)*
 9. **New:** Thinking-mode defaults per module (D-008). *(Phase 3+, eval)*
+13. **New:** Can pi attach per-session headers or extra body fields to main's requests (needed to tag main with `session_id`/`retain`, D-028)? *(Phase 0)*
