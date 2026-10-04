@@ -1,7 +1,7 @@
 import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { createWriteStream, type WriteStream } from "node:fs";
 import { StringDecoder } from "node:string_decoder";
-import { killGroup } from "./workspace.ts";
+import { killGroup } from "@exocortex/core";
 
 export type RunOutcome = "settled" | "max_turns" | "timeout" | "crashed";
 
@@ -15,6 +15,13 @@ export interface PiRpcOptions {
 	readonly stderrPath: string;
 }
 
+export interface PromptLimits {
+	readonly maxTurns: number;
+	readonly timeoutMs: number;
+	/** Send `set_editor_text` suggestions back as the next prompt (eval stand-in for the user). */
+	readonly acceptSuggestions?: boolean;
+}
+
 export interface UiRequest {
 	readonly method: string;
 	readonly payload: Readonly<Record<string, unknown>>;
@@ -26,6 +33,8 @@ export interface PromptResult {
 	readonly durationMs: number;
 	/** Fire-and-forget UI requests (notify, set_editor_text, ...) seen during the run. */
 	readonly uiRequests: readonly UiRequest[];
+	/** Editor suggestions sent back as the next prompt (see {@link PromptLimits.acceptSuggestions}). */
+	readonly acceptedSuggestions: number;
 	readonly error?: string;
 }
 
@@ -68,11 +77,50 @@ export class PiRpcProcess {
 		});
 	}
 
-	/** Sends a prompt and waits for `agent_settled` (or a limit). */
-	async prompt(
+	/**
+	 * Sends a prompt and waits for `agent_settled` (or a limit). With `acceptSuggestions`, an
+	 * extension's `set_editor_text` during the run is treated like the user pressing Enter: the
+	 * text is sent as the next prompt, within the same overall turn and time limits.
+	 */
+	async prompt(message: string, limits: PromptLimits): Promise<PromptResult> {
+		const started = performance.now();
+		const uiRequests: UiRequest[] = [];
+		let turns = 0;
+		let acceptedSuggestions = 0;
+		let text = message;
+		for (;;) {
+			const remainingMs = limits.timeoutMs - (performance.now() - started);
+			const once = await this.promptOnce(text, {
+				maxTurns: limits.maxTurns - turns,
+				timeoutMs: Math.max(1, remainingMs),
+			});
+			turns += once.turns;
+			uiRequests.push(...once.uiRequests);
+			const suggestion = [...once.uiRequests].reverse().find((r) => r.method === "set_editor_text")?.payload["text"];
+			const done =
+				once.outcome !== "settled" ||
+				!limits.acceptSuggestions ||
+				typeof suggestion !== "string" ||
+				suggestion.trim() === "" ||
+				turns >= limits.maxTurns;
+			if (done) {
+				return {
+					...once,
+					turns,
+					uiRequests,
+					acceptedSuggestions,
+					durationMs: Math.round(performance.now() - started),
+				};
+			}
+			acceptedSuggestions += 1;
+			text = suggestion;
+		}
+	}
+
+	private async promptOnce(
 		message: string,
 		limits: { readonly maxTurns: number; readonly timeoutMs: number },
-	): Promise<PromptResult> {
+	): Promise<Omit<PromptResult, "acceptedSuggestions">> {
 		const started = performance.now();
 		const uiRequests: UiRequest[] = [];
 		let turns = 0;

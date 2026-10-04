@@ -4,7 +4,7 @@ An exocortex for small models. Exocortex makes a weak local LLM behave like a st
 
 It runs as a [pi](https://github.com/badlogic/pi-mono) extension and targets a local Qwen 27B behind any OpenAI-compatible engine (primarily [ninfer](https://github.com/dylanbrodiefafard/ninfer); vLLM, SGLang and llama.cpp also work).
 
-**Status:** Phase 2 (sidecar pool). The extension records every session to a SQLite trace and can make scheduled sidecar calls (`/exo ping`). No modules exist yet.
+**Status:** Phase 3 (supervisor). Every session is traced to SQLite. The first module, the supervisor, checks whether the agent really finished what you asked and suggests a follow-up when it didn't.
 
 ## Docs
 
@@ -40,7 +40,20 @@ To load it permanently, add the adapter path to `extensions` in `~/.pi/agent/set
 
 Every session is recorded to `~/.exocortex/exocortex.db`. To configure that, copy [`exocortex.config.example.jsonc`](exocortex.config.example.jsonc) to `~/.exocortex/config.jsonc`. A broken config disables Exocortex rather than breaking pi.
 
-Inside pi, `/exo` shows status, and `/exo ping` makes one sidecar call to check that the sidecar engine is reachable.
+Inside pi:
+- `/exo` shows status.
+- `/exo ping` makes one sidecar call to check that the sidecar engine is reachable.
+- `/exo off` and `/exo on` turn every module off or back on for the session.
+
+### Supervisor
+
+Enable it in `~/.exocortex/config.jsonc` with `"modules": { "supervisor": { "enabled": true } }`, or for one session with `/exo supervisor on`.
+
+When the agent stops, the supervisor:
+1. compares what you asked for (a checklist it extracted from your message) with evidence from the workspace: the diff, the commands the agent ran and their exit codes, and any check commands you quoted;
+2. if something is missing, puts a follow-up listing it in your editor. Press Enter to send it, or edit it first.
+
+`/exo supervisor auto` lets it send the follow-up itself, at most 3 times per task. Settings are in [`exocortex.config.example.jsonc`](exocortex.config.example.jsonc).
 
 ### Debug output
 
@@ -59,7 +72,7 @@ EXO_DEBUG=1 pi -e /path/to/exocortex/packages/pi-adapter
 ```sh
 npm run eval -- --model <provider>/<model-id> --repeat 3        # baseline: every module off, all tasks
 npm run eval -- --model <provider>/<model-id> --tags hard       # only the hard tier (or --tags smoke)
-npm run eval -- --config all-off,supervisor --tasks 'py-*'      # A/B configs on a subset
+npm run eval -- --config all-off,supervisor --tags hard --repeat 5   # A/B a module
 npm run eval -- --validate                                      # fixture QA: pristine fails, solution passes
 ```
 

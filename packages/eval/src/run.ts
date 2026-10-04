@@ -2,7 +2,7 @@ import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { openTraceStore } from "@exocortex/core";
+import { loadConfig, openTraceStore } from "@exocortex/core";
 import { type ParseError, parse as parseJsonc } from "jsonc-parser";
 import { computeTraceMetrics, type TraceMetrics } from "./metrics.ts";
 import { PiRpcProcess, type RunOutcome } from "./pi-rpc.ts";
@@ -41,6 +41,8 @@ export interface RunRecord {
 	readonly checkExitCode: number | null;
 	readonly checkTimedOut: boolean;
 	readonly agentMs: number;
+	/** Supervisor (or other) editor suggestions the harness accepted on the user's behalf. */
+	readonly acceptedSuggestions: number;
 	readonly wallClockMs: number;
 	readonly metrics: TraceMetrics | null;
 	readonly error?: string;
@@ -101,6 +103,7 @@ async function runOne(
 		checkExitCode: null,
 		checkTimedOut: false,
 		agentMs: 0,
+		acceptedSuggestions: 0,
 		wallClockMs: Math.round(performance.now() - started),
 		metrics: null,
 		error,
@@ -144,6 +147,7 @@ async function runOne(
 	const agent = await pi.prompt(task.spec.prompt, {
 		maxTurns: task.spec.maxTurns,
 		timeoutMs: task.spec.timeoutSec * 1000,
+		acceptSuggestions: true,
 	});
 	await pi.close();
 
@@ -161,6 +165,7 @@ async function runOne(
 		checkExitCode: check.exitCode,
 		checkTimedOut: check.timedOut,
 		agentMs: agent.durationMs,
+		acceptedSuggestions: agent.acceptedSuggestions,
 		wallClockMs: Math.round(performance.now() - started),
 		metrics,
 		...(agent.error === undefined ? {} : { error: agent.error }),
@@ -191,11 +196,20 @@ function writeRunConfig(configsDir: string, name: string, runDir: string, dbPath
 	}
 	const config = parsed as Record<string, unknown>;
 	const trace = typeof config["trace"] === "object" && config["trace"] !== null ? config["trace"] : {};
-	const merged = { ...config, trace: { ...trace, enabled: true, dbPath } };
+	// Machine-specific settings (which engine, how many slots) come from the user's global config,
+	// so sidecars respect the real engine (D-038); the named config decides everything else.
+	const machine = machineSettings(runDir);
+	const merged = { ...machine, ...config, trace: { ...trace, enabled: true, dbPath } };
 	const out = join(runDir, "configs", `${name}.json`);
 	mkdirSync(dirname(out), { recursive: true });
 	writeFileSync(out, JSON.stringify(merged, null, 2));
 	return out;
+}
+
+function machineSettings(cwd: string): Record<string, unknown> {
+	const loaded = loadConfig({ cwd, env: { ...process.env, EXO_CONFIG: undefined } });
+	if (!loaded.sources[0]?.found || loaded.problems.length > 0) return {};
+	return { engine: loaded.config.engine, pool: loaded.config.pool };
 }
 
 export interface ValidationResult {

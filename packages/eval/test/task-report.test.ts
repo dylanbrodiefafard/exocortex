@@ -55,6 +55,7 @@ describe("summarize", () => {
 		checkExitCode: 0,
 		checkTimedOut: false,
 		agentMs: 1,
+		acceptedSuggestions: 0,
 		metrics: null,
 	} as const;
 	it("computes success rate, median wall clock and abnormal count per config", () => {

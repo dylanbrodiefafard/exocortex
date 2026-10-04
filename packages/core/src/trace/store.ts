@@ -24,6 +24,12 @@ export const TRACE_EVENT_KINDS = [
 	"agent.settled",
 	"compaction",
 	"model.change",
+	/** A module's extracted task goals (e.g. the supervisor's goal ledger). */
+	"exo.ledger",
+	/** A module's judgement of the agent's work: the labels memory learns from (brief §6.1). */
+	"exo.verdict",
+	/** A module acting on the session: suggestion, continuation, acceptance, or a deliberate skip. */
+	"exo.action",
 ] as const;
 
 export type TraceEventKind = (typeof TRACE_EVENT_KINDS)[number];

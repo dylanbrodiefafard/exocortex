@@ -432,13 +432,53 @@ Open check: Exocortex's injected `custom_message` reaches ninfer as a second con
 
 ---
 
+## Phase 3 (2026-10-04)
+
+### D-039 — Module interface and the supervisor as built · accepted (Phase 3; implements brief §5.4, §6.1, D-010, D-011)
+- **Module interface (`@exocortex/core`):**
+  - Hooks: `onUserTurn`, `onToolResult`, and `onSettle → SettleAction`, which is one of `suggest`, `continue` or `notify`.
+  - Modules get a `ModuleContext` (pool, trace recorder, shell runner, log) and never import pi.
+  - One instance per pi session, built from `config.modules.<id>` plus live `/exo` overrides.
+  - Prompts are versioned files (`packages/mod-<id>/prompts/<name>.vN.md`, with `{{var}}`).
+  - New trace kinds: `exo.ledger`, `exo.verdict`, `exo.action`, all tagged synthetic with their module.
+- **Supervisor (`@exocortex/mod-supervisor`):**
+  1. **Ledger:** on every user turn, an *interactive*, isolated sidecar extracts 1–7 criteria and check commands. It sees the previous checklist so follow-ups can amend it, and non-task messages produce no checklist. The ledger is stored, never injected.
+  2. **Evidence at settle:** all deterministic. Git diff and stat since the task's starting commit (so commits made during the task count), untracked files, files the agent wrote, its last 10 commands with exit codes plus the tail of the last failure, and check-command results. Ordered by importance and capped at 8k characters; the raw diff is truncated first.
+  3. **Checks (D-011 safety):** configured `checks`, plus ledger commands **only if they appear verbatim in the user's request**. A model can never invent a command to run.
+  4. **Verdict:** a *critical*, isolated sidecar sees only the checklist, the evidence and the agent's final message (last 1.5k characters). Its output is schema-validated: `complete | incomplete | failed | uncertain`, `missing[]`, `asked_user`.
+  5. **Action:**
+     - `incomplete` with missing items → a short user-role message listing them.
+     - **Suggest mode (default):** the message pre-fills the editor; in RPC it surfaces as `set_editor_text`. An accepted suggestion is recognised and counted as a continuation of the same task.
+     - **Auto mode (opt-in):** a persisted `exo.supervisor` custom message plus `continue: true`.
+     - `failed` → warning notification; anything else → status line.
+  6. **Guards:**
+     - `maxContinuations` (default 3).
+     - Stop after two consecutive continuations with an unchanged diff fingerprint.
+     - Never act when the agent ends by asking the user something: a heuristic runs before the verdict call, and the verdict's `asked_user` flag is checked after.
+     - Only `completed` outcomes are judged; aborted or errored runs are skipped.
+     - A settle budget of 5 minutes covers all modules.
+- **Pi wiring:**
+  - Settle hooks run in `agent_before_settle`, which pi awaits, so auto continuations use pi's boundary API and print/RPC modes wait for them.
+  - Boundary-committed messages skip `message_end`, so the module host records each injection in the trace itself.
+  - **`/exo` commands:** `on|off` (kill switch), `supervisor on|off|suggest|auto`, `status`, `ping`.
+- **Eval:**
+  - The RPC driver accepts `set_editor_text` as the next prompt, standing in for the user pressing Enter, within the task's turn and time limits.
+  - Metrics count continuations (accepted plus auto) and verdicts by kind.
+  - Run configs inherit `engine`/`pool` from the user's global config (D-038).
+  - Configs: `supervisor` (suggest) and `supervisor-auto`.
+- **Phase 3 acceptance (pending owner run):**
+  - Command: `npm run eval -- --model ninfer/coding --tags hard --config all-off,supervisor --repeat 5`, sliced by the `spec-compliance` tag.
+  - "No runaway loops": every run must stay within `maxContinuations`, and there must be no `max_turns` or timeout outcomes beyond the baseline's.
+
+---
+
 ## Open questions (carried from brief §10, updated)
 
 1. ~~Resolved by D-029.~~ Exact pi mechanism for injecting into the current user turn without altering prior messages. *(Phase 0)*
 2. ~~Resolved by D-029 (no; Exocortex keeps the original).~~ Can `tool_result` rewrites preserve the original output for the trace? *(Phase 0)*
 3. ~~Programmatic session branching~~ — no longer needed (D-015).
 4. ~~Embedding model choice/runtime~~ — resolved by D-019; exact model is chosen at Phase 5.
-5. Reliably detecting "agent asked the user a question" vs. "agent claims done". *(Phase 3)*
+5. ~~Resolved by D-039 (heuristic + verdict flag; measure false positives in eval).~~ Reliably detecting "agent asked the user a question" vs. "agent claims done". *(Phase 3)*
 6. ~~Resolved by D-029 (yes, `before_provider_request`).~~ Can the pi adapter observe the exact outgoing LLM request (needed for byte-exact `fork-prefix`, D-007)? *(Phase 0)*
 7. ~~Resolved by D-029 (yes, `ctx.ui.setEditorText`).~~ Can pi's UI API pre-fill the editor or offer one-key accept for supervisor suggestions (D-010)? *(Phase 0)*
 8. ~~ninfer fork details~~ — mostly answered by D-023. Remaining: confirm the 6-slot build vs. the public 1-4 cap.

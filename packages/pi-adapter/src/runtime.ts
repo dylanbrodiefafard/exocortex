@@ -17,6 +17,12 @@ export interface Runtime {
 	traceSession: TraceSession | undefined;
 	/** The sidecar pool for the current pi session, when an engine is configured. */
 	pool: SidecarPool | undefined;
+	/** Live `/exo` toggles layered over config (brief §5.3 kill switches). */
+	readonly overrides: { allOff: boolean; readonly modules: Record<string, Record<string, unknown>> };
+	/** Rebuilds module instances after a toggle (set by the module host). */
+	rebuildModules: () => void;
+	/** One status line per active module (set by the module host). */
+	moduleStatus: () => string[];
 	/** Flushes and closes the store. */
 	shutdown(): void;
 }
@@ -62,6 +68,9 @@ export function createRuntime(options: RuntimeOptions): Runtime {
 		},
 		traceSession: undefined,
 		pool: undefined,
+		overrides: { allOff: false, modules: {} },
+		rebuildModules: () => {},
+		moduleStatus: () => [],
 		shutdown() {
 			try {
 				store?.close();
