@@ -1,0 +1,4 @@
+// Baseline: every Exocortex module off. The trace store stays on so metrics can be computed.
+{
+	"modules": {}
+}

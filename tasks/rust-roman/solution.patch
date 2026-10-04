@@ -1,0 +1,60 @@
+diff --git a/src/lib.rs b/src/lib.rs
+index 07f6ed8..66acfb8 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -2,14 +2,51 @@
+ 
+ /// Converts `n` to a canonical Roman numeral (e.g. 1994 -> "MCMXCIV").
+ /// Returns `None` unless `1 <= n <= 3999`.
++const NUMERALS: [(u32, &str); 13] = [
++    (1000, "M"),
++    (900, "CM"),
++    (500, "D"),
++    (400, "CD"),
++    (100, "C"),
++    (90, "XC"),
++    (50, "L"),
++    (40, "XL"),
++    (10, "X"),
++    (9, "IX"),
++    (5, "V"),
++    (4, "IV"),
++    (1, "I"),
++];
++
+ pub fn to_roman(n: u32) -> Option<String> {
+-    let _ = n;
+-    todo!()
++    if !(1..=3999).contains(&n) {
++        return None;
++    }
++    let mut rest = n;
++    let mut out = String::new();
++    for (value, symbol) in NUMERALS {
++        while rest >= value {
++            out.push_str(symbol);
++            rest -= value;
++        }
++    }
++    Some(out)
+ }
+ 
+ /// Parses a canonical, upper-case Roman numeral (as produced by [`to_roman`]).
+ /// Returns `None` for anything else, including non-canonical forms such as "IIII" or "IM".
+ pub fn from_roman(s: &str) -> Option<u32> {
+-    let _ = s;
+-    todo!()
++    let mut rest = s;
++    let mut total = 0;
++    for (value, symbol) in NUMERALS {
++        while let Some(stripped) = rest.strip_prefix(symbol) {
++            total += value;
++            rest = stripped;
++        }
++    }
++    if !rest.is_empty() || total == 0 {
++        return None;
++    }
++    // Only accept the canonical spelling.
++    (to_roman(total).as_deref() == Some(s)).then_some(total)
+ }

@@ -1,0 +1,9 @@
+{
+	"id": "cpp-ring-buffer",
+	"language": "cpp",
+	"prompt": "RingBuffer in ring_buffer.hpp misbehaves once it wraps around or overflows, and `make test` fails. Fix ring_buffer.hpp so all tests in test_ring_buffer.cpp pass. Do not change the tests or the Makefile.",
+	"check": "make -s test",
+	"maxTurns": 25,
+	"timeoutSec": 900,
+	"tags": ["bugfix", "small"]
+}

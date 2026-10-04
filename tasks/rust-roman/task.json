@@ -1,0 +1,9 @@
+{
+	"id": "rust-roman",
+	"language": "rust",
+	"prompt": "Implement to_roman and from_roman in src/lib.rs as documented. The tests in tests/roman.rs must pass; do not change them.",
+	"check": "cargo test --offline -q",
+	"maxTurns": 25,
+	"timeoutSec": 900,
+	"tags": ["feature", "small"]
+}

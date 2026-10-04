@@ -1,0 +1,9 @@
+{
+	"id": "py-inventory-categories",
+	"language": "python",
+	"prompt": "Add item categories to the inventory package. Store.add should accept an optional `category` keyword argument (default \"uncategorized\"), Item should record it, and report.summarize should return a dict that also includes `by_category`: a mapping from category name to the total value (quantity * unit_price) of items in that category. Keep the existing behaviour working. The tests in tests/test_inventory.py describe the expected behaviour.",
+	"check": "python3 -m unittest discover -q -s tests -t .",
+	"maxTurns": 30,
+	"timeoutSec": 900,
+	"tags": ["feature", "multi-file"]
+}
