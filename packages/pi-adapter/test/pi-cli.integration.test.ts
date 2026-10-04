@@ -3,7 +3,12 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type ChatRequestFingerprint, openTraceStore, type StoredTraceEvent, sharedPrefix } from "@exocortex/core";
-import { type FakeOpenAIServer, type ScriptedReply, startFakeOpenAIServer } from "@exocortex/testkit";
+import {
+	type FakeOpenAIServer,
+	type FakeOpenAIServerOptions,
+	type ScriptedReply,
+	startFakeOpenAIServer,
+} from "@exocortex/testkit";
 import { afterEach, describe, expect, it } from "vitest";
 
 const REPO = join(import.meta.dirname, "..", "..", "..");
@@ -35,8 +40,9 @@ async function runPi(
 	script: readonly ScriptedReply[],
 	env: Record<string, string> = {},
 	prompt = "do the task",
+	extra: { readonly exoConfig?: object; readonly server?: FakeOpenAIServerOptions } = {},
 ): Promise<PiRun> {
-	server = await startFakeOpenAIServer(script);
+	server = await startFakeOpenAIServer(script, extra.server ?? {});
 	tmp = await mkdtemp(join(tmpdir(), "exo-pi-"));
 	const dbPath = join(tmp, "exo.db");
 	const models = {
@@ -51,7 +57,7 @@ async function runPi(
 		},
 	};
 	await writeFile(join(tmp, "models.json"), JSON.stringify(models));
-	await writeFile(join(tmp, "exo.jsonc"), JSON.stringify({ trace: { dbPath } }));
+	await writeFile(join(tmp, "exo.jsonc"), JSON.stringify({ ...extra.exoConfig, trace: { dbPath } }));
 	const args = [
 		"-p",
 		"--offline",
@@ -241,5 +247,63 @@ describe("pi CLI with the Exocortex extension", { timeout: 30_000 }, () => {
 		expect(run.code).toBe(0);
 		expect(run.stderr).toMatch(/Exocortex: enabled/);
 		expect(run.stderr).toMatch(/sidecars: 0 running/);
+	});
+
+	it("supervisor (auto mode) catches an early 'done', continues the agent, and records the verdicts", async () => {
+		const mainReplies: ScriptedReply[] = [
+			{ kind: "text", text: "Done! I updated the greeting." },
+			{ kind: "text", text: "Added the README too. Everything is finished." },
+		];
+		const ledger = {
+			is_task: true,
+			follows_previous: false,
+			criteria: ["Update greeting", "Add a README"],
+			check_commands: [],
+		};
+		const verdicts = [
+			{ verdict: "incomplete", missing: ["Add a README"], asked_user: false, reason: "no README" },
+			{ verdict: "complete", missing: [], asked_user: false, reason: "done" },
+		];
+		let main = 0;
+		let verdict = 0;
+		const run = await runPi([], {}, "Update the greeting and add a README.", {
+			exoConfig: { modules: { supervisor: { enabled: true, mode: "auto" } } },
+			server: {
+				respond: (body) => {
+					const request = body as { stream?: boolean; messages: { content: unknown }[] };
+					if (request.stream) return mainReplies[main++] ?? { kind: "text", text: "(extra)" };
+					const isVerdict = JSON.stringify(request.messages).includes("acceptance checklist and evidence");
+					const reply = isVerdict ? verdicts[verdict++] : ledger;
+					return { kind: "text", text: JSON.stringify(reply ?? {}) };
+				},
+			},
+		});
+		expect(run.code).toBe(0);
+		expect(run.stdout.trim()).toBe("Added the README too. Everything is finished.");
+		expect(main).toBe(2);
+		expect(verdict).toBe(2);
+
+		// The continuation reached the main model as the latest user-role message.
+		const mainRequests = (server?.requests ?? []).filter((r) => (r as { stream?: boolean }).stream);
+		const lastMessages = (mainRequests[1] as { messages: { role: string; content: unknown }[] }).messages;
+		expect(lastMessages.at(-1)?.role).toBe("user");
+		expect(JSON.stringify(lastMessages.at(-1)?.content)).toContain("1. Add a README");
+
+		const { events, sidecarCalls } = readTrace(run.dbPath);
+		const exo = events.filter((e) => e.kind.startsWith("exo."));
+		expect(exo.map((e) => e.kind)).toEqual(["exo.ledger", "exo.verdict", "exo.action", "exo.verdict"]);
+		expect(exo.every((e) => e.synthetic && e.module === "supervisor")).toBe(true);
+		expect(dataOf(exo[2])).toMatchObject({ action: "continued", continuation: 1 });
+		const injected = events.find((e) => e.kind === "message" && e.synthetic);
+		expect(injected).toMatchObject({ module: "supervisor" });
+		expect(sidecarCalls.map((c) => c.priority)).toEqual(["interactive", "critical", "critical"]);
+	});
+
+	it("/exo supervisor off disables the module for the session", async () => {
+		const run = await runPi([], {}, "/exo supervisor off", {
+			exoConfig: { modules: { supervisor: { enabled: true } } },
+		});
+		expect(run.code).toBe(0);
+		expect(run.stderr).toMatch(/Supervisor: off for this session/);
 	});
 });
