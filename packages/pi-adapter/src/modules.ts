@@ -19,6 +19,7 @@ import {
 	toJsonValue,
 } from "@exocortex/core";
 import { COMPACTION_ID, createCompaction } from "@exocortex/mod-compaction";
+import { createMemory, MEMORY_ID } from "@exocortex/mod-memory";
 import { createSupervisor, SUPERVISOR_ID } from "@exocortex/mod-supervisor";
 import { createTriage, TRIAGE_ID } from "@exocortex/mod-triage";
 import { createTrimmer, TRIMMER_ID } from "@exocortex/mod-trimmer";
@@ -32,6 +33,7 @@ import { exitCodeOf } from "./trace-recorder.ts";
 const MODULES: Readonly<Record<string, ModuleFactory>> = {
 	[TRIMMER_ID]: createTrimmer,
 	[TRIAGE_ID]: createTriage,
+	[MEMORY_ID]: createMemory,
 	[SUPERVISOR_ID]: createSupervisor,
 	[COMPACTION_ID]: createCompaction,
 };
@@ -271,6 +273,7 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 		const controller = new AbortController();
 		const budget = setTimeout(() => controller.abort(), settleBudgetMs);
 		if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, "exo: checking the work…");
+		let acted = false;
 		try {
 			for (const module of settling) {
 				const action = await module.onSettle?.(info, controller.signal).catch((error: unknown) => {
@@ -278,11 +281,14 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 					return undefined;
 				});
 				if (!action) continue;
+				acted = true;
 				const result = apply(module.id, action, ctx);
 				if (action.kind !== "notify") return result; // one actionable result per settle
 			}
 			return undefined;
 		} finally {
+			// Nothing to report: don't leave "checking the work…" on the status line.
+			if (!acted && ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, undefined);
 			clearTimeout(budget);
 		}
 	}

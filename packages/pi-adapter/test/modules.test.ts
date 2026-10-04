@@ -268,6 +268,17 @@ describe("module host", () => {
 		expect(h.runtime.moduleStatus()).toEqual([]);
 	});
 
+	it("clears the 'checking' status when no module acts", async () => {
+		const a = newProbe();
+		const { h } = setup({ a: probeModule("a", a, () => undefined) }, { a: { enabled: true } });
+		await h.pi.emit("session_start");
+		await h.pi.emit("agent_before_settle", settleEvent());
+		expect(h.pi.ui.filter((c) => c.method === "setStatus").map((c) => c.args)).toEqual([
+			["exo", "exo: checking the work…"],
+			["exo", undefined],
+		]);
+	});
+
 	it("does nothing when no module settles, and forgets modules at shutdown", async () => {
 		const a = newProbe();
 		const { h } = setup({ a: probeModule("a", a) }, { a: { enabled: true } });

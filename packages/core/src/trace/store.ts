@@ -34,6 +34,8 @@ export const TRACE_EVENT_KINDS = [
 	"exo.rewrite",
 	/** A module supplied the compaction summary. */
 	"exo.compaction",
+	/** Memory learned, merged, recalled or retired a card. */
+	"exo.memory",
 ] as const;
 
 export type TraceEventKind = (typeof TRACE_EVENT_KINDS)[number];

@@ -1,5 +1,3 @@
-import { existsSync } from "node:fs";
-import { isAbsolute, join } from "node:path";
 import {
 	cleanTerminalOutput,
 	type ExoModule,
@@ -8,6 +6,7 @@ import {
 	loadPrompt,
 	type ModuleContext,
 	type ToolResultDraft,
+	ungroundedReferences,
 } from "@exocortex/core";
 import { Type } from "typebox";
 import { parseSettings, type TriageSettings } from "./settings.ts";
@@ -200,31 +199,6 @@ export function errorExcerpt(output: string): string {
 		previous = i;
 	}
 	return out.join("\n").slice(0, EXCERPT_CHARS);
-}
-
-/**
- * Guidance gate (research R3.5, brief constraint 5): file paths and backticked names in a hint
- * must appear in the evidence or exist in the workspace; returns those that do not.
- */
-export function ungroundedReferences(hint: string, evidence: string, cwd: string): string[] {
-	const references = new Set<string>();
-	// Backticked names (not commands, which contain spaces).
-	for (const match of hint.matchAll(/`([^`\s]{2,80})`/g)) if (match[1]) references.add(match[1]);
-	for (const match of hint.matchAll(
-		/(?:^|[\s(])((?:\.{0,2}\/)?(?:[\w.-]+\/)*[\w-]+\.[a-z]{1,5})(?::\d+)*(?=[\s),.;:]|$)/gi,
-	)) {
-		if (match[1] && /[/]|\.[a-z]{1,5}$/i.test(match[1])) references.add(match[1]);
-	}
-	return [...references].filter((ref) => !evidence.includes(ref) && !existsInWorkspace(ref, cwd));
-}
-
-function existsInWorkspace(ref: string, cwd: string): boolean {
-	if (!/^[\w./-]+$/.test(ref)) return false;
-	try {
-		return existsSync(isAbsolute(ref) ? ref : join(cwd, ref));
-	} catch {
-		return false;
-	}
 }
 
 function ordinal(n: number): string {

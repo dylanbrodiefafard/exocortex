@@ -67,6 +67,15 @@
 			"hintTimeoutMs": 8000,
 			"benignCommands": ["grep", "egrep", "fgrep", "rg", "ag", "diff", "cmp", "test", "[", "which", "pgrep", "git diff"] // exit 1 = an answer
 		},
+		"memory": {
+			"enabled": false,
+			// "dbPath": "~/.exocortex/memory.db", // cards from every repo, scoped by repo (git remote)
+			"learn": true, // learn from fixes: a command fails, files change, the same command passes
+			"inject": true, // add a matching lesson to a failing tool result
+			"distill": true, // a background sidecar phrases each lesson (else a summary of the edit)
+			"maxCards": 2,
+			"maxInjectChars": 1600 // ~400 tokens
+		},
 		"compaction": {
 			"enabled": false,
 			"fallback": "harness", // without a sidecar summary: "harness" (pi's own) or "deterministic"

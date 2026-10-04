@@ -1,0 +1,8 @@
+// Memory (Phase 5 v1): pitfall cards learned from verified error→fix pairs, recalled into failing
+// tool results. The eval gives each config its own card store under the run dir, so run with
+// --repeat 2 or more: r1 learns, later repeats can recall (see "Success by repeat").
+{
+	"modules": {
+		"memory": { "enabled": true }
+	}
+}

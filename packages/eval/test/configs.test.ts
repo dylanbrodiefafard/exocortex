@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 
 const CONFIGS_DIR = join(import.meta.dirname, "..", "configs");
 /** Module ids the pi adapter hosts (packages/pi-adapter/src/modules.ts). */
-const KNOWN_MODULES = ["trimmer", "triage", "supervisor", "compaction"];
+const KNOWN_MODULES = ["trimmer", "triage", "memory", "supervisor", "compaction"];
 
 describe("eval configs", () => {
 	const files = readdirSync(CONFIGS_DIR).filter((f) => f.endsWith(".jsonc"));

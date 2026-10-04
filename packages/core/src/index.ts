@@ -44,6 +44,7 @@ export {
 	firstErrorLine,
 	isTestPath,
 	normalizeErrorLine,
+	ungroundedReferences,
 } from "./modules/output.ts";
 export { loadPrompt, type PromptTemplate, renderPrompt } from "./modules/prompts.ts";
 export type {
@@ -58,6 +59,7 @@ export type {
 	ToolRewrite,
 	UserTurn,
 } from "./modules/types.ts";
+export { openDatabase } from "./trace/sqlite.ts";
 export {
 	type JsonValue,
 	openTraceStore,

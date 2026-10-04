@@ -607,6 +607,41 @@ Open check: Exocortex's injected `custom_message` reaches ninfer as a second con
 
 ---
 
+### D-049 — Memory v1: verified pitfall cards, recalled into failing tool results · accepted (Phase 5; narrows brief §6.4 per research R5.1–R5.5)
+- **Context:** the research is cautious. A plain Qwen 3.6-27B agent matched memory, workflow and skill modules once token budgets were equal, and Dynamic Cheatsheet helped small models little because they self-judge poorly. So v1 is the highest-precision memory available.
+- **Admission (R5.1/R5.2):** a card is learned only from a *verified error→fix pair*:
+  - a verifying command (build, test or run) fails;
+  - the agent edits files;
+  - the *same* command then passes.
+
+  The pass is the external signal; the model's opinion of its work is never used. If the error changes before the command passes, the episode restarts.
+- **Content:**
+  - A background-priority sidecar phrases the lesson in 1–2 sentences from the error excerpt and the edits. It runs only while the main agent is idle (pool `backgroundWhenIdleOnly`), not in a separate sleep-time worker yet.
+  - The lesson passes the same guidance gate as triage hints: any name it uses must appear in the evidence or the workspace.
+  - Otherwise the card gets a deterministic summary of the edit.
+- **Store:** `~/.exocortex/memory.db` (SQLite with FTS5), separate from the trace.
+  - Cards are scoped by repo (D-018): origin remote URL, else the root commit's tree hash (stable across copies of a fixture), else the path.
+  - Only delta ops (R5.5): ADD, MERGE (same repo and signature: `seen++`, evidence appended), SUPERSEDE and RETIRE (set `valid_to`). Nothing is deleted or rewritten wholesale.
+- **Recall (hot path, no LLM):** a failing tool result's normalized error signature (D-016) is the key.
+  - **Search order:**
+    1. exact signature in this repo;
+    2. the same signature seen in 2+ other repos (D-018 global promotion);
+    3. an FTS5 keyword match on the error line, kept only when the card's trigger shares ≥60% of the error's keywords.
+  - **Injection:** at most 2 cards and ~400 tokens, appended as a tool-result rewrite after trimmer and triage. That is cache-safe (D-029); the brief had user-turn injection, but pitfalls belong next to the error. Each card is recalled at most once per task.
+- **Utility (R5.3):**
+  - **Helped:** the card's error did not recur in the task (credited at settle or on the next request).
+  - **Hurt:** the error recurred after the card was injected.
+  - **Retire:** when `hurt − helped ≥ 2` after 3+ injections.
+  - Recall ranks proven cards first.
+- **Eval:**
+  - Each memory config gets its own card store under the run dir.
+  - Repeats run in order, and the report's "Success by repeat" table shows the learning curve.
+  - Fixtures are separate repos, so this measures same-task replay: an upper bound (research §5c). Cross-task transfer needs sibling tasks in one repo, which is future fixture work.
+  - Configs: `memory`, `memory-triage`.
+- **Deferred:** `procedure`/`fact`/`preference` cards; user-turn retrieval; embeddings (D-026); a sleep-time curator.
+
+---
+
 ## Open questions (carried from brief §10, updated)
 
 1. ~~Resolved by D-029.~~ Exact pi mechanism for injecting into the current user turn without altering prior messages. *(Phase 0)*

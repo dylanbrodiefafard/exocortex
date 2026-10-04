@@ -139,8 +139,28 @@ export function renderMarkdown(records: readonly RunRecord[], title: string): st
 		});
 		lines.push(`| ${task} | ${cells.join(" | ")} |`);
 	}
-	lines.push(...verdictSection(summaries), ...pairedSection(records, summaries));
+	lines.push(...verdictSection(summaries), ...repeatSection(records, summaries), ...pairedSection(records, summaries));
 	return `${lines.join("\n")}\n`;
+}
+
+/** Success by repeat index: the learning curve for modules that learn across runs (memory). */
+function repeatSection(records: readonly RunRecord[], summaries: readonly ConfigSummary[]): string[] {
+	const repeats = [...new Set(records.map((r) => r.repeat))].sort((a, b) => a - b);
+	if (repeats.length < 2) return [];
+	const cell = (config: string, repeat: number) => {
+		const runs = records.filter((r) => r.config === config && r.repeat === repeat);
+		return `${runs.filter((r) => r.success).length}/${runs.length}`;
+	};
+	return [
+		"",
+		"## Success by repeat",
+		"",
+		`| config | ${repeats.map((r) => `r${r}`).join(" | ")} |`,
+		`|---|${repeats.map(() => "---").join("|")}|`,
+		...summaries.map((s) => `| ${s.config} | ${repeats.map((r) => cell(s.config, r)).join(" | ")} |`),
+		"",
+		"Repeats run in order (all tasks for r1, then r2, …), so a module that learns, like memory, can only help from r2 on; a rise over r1 that the baseline does not show is its effect on the same tasks (an upper bound, research §5c).",
+	];
 }
 
 /** Supervisor verdict quality against the hidden checks, for configs that produced verdicts. */

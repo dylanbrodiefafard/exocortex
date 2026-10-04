@@ -1,3 +1,6 @@
+import { existsSync } from "node:fs";
+import { isAbsolute, join } from "node:path";
+
 /**
  * Deterministic tool-output analysis shared by modules (trimmer, triage, compaction) and the
  * eval's metrics: terminal-noise cleanup, per-ecosystem error grammars (D-016: Rust, Go, C++,
@@ -112,4 +115,29 @@ const TEST_PATH =
 /** Whether a repo-relative path looks like a test file (Rust, Go, C/C++, Python, JS/TS conventions). */
 export function isTestPath(path: string): boolean {
 	return TEST_PATH.test(path);
+}
+
+/**
+ * Guidance gate (research R3.5, brief constraint 5): file paths and backticked names in sidecar text
+ * must appear in the evidence or exist in the workspace; returns those that do not.
+ */
+export function ungroundedReferences(hint: string, evidence: string, cwd: string): string[] {
+	const references = new Set<string>();
+	// Backticked names (not commands, which contain spaces).
+	for (const match of hint.matchAll(/`([^`\s]{2,80})`/g)) if (match[1]) references.add(match[1]);
+	for (const match of hint.matchAll(
+		/(?:^|[\s(])((?:\.{0,2}\/)?(?:[\w.-]+\/)*[\w-]+\.[a-z]{1,5})(?::\d+)*(?=[\s),.;:]|$)/gi,
+	)) {
+		if (match[1] && /[/]|\.[a-z]{1,5}$/i.test(match[1])) references.add(match[1]);
+	}
+	return [...references].filter((ref) => !evidence.includes(ref) && !existsInWorkspace(ref, cwd));
+}
+
+function existsInWorkspace(ref: string, cwd: string): boolean {
+	if (!/^[\w./-]+$/.test(ref)) return false;
+	try {
+		return existsSync(isAbsolute(ref) ? ref : join(cwd, ref));
+	} catch {
+		return false;
+	}
 }

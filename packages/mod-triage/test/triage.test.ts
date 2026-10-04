@@ -1,11 +1,11 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ToolResultDraft } from "@exocortex/core";
+import { type ToolResultDraft, ungroundedReferences } from "@exocortex/core";
 import { createTestModuleContext, type SidecarReply } from "@exocortex/testkit";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { parseSettings } from "../src/settings.ts";
-import { createTriage, errorExcerpt, isBenign, ungroundedReferences } from "../src/triage.ts";
+import { createTriage, errorExcerpt, isBenign } from "../src/triage.ts";
 
 let dir: string;
 beforeEach(() => {

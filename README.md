@@ -44,7 +44,7 @@ Inside pi:
 - `/exo` shows status.
 - `/exo ping` makes one sidecar call to check that the sidecar engine is reachable.
 - `/exo off` and `/exo on` turn every module off or back on for the session.
-- `/exo <module> on|off` toggles one module for the session (`supervisor`, `trimmer`, `triage`, `compaction`).
+- `/exo <module> on|off` toggles one module for the session (`supervisor`, `trimmer`, `triage`, `memory`, `compaction`).
 
 ### Supervisor
 
@@ -64,7 +64,11 @@ Each is off by default. Enable them under `modules` in `~/.exocortex/config.json
 - **Triage:** on a first failure it only moves a buried first error to the top. When the same failure happens again, it says so and adds a two-sentence hint from a sidecar; a hint that names files or symbols found nowhere in the output or the repo is dropped. At three repeats it warns that the approach isn't working.
 - **Compaction:** when pi compacts the conversation, the summary lists your requests verbatim, the files changed, which commands last failed (with their first error) and which succeeded. A sidecar adds only what the agent was doing, what to do next, and the dead ends. If the sidecar fails, pi compacts as usual.
 
-Why each works this way, with the research behind it, is in [`docs/DECISIONS.md`](docs/DECISIONS.md) (D-041 to D-045) and [`docs/RESEARCH.md`](docs/RESEARCH.md).
+### Memory (Phase 5)
+
+Enable with `"memory": { "enabled": true }` or `/exo memory on`. When a build or test command fails, the agent edits files and the same command then passes, memory saves a short lesson about that fix for this repo. The next time the same error appears, even in a later session, the lesson is added to the failing output. Lessons that keep failing to help are retired automatically. Cards live in `~/.exocortex/memory.db`.
+
+Why each works this way, with the research behind it, is in [`docs/DECISIONS.md`](docs/DECISIONS.md) (D-041 to D-049) and [`docs/RESEARCH.md`](docs/RESEARCH.md).
 
 ### Inspect traces
 
@@ -129,7 +133,7 @@ Pass `--max-concurrent` equal to the engine's real slot count (and `--reserved`,
 packages/
   core/         harness-agnostic core (never imports pi): config, trace, inference, sidecar pool, module API
   pi-adapter/   the pi extension entrypoint: event wiring, module host, /exo
-  mod-*/        modules: supervisor, trimmer, triage, compaction (prompts/ holds their versioned prompts)
+  mod-*/        modules: supervisor, trimmer, triage, memory, compaction (prompts/ holds their versioned prompts)
   eval/         RPC-driven eval harness, metrics and reports (configs/ holds Exocortex configs to A/B)
   testkit/      test-only fakes (scripted OpenAI-compatible server, module context)
 tasks/          eval fixtures

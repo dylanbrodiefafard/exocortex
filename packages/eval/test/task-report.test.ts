@@ -47,6 +47,12 @@ describe("loadTasks", () => {
 		fixture("norepo", { id: "norepo", language: "python", prompt: "x", check: "true" }, false);
 		expect(() => loadTasks(tmp ?? "")).toThrow(/missing repo/);
 	});
+
+	it("skips directories that have no task.json yet (being authored)", () => {
+		fixture("ok", { id: "ok", language: "python", prompt: "x", check: "true" });
+		mkdirSync(join(tmp ?? "", "draft", "repo"), { recursive: true });
+		expect(loadTasks(tmp ?? "").map((t) => t.spec.id)).toEqual(["ok"]);
+	});
 });
 
 describe("summarize", () => {

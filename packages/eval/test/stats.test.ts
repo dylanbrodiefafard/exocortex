@@ -135,6 +135,20 @@ describe("report", () => {
 		expect(markdown).toMatch(/\| 150 \| 0 \| 0\/0\/0\/0 \| 0 \| 1 \| 2 \|/);
 	});
 
+	it("shows success by repeat when there are repeats", () => {
+		const markdown = renderMarkdown(
+			[
+				run("a", "off", false, { repeat: 1 }),
+				run("a", "off", false, { repeat: 2 }),
+				run("a", "memory", false, { repeat: 1 }),
+				run("a", "memory", true, { repeat: 2 }),
+			],
+			"t",
+		);
+		expect(markdown).toContain("| config | r1 | r2 |");
+		expect(markdown).toContain("| memory | 0/1 | 1/1 |");
+	});
+
 	it("omits it for a single config", () => {
 		expect(renderMarkdown([run("a", "off", true)], "t")).not.toContain("Paired");
 	});

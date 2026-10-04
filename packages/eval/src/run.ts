@@ -204,11 +204,28 @@ function writeRunConfig(configsDir: string, name: string, runDir: string, dbPath
 	// Machine-specific settings (which engine, how many slots) come from the user's global config,
 	// so sidecars respect the real engine (D-038); the named config decides everything else.
 	const machine = machineSettings(runDir);
-	const merged = { ...machine, ...config, trace: { ...trace, enabled: true, dbPath } };
+	const merged = {
+		...machine,
+		...config,
+		trace: { ...trace, enabled: true, dbPath },
+		...isolatedMemory(config, runDir, name),
+	};
 	const out = join(runDir, "configs", `${name}.json`);
 	mkdirSync(dirname(out), { recursive: true });
 	writeFileSync(out, JSON.stringify(merged, null, 2));
 	return out;
+}
+
+/**
+ * Memory learns across runs of one config within an eval run (repeat 2 sees cards from repeat 1,
+ * brief §8 Phase 5), but never touches the user's real card store.
+ */
+function isolatedMemory(config: Record<string, unknown>, runDir: string, name: string): Record<string, unknown> {
+	const modules = config["modules"];
+	if (typeof modules !== "object" || modules === null) return {};
+	const memory = (modules as Record<string, unknown>)["memory"];
+	if (typeof memory !== "object" || memory === null || "dbPath" in memory) return {};
+	return { modules: { ...modules, memory: { ...memory, dbPath: join(runDir, `memory-${name}.db`) } } };
 }
 
 function machineSettings(cwd: string): Record<string, unknown> {
