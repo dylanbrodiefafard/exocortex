@@ -1,0 +1,10 @@
+{
+	"id": "h-go-settlement-calendar",
+	"language": "go",
+	"prompt": "CI for the settlement calendar library is red: `go test -v -count=1 ./...` fails. Find the root causes and fix them in the library so every package passes for any supported year, following the rules in README.md. Don't modify the tests or the generated tables under testdata/, and keep the CI command (and its verbose output) as it is.",
+	"check": "go test -v -count=1 ./...",
+	"maxTurns": 40,
+	"timeoutSec": 1200,
+	"checkTimeoutSec": 180,
+	"tags": ["hard", "noisy-output", "go", "uncalibrated"]
+}

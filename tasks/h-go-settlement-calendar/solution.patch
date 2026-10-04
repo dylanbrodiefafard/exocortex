@@ -1,0 +1,36 @@
+diff --git a/holiday/holiday.go b/holiday/holiday.go
+index a3ba540..b3cf716 100644
+--- a/holiday/holiday.go
++++ b/holiday/holiday.go
+@@ -42,7 +42,7 @@ func Easter(year int) time.Time {
+ 	i := c / 4
+ 	k := c % 4
+ 	l := (32 + 2*e + 2*i - h - k) % 7
+-	m := (a + 11*h + 22*l) / 541
++	m := (a + 11*h + 22*l) / 451
+ 	n := h + l - 7*m + 114
+ 	return Date(year, time.Month(n/31), n%31+1)
+ }
+@@ -86,12 +86,19 @@ func ForYear(year int) ([]Holiday, error) {
+ 	}
+ 	sort.SliceStable(hs, func(i, j int) bool { return hs[i].Date.Before(hs[j].Date) })
+ 	taken := map[time.Time]bool{}
++	for _, h := range hs {
++		if !isWeekend(h.Date) {
++			taken[h.Date] = true
++		}
++	}
+ 	for i := range hs {
+ 		obs := hs[i].Date
+-		for isWeekend(obs) || taken[obs] {
+-			obs = obs.AddDate(0, 0, 1)
++		if isWeekend(obs) {
++			for isWeekend(obs) || taken[obs] {
++				obs = obs.AddDate(0, 0, 1)
++			}
++			taken[obs] = true
+ 		}
+-		taken[obs] = true
+ 		hs[i].Observed = obs
+ 	}
+ 	return hs, nil

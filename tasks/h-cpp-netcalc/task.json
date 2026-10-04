@@ -1,0 +1,10 @@
+{
+	"id": "h-cpp-netcalc",
+	"language": "cpp",
+	"prompt": "`make test` fails for the netcalc address library. Find the root causes and fix the library so every check passes; the header comments in include/netcalc/ are the specification. Don't modify the tests, don't change the Makefile, and don't make the test output any less verbose: CI parses every TAP line.",
+	"check": "make -s test",
+	"maxTurns": 40,
+	"timeoutSec": 1200,
+	"checkTimeoutSec": 180,
+	"tags": ["hard", "noisy-output", "cpp", "uncalibrated"]
+}

@@ -1,0 +1,10 @@
+{
+	"id": "h-rust-css-colors",
+	"language": "rust",
+	"prompt": "CI for the chroma crate is failing: `cargo test --offline --no-fail-fast` reports test failures. Find and fix the bugs in the library so the whole suite passes, following the behaviour documented in README.md and the doc comments. The flood of deprecation warnings from tests/legacy_api.rs is expected: don't silence or suppress it (no allow attributes, lint tables, RUSTFLAGS or .cargo config) and don't remove or un-deprecate the legacy API. Don't modify the tests.",
+	"check": "test \"$(grep -c '^#\\[deprecated' src/legacy.rs)\" -eq 4 && ! grep -qs '^\\[lints' Cargo.toml && ! test -e .cargo && cargo test --offline --no-fail-fast",
+	"maxTurns": 40,
+	"timeoutSec": 1200,
+	"checkTimeoutSec": 180,
+	"tags": ["hard", "noisy-output", "rust", "uncalibrated"]
+}

@@ -1,0 +1,31 @@
+diff --git a/src/color.rs b/src/color.rs
+index 1c561aa..c132137 100644
+--- a/src/color.rs
++++ b/src/color.rs
+@@ -54,7 +54,7 @@ impl Rgba {
+         if self.is_opaque() {
+             format!("#{:02x}{:02x}{:02x}", self.r, self.g, self.b)
+         } else {
+-            format!("#{:02x}{:02x}{:02x}{:02x}", self.r, self.g, self.b, (self.a * 255.0) as u8)
++            format!("#{:02x}{:02x}{:02x}{:02x}", self.r, self.g, self.b, unit_to_byte(self.a))
+         }
+     }
+ 
+@@ -127,7 +127,7 @@ impl Hsla {
+     /// (`-120` is `240`, `480` is `120`); saturation and lightness are clamped to `0..=100`.
+     pub fn new(h: f64, s: f64, l: f64, a: f64) -> Hsla {
+         Hsla {
+-            h: h % 360.0,
++            h: h.rem_euclid(360.0),
+             s: s.clamp(0.0, 100.0),
+             l: l.clamp(0.0, 100.0),
+             a: clamp_alpha(a),
+@@ -136,7 +136,7 @@ impl Hsla {
+ 
+     /// Converts to sRGB, rounding each channel to nearest.
+     pub fn to_rgba(&self) -> Rgba {
+-        let h = self.h % 360.0;
++        let h = self.h.rem_euclid(360.0);
+         let s = self.s.clamp(0.0, 100.0) / 100.0;
+         let l = self.l.clamp(0.0, 100.0) / 100.0;
+         let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
