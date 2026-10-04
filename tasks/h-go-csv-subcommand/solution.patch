@@ -1,0 +1,123 @@
+diff --git a/docs/commands.md b/docs/commands.md
+index b240ae4..30663e8 100644
+--- a/docs/commands.md
++++ b/docs/commands.md
+@@ -84,6 +84,18 @@ mean of the numeric cells (empty when there are none). The mean is rounded
+ to 6 decimal places. Numbers are written in the shortest form that reads
+ back exactly (`3`, `0.25`). The header is written even with `-n`.
+ 
++## glean frequency
++
++    glean frequency [-s COLUMNS] [-l LIMIT] [-d DELIM] [-n] [FILE]
++
++Counts how often each distinct value occurs in each selected column. Writes
++the header `field,value,count` (even with `-n`), then, for each column in
++selection order, one row per distinct value: the column name, the value and
++its count. Values are compared exactly. Rows are ordered by count, highest
++first, then by value. Empty cells are counted as the value `(empty)`. At
++most LIMIT values are written per column (default 10); `-l 0` writes all of
++them. A negative LIMIT is a usage error.
++
+ ## glean uniq
+ 
+     glean uniq [-s COLUMNS] [-i] [-d DELIM] [-n] [FILE]
+diff --git a/internal/commands/frequency.go b/internal/commands/frequency.go
+new file mode 100644
+index 0000000..14254b7
+--- /dev/null
++++ b/internal/commands/frequency.go
+@@ -0,0 +1,82 @@
++package commands
++
++import (
++	"sort"
++	"strconv"
++
++	"example.com/glean/internal/csvio"
++)
++
++var frequencyCmd = &Command{
++	Name:    "frequency",
++	Summary: "Count how often each value occurs in each column",
++	Usage:   "glean frequency [-s COLUMNS] [-l LIMIT] [-d DELIM] [-n] [FILE]",
++	Run:     runFrequency,
++}
++
++// frequencyHeader is the header of the frequency output.
++var frequencyHeader = []string{"field", "value", "count"}
++
++// emptyValue stands for empty cells in the frequency output.
++const emptyValue = "(empty)"
++
++func runFrequency(env *Env, args []string) error {
++	fs := newFlagSet("frequency")
++	var in inputFlags
++	in.register(fs)
++	spec := fs.String("s", "", "`COLUMNS` to count (default: all)")
++	limit := fs.Int("l", 10, "at most `LIMIT` values per column, most frequent first; 0 means all")
++	if err := parseFlags(fs, args); err != nil {
++		return err
++	}
++	if err := checkNonNegative("l", *limit); err != nil {
++		return err
++	}
++	t, opts, err := readTable(env, &in, fs.Args())
++	if err != nil {
++		return err
++	}
++	cols, err := selectColumns(t, *spec)
++	if err != nil {
++		return err
++	}
++	w := csvio.NewWriter(env.Stdout, opts.Comma)
++	w.Write(frequencyHeader...)
++	for _, c := range cols {
++		for i, vc := range countValues(t.Column(c)) {
++			if *limit > 0 && i >= *limit {
++				break
++			}
++			w.Write(t.Header[c], vc.value, strconv.Itoa(vc.count))
++		}
++	}
++	return w.Flush()
++}
++
++type valueCount struct {
++	value string
++	count int
++}
++
++// countValues returns each distinct value with its count, most frequent
++// first and ties in value order.
++func countValues(values []string) []valueCount {
++	counts := make(map[string]int)
++	for _, v := range values {
++		if v == "" {
++			v = emptyValue
++		}
++		counts[v]++
++	}
++	out := make([]valueCount, 0, len(counts))
++	for v, n := range counts {
++		out = append(out, valueCount{v, n})
++	}
++	sort.Slice(out, func(i, j int) bool {
++		if out[i].count != out[j].count {
++			return out[i].count > out[j].count
++		}
++		return out[i].value < out[j].value
++	})
++	return out
++}
+diff --git a/internal/commands/registry.go b/internal/commands/registry.go
+index 6dfed6f..c843f96 100644
+--- a/internal/commands/registry.go
++++ b/internal/commands/registry.go
+@@ -40,6 +40,7 @@ var builtins = []*Command{
+ 	renameCmd,
+ 	convertCmd,
+ 	joinCmd,
++	frequencyCmd,
+ }
+ 
+ // All returns every command sorted by name.

@@ -1,0 +1,8 @@
+// Memory together with triage: both annotate repeated failures, memory with what fixed the error
+// before, triage with a fresh diagnosis. Compare with `triage` and `memory`.
+{
+	"modules": {
+		"triage": { "enabled": true },
+		"memory": { "enabled": true }
+	}
+}

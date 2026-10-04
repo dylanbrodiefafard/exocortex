@@ -1,0 +1,10 @@
+{
+	"id": "h-cpp-build-graph",
+	"language": "cpp",
+	"prompt": "mkb (our little build-graph tool) stopped building after I moved the rule-kind registry into include/mkb/registry.hpp, and `make test` fails. Get `make test` passing. Don't change tests/test_graph.cpp or the Makefile (it builds with ASan/UBSan on purpose). Rule kinds must keep registering themselves from any translation unit with MKB_REGISTER_KIND, as documented in registry.hpp, and everything documented in the headers under include/mkb/ must keep working, for manifests of any size.",
+	"check": "make -s test",
+	"maxTurns": 40,
+	"timeoutSec": 1200,
+	"checkTimeoutSec": 180,
+	"tags": ["hard", "error-recovery", "cpp", "uncalibrated"]
+}

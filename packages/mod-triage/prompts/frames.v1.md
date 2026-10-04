@@ -1,0 +1,5 @@
+- The code under test is wrong, but not where the agent has been editing: the bug is elsewhere in the call path.
+- The agent's assumption about how an API, library or language feature behaves is wrong.
+- The failure comes from the environment, build configuration, test setup or input data, not the code logic.
+- The test or check expects something different from what the agent believes it expects; re-read the expectation.
+- An earlier change by the agent introduced or masked this problem.

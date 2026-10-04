@@ -1,4 +1,5 @@
 import type { RunRecord } from "./run.ts";
+import { minimumDetectableEffect, type PairedComparison, pairedComparison } from "./stats.ts";
 
 export interface ConfigSummary {
 	readonly config: string;
@@ -20,6 +21,21 @@ export interface ConfigSummary {
 	readonly verdicts: string;
 	readonly sidecarFailures: number;
 	readonly abnormal: number;
+	/**
+	 * Of runs whose last verdict was `complete`, the share whose hidden check passed: the costly
+	 * supervisor error is a false "complete" (research §1c). Null without such runs.
+	 */
+	readonly completePrecision: number | null;
+	/** Runs whose last verdict was `complete`. */
+	readonly judgedComplete: number;
+	/** Per-run mean of every token spent: main input, cached and output, plus sidecars (research R7.3). */
+	readonly meanTotalTokens: number | null;
+	/** Runs where the agent changed or deleted fixture tests (restored before the check). */
+	readonly tampered: number;
+	/** Passing runs with no verification after the last edit, or 3+ identical failed commands (R7.6). */
+	readonly luckyPasses: number;
+	/** Of failing runs with a last verdict, the share the supervisor did not call complete. */
+	readonly failureRecall: number | null;
 }
 
 export function summarize(records: readonly RunRecord[]): ConfigSummary[] {
@@ -52,8 +68,27 @@ export function summarize(records: readonly RunRecord[]): ConfigSummary[] {
 				.join("/"),
 			sidecarFailures: sum(withMetrics.map((m) => m.sidecarFailures)),
 			abnormal: runs.filter((r) => r.outcome !== "settled").length,
+			meanTotalTokens: mean(withMetrics.map((m) => m.inputTokens + m.cachedTokens + m.outputTokens + m.sidecarTokens)),
+			tampered: runs.filter((r) => (r.tamperedTests?.length ?? 0) > 0).length,
+			luckyPasses: runs.filter(
+				(r) =>
+					r.success && r.metrics && (r.metrics.verifiedAfterLastEdit === false || r.metrics.maxRepeatedFailures >= 3),
+			).length,
+			...verdictQuality(runs),
 		};
 	});
+}
+
+function verdictQuality(runs: readonly RunRecord[]) {
+	const judged = runs.filter((r) => r.metrics?.lastVerdict);
+	const complete = judged.filter((r) => r.metrics?.lastVerdict === "complete");
+	const failing = judged.filter((r) => !r.success);
+	return {
+		judgedComplete: complete.length,
+		completePrecision: complete.length > 0 ? complete.filter((r) => r.success).length / complete.length : null,
+		failureRecall:
+			failing.length > 0 ? failing.filter((r) => r.metrics?.lastVerdict !== "complete").length / failing.length : null,
+	};
 }
 
 /** Markdown report: one row per config, then a task × config pass matrix. */
@@ -62,8 +97,8 @@ export function renderMarkdown(records: readonly RunRecord[], title: string): st
 	const lines = [
 		`# ${title}`,
 		"",
-		"| config | success | turns | input tok | cached tok | output tok | cache hit | prefix kept | median wall | repeated err | injections | continuations | sidecar tok | sidecar fail | verdicts c/i/f/u | abnormal |",
-		"|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+		"| config | success | turns | input tok | cached tok | output tok | cache hit | prefix kept | median wall | repeated err | injections | continuations | sidecar tok | total tok | sidecar fail | verdicts c/i/f/u | abnormal | tampered | lucky passes |",
+		"|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
 		...summaries
 			.map((s) =>
 				[
@@ -80,14 +115,17 @@ export function renderMarkdown(records: readonly RunRecord[], title: string): st
 					String(s.injections),
 					String(s.continuations),
 					fixed(s.meanSidecarTokens, 0),
+					fixed(s.meanTotalTokens, 0),
 					String(s.sidecarFailures),
 					s.verdicts,
 					String(s.abnormal),
+					String(s.tampered),
+					String(s.luckyPasses),
 				].join(" | "),
 			)
 			.map((row) => `| ${row} |`),
 		"",
-		"Token columns are per-run means of main-model usage; *sidecar tok* is the per-run mean of Exocortex's own calls. *abnormal* counts runs that hit max turns, timed out or crashed.",
+		"Token columns are per-run means of main-model usage; *sidecar tok* is the per-run mean of Exocortex's own calls. *total tok* adds main and sidecar tokens, the cost to weigh against success. *abnormal* counts runs that hit max turns, timed out or crashed. *tampered* counts runs that changed or deleted fixture tests (restored before the check, so they could not pass that way). *lucky passes* are passing runs that never verified after their last edit or retried one failing command 3+ times.",
 		"",
 		"## Per task",
 		"",
@@ -101,7 +139,92 @@ export function renderMarkdown(records: readonly RunRecord[], title: string): st
 		});
 		lines.push(`| ${task} | ${cells.join(" | ")} |`);
 	}
+	lines.push(...verdictSection(summaries), ...repeatSection(records, summaries), ...pairedSection(records, summaries));
 	return `${lines.join("\n")}\n`;
+}
+
+/** Success by repeat index: the learning curve for modules that learn across runs (memory). */
+function repeatSection(records: readonly RunRecord[], summaries: readonly ConfigSummary[]): string[] {
+	const repeats = [...new Set(records.map((r) => r.repeat))].sort((a, b) => a - b);
+	if (repeats.length < 2) return [];
+	const cell = (config: string, repeat: number) => {
+		const runs = records.filter((r) => r.config === config && r.repeat === repeat);
+		return `${runs.filter((r) => r.success).length}/${runs.length}`;
+	};
+	return [
+		"",
+		"## Success by repeat",
+		"",
+		`| config | ${repeats.map((r) => `r${r}`).join(" | ")} |`,
+		`|---|${repeats.map(() => "---").join("|")}|`,
+		...summaries.map((s) => `| ${s.config} | ${repeats.map((r) => cell(s.config, r)).join(" | ")} |`),
+		"",
+		"Repeats run in order (all tasks for r1, then r2, …), so a module that learns, like memory, can only help from r2 on; a rise over r1 that the baseline does not show is its effect on the same tasks (an upper bound, research §5c).",
+	];
+}
+
+/** Supervisor verdict quality against the hidden checks, for configs that produced verdicts. */
+function verdictSection(summaries: readonly ConfigSummary[]): string[] {
+	const judged = summaries.filter((s) => s.completePrecision !== null || s.failureRecall !== null);
+	if (judged.length === 0) return [];
+	return [
+		"",
+		"## Supervisor verdicts vs hidden checks",
+		"",
+		"| config | judged complete | precision of complete | failures caught |",
+		"|---|---|---|---|",
+		...judged.map(
+			(s) =>
+				`| ${s.config} | ${s.judgedComplete} | ${s.completePrecision === null ? "—" : pct(s.completePrecision)} | ${s.failureRecall === null ? "—" : pct(s.failureRecall)} |`,
+		),
+		"",
+		"*Precision of complete*: of runs whose last verdict was `complete`, the share whose check passed (a false `complete` sends the user away from broken work). *Failures caught*: of failing runs with a verdict, the share not called complete.",
+	];
+}
+
+/** Each config against the first one (the baseline), task by task, with the run counts' power. */
+function pairedSection(records: readonly RunRecord[], summaries: readonly ConfigSummary[]): string[] {
+	const [baseline, ...treatments] = summaries;
+	if (!baseline || treatments.length === 0) return [];
+	const comparisons = treatments.map((t) => pairedComparison(records, baseline.config, t.config));
+	// Pooled rate, kept off 0 and 1 where the normal approximation says nothing.
+	const pooled = records.filter((r) => r.success).length / records.length;
+	const mde = minimumDetectableEffect(Math.min(0.95, Math.max(0.05, pooled)), baseline.runs);
+	return [
+		"",
+		`## Paired by task vs \`${baseline.config}\``,
+		"",
+		"| config | tasks | Δ success | 95% CI | wins/losses/ties | sign test p | Δ turns | Δ input tok | Δ wall |",
+		"|---|---|---|---|---|---|---|---|---|",
+		...comparisons.map((c) => `| ${pairedRow(c)} |`),
+		"",
+		`Δ success is the mean over tasks of the per-task success-rate difference, in points; the CI is a task-level bootstrap. Δ turns, input tokens and wall-clock are mean per-task relative changes. With ${baseline.runs} runs per config at a ${pct(pooled)} pooled success rate, an unpaired comparison can only detect differences of about ${Math.round(mde * 100)} points (α = 0.05, 80% power): treat smaller differences, and any per-slice result, as descriptive (D-045).`,
+	];
+}
+
+function pairedRow(c: PairedComparison): string {
+	return [
+		c.treatment,
+		String(c.tasks),
+		points(c.meanDelta),
+		`[${points(c.ci[0])}, ${points(c.ci[1])}]`,
+		`${c.wins}/${c.losses}/${c.ties}`,
+		c.signTestP.toFixed(2),
+		change(c.turnsChange),
+		change(c.inputTokensChange),
+		change(c.wallClockChange),
+	].join(" | ");
+}
+
+function points(delta: number): string {
+	const value = Math.round(delta * 100);
+	return `${value > 0 ? "+" : ""}${value}`;
+}
+
+function change(value: number | null): string {
+	if (value === null) return "—";
+	const rounded = Math.round(value * 100);
+	return `${rounded > 0 ? "+" : ""}${rounded}%`;
 }
 
 function sum(values: readonly number[]): number {

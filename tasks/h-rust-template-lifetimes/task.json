@@ -1,0 +1,10 @@
+{
+	"id": "h-rust-template-lifetimes",
+	"language": "rust",
+	"prompt": "I'm halfway through making the template engine's parser zero-copy: the lexer and parser now hand out &str slices of the template source instead of allocating Strings, but the crate stopped compiling and I ran out of time. Finish it so it builds and `cargo test` passes. Requirements: keep it zero-copy (parsing a template must not copy pieces of its source into new Strings; the parsed form has to refer to the template's own source text); don't change the tests or the public API (Template::new / Engine::add_template still take any `impl Into<String>`, and a Template or Engine must not borrow from the caller's strings); no unsafe code and no leaking memory to get 'static lifetimes; everything documented in src/lib.rs and the doc comments must keep working.",
+	"check": "cargo test --offline -q",
+	"maxTurns": 50,
+	"timeoutSec": 1500,
+	"checkTimeoutSec": 180,
+	"tags": ["hard", "error-recovery", "rust", "uncalibrated"]
+}

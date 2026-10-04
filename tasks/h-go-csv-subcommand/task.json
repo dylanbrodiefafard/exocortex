@@ -1,0 +1,10 @@
+{
+	"id": "h-go-csv-subcommand",
+	"language": "go",
+	"prompt": "Add a `frequency` subcommand to glean that counts how often each distinct value occurs in each column.\n\n- Synopsis: `glean frequency [-s COLUMNS] [-l LIMIT] [-d DELIM] [-n] [FILE]`. One-line summary: `Count how often each value occurs in each column`. `-s`, `-d`, `-n` and FILE behave exactly as they do in the other commands.\n- Output is CSV in the input's delimiter. First the header `field,value,count` (written even with `-n`, like `stats` does), then, for each selected column in selection order (every column when `-s` is omitted), one row per distinct value: the column name, the value, and the number of rows that have it. Values are compared exactly: no trimming, case-sensitive.\n- Within a column, rows are ordered by count, highest first, then by value in ascending byte order. Empty cells are counted as the value `(empty)` and sorted as that text.\n- At most LIMIT values are written per column, default 10; `-l 0` means no limit. A negative LIMIT is rejected the same way `head` rejects one.\n- Error messages, exit statuses and help output must follow the same conventions as every other command, and the new command must be documented the same way the others are.\n\n`go test ./...` must pass.",
+	"check": "go test -count=1 ./...",
+	"maxTurns": 50,
+	"timeoutSec": 1500,
+	"checkTimeoutSec": 180,
+	"tags": ["hard", "navigation", "go", "uncalibrated"]
+}

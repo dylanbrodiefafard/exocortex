@@ -1,0 +1,2575 @@
+{
+ "records": {
+  "accepted": 5879,
+  "rejected": 73,
+  "total": 5952
+ },
+ "rejected": [
+  {
+   "line": 115,
+   "reason": "field_count"
+  },
+  {
+   "line": 222,
+   "reason": "humidity_pct"
+  },
+  {
+   "line": 357,
+   "reason": "humidity_pct"
+  },
+  {
+   "line": 511,
+   "reason": "timestamp"
+  },
+  {
+   "line": 523,
+   "reason": "humidity_pct"
+  },
+  {
+   "line": 634,
+   "reason": "temp_c"
+  },
+  {
+   "line": 641,
+   "reason": "temp_c"
+  },
+  {
+   "line": 656,
+   "reason": "humidity_pct"
+  },
+  {
+   "line": 753,
+   "reason": "field_count"
+  },
+  {
+   "line": 809,
+   "reason": "timestamp"
+  },
+  {
+   "line": 1217,
+   "reason": "field_count"
+  },
+  {
+   "line": 1241,
+   "reason": "temp_c"
+  },
+  {
+   "line": 1361,
+   "reason": "wind_kph"
+  },
+  {
+   "line": 1363,
+   "reason": "field_count"
+  },
+  {
+   "line": 1484,
+   "reason": "humidity_pct"
+  },
+  {
+   "line": 1529,
+   "reason": "field_count"
+  },
+  {
+   "line": 1557,
+   "reason": "wind_kph"
+  },
+  {
+   "line": 1655,
+   "reason": "wind_kph"
+  },
+  {
+   "line": 1666,
+   "reason": "timestamp"
+  },
+  {
+   "line": 1669,
+   "reason": "field_count"
+  },
+  {
+   "line": 1708,
+   "reason": "temp_c"
+  },
+  {
+   "line": 1714,
+   "reason": "temp_c"
+  },
+  {
+   "line": 1719,
+   "reason": "humidity_pct"
+  },
+  {
+   "line": 1767,
+   "reason": "timestamp"
+  },
+  {
+   "line": 1848,
+   "reason": "timestamp"
+  },
+  {
+   "line": 1919,
+   "reason": "humidity_pct"
+  },
+  {
+   "line": 2029,
+   "reason": "field_count"
+  },
+  {
+   "line": 2169,
+   "reason": "field_count"
+  },
+  {
+   "line": 2171,
+   "reason": "wind_kph"
+  },
+  {
+   "line": 2177,
+   "reason": "timestamp"
+  },
+  {
+   "line": 2210,
+   "reason": "humidity_pct"
+  },
+  {
+   "line": 2246,
+   "reason": "wind_kph"
+  },
+  {
+   "line": 2468,
+   "reason": "humidity_pct"
+  },
+  {
+   "line": 2569,
+   "reason": "wind_kph"
+  },
+  {
+   "line": 2579,
+   "reason": "timestamp"
+  },
+  {
+   "line": 2598,
+   "reason": "timestamp"
+  },
+  {
+   "line": 2628,
+   "reason": "wind_kph"
+  },
+  {
+   "line": 2872,
+   "reason": "field_count"
+  },
+  {
+   "line": 2965,
+   "reason": "field_count"
+  },
+  {
+   "line": 3218,
+   "reason": "timestamp"
+  },
+  {
+   "line": 3228,
+   "reason": "timestamp"
+  },
+  {
+   "line": 3415,
+   "reason": "wind_kph"
+  },
+  {
+   "line": 3469,
+   "reason": "field_count"
+  },
+  {
+   "line": 3768,
+   "reason": "humidity_pct"
+  },
+  {
+   "line": 3861,
+   "reason": "timestamp"
+  },
+  {
+   "line": 3919,
+   "reason": "timestamp"
+  },
+  {
+   "line": 3928,
+   "reason": "field_count"
+  },
+  {
+   "line": 3967,
+   "reason": "humidity_pct"
+  },
+  {
+   "line": 4015,
+   "reason": "humidity_pct"
+  },
+  {
+   "line": 4046,
+   "reason": "wind_kph"
+  },
+  {
+   "line": 4146,
+   "reason": "wind_kph"
+  },
+  {
+   "line": 4361,
+   "reason": "timestamp"
+  },
+  {
+   "line": 4504,
+   "reason": "temp_c"
+  },
+  {
+   "line": 4579,
+   "reason": "timestamp"
+  },
+  {
+   "line": 4690,
+   "reason": "timestamp"
+  },
+  {
+   "line": 4701,
+   "reason": "timestamp"
+  },
+  {
+   "line": 4847,
+   "reason": "timestamp"
+  },
+  {
+   "line": 4869,
+   "reason": "timestamp"
+  },
+  {
+   "line": 4943,
+   "reason": "humidity_pct"
+  },
+  {
+   "line": 4955,
+   "reason": "wind_kph"
+  },
+  {
+   "line": 5325,
+   "reason": "humidity_pct"
+  },
+  {
+   "line": 5337,
+   "reason": "temp_c"
+  },
+  {
+   "line": 5453,
+   "reason": "humidity_pct"
+  },
+  {
+   "line": 5523,
+   "reason": "wind_kph"
+  },
+  {
+   "line": 5612,
+   "reason": "temp_c"
+  },
+  {
+   "line": 5656,
+   "reason": "wind_kph"
+  },
+  {
+   "line": 5678,
+   "reason": "timestamp"
+  },
+  {
+   "line": 5739,
+   "reason": "humidity_pct"
+  },
+  {
+   "line": 5743,
+   "reason": "humidity_pct"
+  },
+  {
+   "line": 5807,
+   "reason": "field_count"
+  },
+  {
+   "line": 5817,
+   "reason": "timestamp"
+  },
+  {
+   "line": 5911,
+   "reason": "field_count"
+  },
+  {
+   "line": 5925,
+   "reason": "temp_c"
+  }
+ ],
+ "stations": {
+  "KACK": {
+   "days": {
+    "2024-03-01": {
+     "obs": 24,
+     "precip_mm": 2.4,
+     "temp_max": 15.1,
+     "temp_mean": 5.6,
+     "temp_min": -2.6,
+     "trace_hours": 2,
+     "wind_max_kph": 29.3
+    },
+    "2024-03-02": {
+     "obs": 24,
+     "precip_mm": 3.4,
+     "temp_max": 16.5,
+     "temp_mean": 6.6,
+     "temp_min": -3.7,
+     "trace_hours": 2,
+     "wind_max_kph": 31.6
+    },
+    "2024-03-03": {
+     "obs": 24,
+     "precip_mm": 9.1,
+     "temp_max": 16.8,
+     "temp_mean": 4.9,
+     "temp_min": -2.4,
+     "trace_hours": 3,
+     "wind_max_kph": 26.9
+    },
+    "2024-03-04": {
+     "obs": 23,
+     "precip_mm": 5.3,
+     "temp_max": 14.1,
+     "temp_mean": 6.0,
+     "temp_min": 0.5,
+     "trace_hours": 2,
+     "wind_max_kph": 38.2
+    },
+    "2024-03-05": {
+     "obs": 24,
+     "precip_mm": 0.6,
+     "temp_max": 13.5,
+     "temp_mean": 5.6,
+     "temp_min": -2.8,
+     "trace_hours": 1,
+     "wind_max_kph": 36.7
+    },
+    "2024-03-06": {
+     "obs": 24,
+     "precip_mm": 11.9,
+     "temp_max": 13.0,
+     "temp_mean": 5.3,
+     "temp_min": -1.9,
+     "trace_hours": 4,
+     "wind_max_kph": 29.4
+    },
+    "2024-03-07": {
+     "obs": 24,
+     "precip_mm": 4.5,
+     "temp_max": 13.5,
+     "temp_mean": 6.0,
+     "temp_min": -3.1,
+     "trace_hours": 1,
+     "wind_max_kph": 35.0
+    },
+    "2024-03-08": {
+     "obs": 24,
+     "precip_mm": 13.5,
+     "temp_max": 14.3,
+     "temp_mean": 5.8,
+     "temp_min": -0.4,
+     "trace_hours": 2,
+     "wind_max_kph": 32.9
+    },
+    "2024-03-09": {
+     "obs": 23,
+     "precip_mm": 9.3,
+     "temp_max": 14.0,
+     "temp_mean": 6.0,
+     "temp_min": 1.0,
+     "trace_hours": 1,
+     "wind_max_kph": 35.6
+    },
+    "2024-03-10": {
+     "obs": 24,
+     "precip_mm": 4.8,
+     "temp_max": 13.8,
+     "temp_mean": 5.3,
+     "temp_min": -1.8,
+     "trace_hours": 1,
+     "wind_max_kph": 25.4
+    },
+    "2024-03-11": {
+     "obs": 24,
+     "precip_mm": 10.0,
+     "temp_max": 14.8,
+     "temp_mean": 6.4,
+     "temp_min": -0.1,
+     "trace_hours": 0,
+     "wind_max_kph": 29.2
+    },
+    "2024-03-12": {
+     "obs": 24,
+     "precip_mm": 2.6,
+     "temp_max": 13.8,
+     "temp_mean": 5.5,
+     "temp_min": -1.2,
+     "trace_hours": 1,
+     "wind_max_kph": 30.0
+    },
+    "2024-03-13": {
+     "obs": 24,
+     "precip_mm": 8.9,
+     "temp_max": 13.1,
+     "temp_mean": 5.6,
+     "temp_min": -0.0,
+     "trace_hours": 3,
+     "wind_max_kph": 29.4
+    },
+    "2024-03-14": {
+     "obs": 24,
+     "precip_mm": 4.9,
+     "temp_max": 16.0,
+     "temp_mean": 6.1,
+     "temp_min": -2.0,
+     "trace_hours": 2,
+     "wind_max_kph": 40.4
+    },
+    "2024-03-15": {
+     "obs": 24,
+     "precip_mm": 0.0,
+     "temp_max": 13.7,
+     "temp_mean": 5.6,
+     "temp_min": -0.5,
+     "trace_hours": 3,
+     "wind_max_kph": 34.4
+    },
+    "2024-03-16": {
+     "obs": 24,
+     "precip_mm": 9.3,
+     "temp_max": 13.0,
+     "temp_mean": 5.1,
+     "temp_min": -2.4,
+     "trace_hours": 5,
+     "wind_max_kph": 28.3
+    },
+    "2024-03-17": {
+     "obs": 23,
+     "precip_mm": 1.8,
+     "temp_max": 13.8,
+     "temp_mean": 5.9,
+     "temp_min": -0.3,
+     "trace_hours": 1,
+     "wind_max_kph": 26.5
+    },
+    "2024-03-18": {
+     "obs": 24,
+     "precip_mm": 12.0,
+     "temp_max": 13.8,
+     "temp_mean": 6.6,
+     "temp_min": -1.3,
+     "trace_hours": 1,
+     "wind_max_kph": 36.2
+    },
+    "2024-03-19": {
+     "obs": 24,
+     "precip_mm": 1.9,
+     "temp_max": 12.6,
+     "temp_mean": 5.4,
+     "temp_min": 0.3,
+     "trace_hours": 4,
+     "wind_max_kph": 32.5
+    },
+    "2024-03-20": {
+     "obs": 24,
+     "precip_mm": 7.0,
+     "temp_max": 15.4,
+     "temp_mean": 6.0,
+     "temp_min": 1.1,
+     "trace_hours": 2,
+     "wind_max_kph": 23.0
+    },
+    "2024-03-21": {
+     "obs": 24,
+     "precip_mm": 7.5,
+     "temp_max": 12.5,
+     "temp_mean": 5.6,
+     "temp_min": -0.9,
+     "trace_hours": 2,
+     "wind_max_kph": 25.8
+    },
+    "2024-03-22": {
+     "obs": 23,
+     "precip_mm": 5.2,
+     "temp_max": 13.6,
+     "temp_mean": 6.3,
+     "temp_min": -4.5,
+     "trace_hours": 3,
+     "wind_max_kph": 29.6
+    },
+    "2024-03-23": {
+     "obs": 24,
+     "precip_mm": 4.8,
+     "temp_max": 15.8,
+     "temp_mean": 6.3,
+     "temp_min": -2.4,
+     "trace_hours": 2,
+     "wind_max_kph": 29.5
+    },
+    "2024-03-24": {
+     "obs": 24,
+     "precip_mm": 9.6,
+     "temp_max": 15.1,
+     "temp_mean": 6.0,
+     "temp_min": -2.7,
+     "trace_hours": 2,
+     "wind_max_kph": 36.7
+    },
+    "2024-03-25": {
+     "obs": 24,
+     "precip_mm": 10.1,
+     "temp_max": 12.5,
+     "temp_mean": 5.9,
+     "temp_min": -2.5,
+     "trace_hours": 4,
+     "wind_max_kph": 33.4
+    },
+    "2024-03-26": {
+     "obs": 24,
+     "precip_mm": 11.4,
+     "temp_max": 13.4,
+     "temp_mean": 6.5,
+     "temp_min": -0.4,
+     "trace_hours": 1,
+     "wind_max_kph": 31.6
+    },
+    "2024-03-27": {
+     "obs": 24,
+     "precip_mm": 7.4,
+     "temp_max": 15.0,
+     "temp_mean": 5.3,
+     "temp_min": -4.7,
+     "trace_hours": 4,
+     "wind_max_kph": 34.7
+    },
+    "2024-03-28": {
+     "obs": 24,
+     "precip_mm": 6.8,
+     "temp_max": 14.7,
+     "temp_mean": 5.2,
+     "temp_min": -2.1,
+     "trace_hours": 3,
+     "wind_max_kph": 27.8
+    },
+    "2024-03-29": {
+     "obs": 24,
+     "precip_mm": 4.0,
+     "temp_max": 14.6,
+     "temp_mean": 5.4,
+     "temp_min": -1.9,
+     "trace_hours": 5,
+     "wind_max_kph": 40.3
+    },
+    "2024-03-30": {
+     "obs": 23,
+     "precip_mm": 7.1,
+     "temp_max": 16.7,
+     "temp_mean": 6.7,
+     "temp_min": -1.3,
+     "trace_hours": 2,
+     "wind_max_kph": 25.9
+    },
+    "2024-03-31": {
+     "obs": 24,
+     "precip_mm": 10.7,
+     "temp_max": 14.5,
+     "temp_mean": 6.6,
+     "temp_min": -0.2,
+     "trace_hours": 1,
+     "wind_max_kph": 32.0
+    }
+   },
+   "name": "Nantucket Memorial, MA"
+  },
+  "KBDL": {
+   "days": {
+    "2024-03-01": {
+     "obs": 24,
+     "precip_mm": 6.3,
+     "temp_max": 1.6,
+     "temp_mean": -5.7,
+     "temp_min": -14.1,
+     "trace_hours": 2,
+     "wind_max_kph": 39.8
+    },
+    "2024-03-02": {
+     "obs": 24,
+     "precip_mm": 4.2,
+     "temp_max": 2.0,
+     "temp_mean": -5.5,
+     "temp_min": -12.5,
+     "trace_hours": 5,
+     "wind_max_kph": 31.9
+    },
+    "2024-03-03": {
+     "obs": 24,
+     "precip_mm": 0.2,
+     "temp_max": 3.0,
+     "temp_mean": -6.3,
+     "temp_min": -14.7,
+     "trace_hours": 4,
+     "wind_max_kph": 34.2
+    },
+    "2024-03-04": {
+     "obs": 24,
+     "precip_mm": 16.3,
+     "temp_max": 2.5,
+     "temp_mean": -6.6,
+     "temp_min": -14.1,
+     "trace_hours": 2,
+     "wind_max_kph": 33.9
+    },
+    "2024-03-05": {
+     "obs": 24,
+     "precip_mm": 7.6,
+     "temp_max": 2.2,
+     "temp_mean": -6.9,
+     "temp_min": -12.9,
+     "trace_hours": 3,
+     "wind_max_kph": 31.2
+    },
+    "2024-03-06": {
+     "obs": 24,
+     "precip_mm": 18.2,
+     "temp_max": 5.1,
+     "temp_mean": -6.5,
+     "temp_min": -13.8,
+     "trace_hours": 4,
+     "wind_max_kph": 26.4
+    },
+    "2024-03-07": {
+     "obs": 24,
+     "precip_mm": 5.6,
+     "temp_max": 5.6,
+     "temp_mean": -6.5,
+     "temp_min": -13.1,
+     "trace_hours": 3,
+     "wind_max_kph": 34.2
+    },
+    "2024-03-08": {
+     "obs": 23,
+     "precip_mm": 0.0,
+     "temp_max": 1.1,
+     "temp_mean": -6.7,
+     "temp_min": -13.7,
+     "trace_hours": 4,
+     "wind_max_kph": 32.7
+    },
+    "2024-03-09": {
+     "obs": 23,
+     "precip_mm": 9.2,
+     "temp_max": 2.4,
+     "temp_mean": -7.2,
+     "temp_min": -17.5,
+     "trace_hours": 0,
+     "wind_max_kph": 34.0
+    },
+    "2024-03-10": {
+     "obs": 24,
+     "precip_mm": 5.0,
+     "temp_max": 1.3,
+     "temp_mean": -6.7,
+     "temp_min": -12.9,
+     "trace_hours": 4,
+     "wind_max_kph": 27.3
+    },
+    "2024-03-11": {
+     "obs": 23,
+     "precip_mm": 5.6,
+     "temp_max": -0.3,
+     "temp_mean": -7.6,
+     "temp_min": -14.2,
+     "trace_hours": 4,
+     "wind_max_kph": 25.6
+    },
+    "2024-03-12": {
+     "obs": 23,
+     "precip_mm": 7.6,
+     "temp_max": 0.4,
+     "temp_mean": -7.5,
+     "temp_min": -14.1,
+     "trace_hours": 3,
+     "wind_max_kph": 37.3
+    },
+    "2024-03-13": {
+     "obs": 24,
+     "precip_mm": 6.5,
+     "temp_max": 0.4,
+     "temp_mean": -5.8,
+     "temp_min": -12.1,
+     "trace_hours": 2,
+     "wind_max_kph": 36.0
+    },
+    "2024-03-14": {
+     "obs": 23,
+     "precip_mm": 2.3,
+     "temp_max": 3.4,
+     "temp_mean": -7.4,
+     "temp_min": -14.7,
+     "trace_hours": 2,
+     "wind_max_kph": 27.7
+    },
+    "2024-03-15": {
+     "obs": 24,
+     "precip_mm": 2.4,
+     "temp_max": 2.8,
+     "temp_mean": -6.2,
+     "temp_min": -12.1,
+     "trace_hours": 2,
+     "wind_max_kph": 29.1
+    },
+    "2024-03-16": {
+     "obs": 24,
+     "precip_mm": 1.3,
+     "temp_max": 3.1,
+     "temp_mean": -6.1,
+     "temp_min": -14.0,
+     "trace_hours": 2,
+     "wind_max_kph": 30.1
+    },
+    "2024-03-17": {
+     "obs": 24,
+     "precip_mm": 8.9,
+     "temp_max": 2.6,
+     "temp_mean": -6.3,
+     "temp_min": -11.9,
+     "trace_hours": 6,
+     "wind_max_kph": 35.6
+    },
+    "2024-03-18": {
+     "obs": 24,
+     "precip_mm": 3.8,
+     "temp_max": 3.1,
+     "temp_mean": -6.3,
+     "temp_min": -13.0,
+     "trace_hours": 0,
+     "wind_max_kph": 36.1
+    },
+    "2024-03-19": {
+     "obs": 24,
+     "precip_mm": 2.3,
+     "temp_max": 3.1,
+     "temp_mean": -7.0,
+     "temp_min": -12.5,
+     "trace_hours": 4,
+     "wind_max_kph": 27.5
+    },
+    "2024-03-20": {
+     "obs": 24,
+     "precip_mm": 3.5,
+     "temp_max": 0.9,
+     "temp_mean": -7.0,
+     "temp_min": -13.5,
+     "trace_hours": 1,
+     "wind_max_kph": 31.1
+    },
+    "2024-03-21": {
+     "obs": 24,
+     "precip_mm": 3.1,
+     "temp_max": -1.8,
+     "temp_mean": -7.3,
+     "temp_min": -14.5,
+     "trace_hours": 5,
+     "wind_max_kph": 28.0
+    },
+    "2024-03-22": {
+     "obs": 24,
+     "precip_mm": 3.5,
+     "temp_max": 2.6,
+     "temp_mean": -6.0,
+     "temp_min": -13.3,
+     "trace_hours": 3,
+     "wind_max_kph": 24.8
+    },
+    "2024-03-23": {
+     "obs": 24,
+     "precip_mm": 10.6,
+     "temp_max": 1.4,
+     "temp_mean": -6.4,
+     "temp_min": -12.7,
+     "trace_hours": 0,
+     "wind_max_kph": 32.2
+    },
+    "2024-03-24": {
+     "obs": 24,
+     "precip_mm": 7.4,
+     "temp_max": 1.1,
+     "temp_mean": -7.0,
+     "temp_min": -15.7,
+     "trace_hours": 3,
+     "wind_max_kph": 25.7
+    },
+    "2024-03-25": {
+     "obs": 23,
+     "precip_mm": 6.4,
+     "temp_max": 4.6,
+     "temp_mean": -6.0,
+     "temp_min": -13.9,
+     "trace_hours": 3,
+     "wind_max_kph": 36.6
+    },
+    "2024-03-26": {
+     "obs": 23,
+     "precip_mm": 10.3,
+     "temp_max": 0.7,
+     "temp_mean": -6.6,
+     "temp_min": -14.7,
+     "trace_hours": 4,
+     "wind_max_kph": 31.0
+    },
+    "2024-03-27": {
+     "obs": 24,
+     "precip_mm": 4.5,
+     "temp_max": 3.8,
+     "temp_mean": -6.2,
+     "temp_min": -12.9,
+     "trace_hours": 2,
+     "wind_max_kph": 31.3
+    },
+    "2024-03-28": {
+     "obs": 24,
+     "precip_mm": 2.9,
+     "temp_max": 4.0,
+     "temp_mean": -6.1,
+     "temp_min": -14.6,
+     "trace_hours": 5,
+     "wind_max_kph": 30.8
+    },
+    "2024-03-29": {
+     "obs": 24,
+     "precip_mm": 11.4,
+     "temp_max": 0.8,
+     "temp_mean": -7.1,
+     "temp_min": -15.1,
+     "trace_hours": 1,
+     "wind_max_kph": 24.7
+    },
+    "2024-03-30": {
+     "obs": 24,
+     "precip_mm": 11.0,
+     "temp_max": 1.3,
+     "temp_mean": -7.0,
+     "temp_min": -15.0,
+     "trace_hours": 4,
+     "wind_max_kph": 29.9
+    },
+    "2024-03-31": {
+     "obs": 23,
+     "precip_mm": 13.4,
+     "temp_max": 0.9,
+     "temp_mean": -7.1,
+     "temp_min": -14.3,
+     "trace_hours": 4,
+     "wind_max_kph": 24.1
+    }
+   },
+   "name": "Bradley Intl"
+  },
+  "KBHL": {
+   "days": {
+    "2024-03-01": {
+     "obs": 24,
+     "precip_mm": 6.2,
+     "temp_max": 12.1,
+     "temp_mean": 4.5,
+     "temp_min": -4.8,
+     "trace_hours": 2,
+     "wind_max_kph": 23.8
+    },
+    "2024-03-02": {
+     "obs": 23,
+     "precip_mm": 0.6,
+     "temp_max": 10.8,
+     "temp_mean": 3.4,
+     "temp_min": -3.1,
+     "trace_hours": 1,
+     "wind_max_kph": 30.6
+    },
+    "2024-03-03": {
+     "obs": 24,
+     "precip_mm": 3.4,
+     "temp_max": 14.3,
+     "temp_mean": 4.3,
+     "temp_min": -2.5,
+     "trace_hours": 4,
+     "wind_max_kph": 32.0
+    },
+    "2024-03-04": {
+     "obs": 24,
+     "precip_mm": 13.3,
+     "temp_max": 11.3,
+     "temp_mean": 4.3,
+     "temp_min": -1.6,
+     "trace_hours": 0,
+     "wind_max_kph": 28.8
+    },
+    "2024-03-05": {
+     "obs": 24,
+     "precip_mm": 14.1,
+     "temp_max": 11.6,
+     "temp_mean": 4.3,
+     "temp_min": -1.3,
+     "trace_hours": 3,
+     "wind_max_kph": 32.3
+    },
+    "2024-03-06": {
+     "obs": 24,
+     "precip_mm": 7.7,
+     "temp_max": 12.4,
+     "temp_mean": 4.6,
+     "temp_min": -3.5,
+     "trace_hours": 3,
+     "wind_max_kph": 38.2
+    },
+    "2024-03-07": {
+     "obs": 24,
+     "precip_mm": 9.1,
+     "temp_max": 12.2,
+     "temp_mean": 3.9,
+     "temp_min": -3.4,
+     "trace_hours": 3,
+     "wind_max_kph": 32.4
+    },
+    "2024-03-08": {
+     "obs": 24,
+     "precip_mm": 21.2,
+     "temp_max": 15.6,
+     "temp_mean": 4.7,
+     "temp_min": -4.1,
+     "trace_hours": 0,
+     "wind_max_kph": 30.8
+    },
+    "2024-03-09": {
+     "obs": 23,
+     "precip_mm": 9.1,
+     "temp_max": 14.5,
+     "temp_mean": 4.2,
+     "temp_min": -2.3,
+     "trace_hours": 2,
+     "wind_max_kph": 33.4
+    },
+    "2024-03-10": {
+     "obs": 23,
+     "precip_mm": 12.2,
+     "temp_max": 12.9,
+     "temp_mean": 4.8,
+     "temp_min": -2.6,
+     "trace_hours": 3,
+     "wind_max_kph": 31.6
+    },
+    "2024-03-11": {
+     "obs": 24,
+     "precip_mm": 6.4,
+     "temp_max": 8.8,
+     "temp_mean": 3.6,
+     "temp_min": -0.7,
+     "trace_hours": 5,
+     "wind_max_kph": 28.3
+    },
+    "2024-03-12": {
+     "obs": 22,
+     "precip_mm": 1.9,
+     "temp_max": 15.6,
+     "temp_mean": 6.0,
+     "temp_min": -1.4,
+     "trace_hours": 3,
+     "wind_max_kph": 36.6
+    },
+    "2024-03-13": {
+     "obs": 24,
+     "precip_mm": 2.8,
+     "temp_max": 13.9,
+     "temp_mean": 4.4,
+     "temp_min": -2.6,
+     "trace_hours": 4,
+     "wind_max_kph": 38.1
+    },
+    "2024-03-14": {
+     "obs": 24,
+     "precip_mm": 15.2,
+     "temp_max": 15.9,
+     "temp_mean": 3.7,
+     "temp_min": -1.6,
+     "trace_hours": 3,
+     "wind_max_kph": 37.0
+    },
+    "2024-03-15": {
+     "obs": 24,
+     "precip_mm": 17.4,
+     "temp_max": 11.8,
+     "temp_mean": 3.7,
+     "temp_min": -5.4,
+     "trace_hours": 2,
+     "wind_max_kph": 30.4
+    },
+    "2024-03-16": {
+     "obs": 24,
+     "precip_mm": 4.1,
+     "temp_max": 14.3,
+     "temp_mean": 4.8,
+     "temp_min": -2.3,
+     "trace_hours": 4,
+     "wind_max_kph": 42.3
+    },
+    "2024-03-17": {
+     "obs": 24,
+     "precip_mm": 3.7,
+     "temp_max": 10.1,
+     "temp_mean": 2.8,
+     "temp_min": -3.0,
+     "trace_hours": 2,
+     "wind_max_kph": 29.7
+    },
+    "2024-03-18": {
+     "obs": 23,
+     "precip_mm": 16.5,
+     "temp_max": 15.0,
+     "temp_mean": 3.0,
+     "temp_min": -6.3,
+     "trace_hours": 4,
+     "wind_max_kph": 28.0
+    },
+    "2024-03-19": {
+     "obs": 24,
+     "precip_mm": 5.5,
+     "temp_max": 13.5,
+     "temp_mean": 4.6,
+     "temp_min": -4.1,
+     "trace_hours": 5,
+     "wind_max_kph": 46.3
+    },
+    "2024-03-20": {
+     "obs": 24,
+     "precip_mm": 9.6,
+     "temp_max": 12.3,
+     "temp_mean": 4.0,
+     "temp_min": -2.3,
+     "trace_hours": 0,
+     "wind_max_kph": 26.5
+    },
+    "2024-03-21": {
+     "obs": 21,
+     "precip_mm": 3.4,
+     "temp_max": 12.7,
+     "temp_mean": 3.4,
+     "temp_min": -3.8,
+     "trace_hours": 3,
+     "wind_max_kph": 30.3
+    },
+    "2024-03-22": {
+     "obs": 24,
+     "precip_mm": 4.7,
+     "temp_max": 12.2,
+     "temp_mean": 4.0,
+     "temp_min": -1.9,
+     "trace_hours": 3,
+     "wind_max_kph": 36.0
+    },
+    "2024-03-23": {
+     "obs": 23,
+     "precip_mm": 14.5,
+     "temp_max": 12.1,
+     "temp_mean": 3.5,
+     "temp_min": -3.4,
+     "trace_hours": 1,
+     "wind_max_kph": 27.7
+    },
+    "2024-03-24": {
+     "obs": 24,
+     "precip_mm": 3.1,
+     "temp_max": 12.1,
+     "temp_mean": 3.9,
+     "temp_min": -2.7,
+     "trace_hours": 2,
+     "wind_max_kph": 42.7
+    },
+    "2024-03-25": {
+     "obs": 24,
+     "precip_mm": 12.1,
+     "temp_max": 9.7,
+     "temp_mean": 3.7,
+     "temp_min": -2.5,
+     "trace_hours": 1,
+     "wind_max_kph": 33.7
+    },
+    "2024-03-26": {
+     "obs": 24,
+     "precip_mm": 4.2,
+     "temp_max": 12.8,
+     "temp_mean": 4.6,
+     "temp_min": -3.0,
+     "trace_hours": 2,
+     "wind_max_kph": 28.1
+    },
+    "2024-03-27": {
+     "obs": 24,
+     "precip_mm": 1.4,
+     "temp_max": 13.0,
+     "temp_mean": 4.6,
+     "temp_min": -4.5,
+     "trace_hours": 1,
+     "wind_max_kph": 29.1
+    },
+    "2024-03-28": {
+     "obs": 24,
+     "precip_mm": 9.4,
+     "temp_max": 12.2,
+     "temp_mean": 4.7,
+     "temp_min": -0.9,
+     "trace_hours": 3,
+     "wind_max_kph": 33.4
+    },
+    "2024-03-29": {
+     "obs": 24,
+     "precip_mm": 0.4,
+     "temp_max": 11.6,
+     "temp_mean": 4.6,
+     "temp_min": -4.3,
+     "trace_hours": 4,
+     "wind_max_kph": 33.2
+    },
+    "2024-03-30": {
+     "obs": 23,
+     "precip_mm": 6.8,
+     "temp_max": 11.6,
+     "temp_mean": 2.7,
+     "temp_min": -3.8,
+     "trace_hours": 3,
+     "wind_max_kph": 32.6
+    },
+    "2024-03-31": {
+     "obs": 23,
+     "precip_mm": 4.8,
+     "temp_max": 15.7,
+     "temp_mean": 4.8,
+     "temp_min": -1.2,
+     "trace_hours": 3,
+     "wind_max_kph": 27.9
+    }
+   },
+   "name": "Blue Hill Observatory, Milton, MA"
+  },
+  "KBOS": {
+   "days": {
+    "2024-03-01": {
+     "obs": 24,
+     "precip_mm": 13.2,
+     "temp_max": 10.7,
+     "temp_mean": 1.2,
+     "temp_min": -5.0,
+     "trace_hours": 1,
+     "wind_max_kph": 27.8
+    },
+    "2024-03-02": {
+     "obs": 24,
+     "precip_mm": 9.8,
+     "temp_max": 8.8,
+     "temp_mean": 1.5,
+     "temp_min": -6.3,
+     "trace_hours": 2,
+     "wind_max_kph": 34.3
+    },
+    "2024-03-03": {
+     "obs": 24,
+     "precip_mm": 8.5,
+     "temp_max": 11.3,
+     "temp_mean": 1.7,
+     "temp_min": -4.7,
+     "trace_hours": 5,
+     "wind_max_kph": 32.0
+    },
+    "2024-03-04": {
+     "obs": 24,
+     "precip_mm": 0.5,
+     "temp_max": 11.5,
+     "temp_mean": 2.1,
+     "temp_min": -3.6,
+     "trace_hours": 1,
+     "wind_max_kph": 34.4
+    },
+    "2024-03-05": {
+     "obs": 24,
+     "precip_mm": 5.4,
+     "temp_max": 8.6,
+     "temp_mean": 1.8,
+     "temp_min": -3.3,
+     "trace_hours": 2,
+     "wind_max_kph": 32.2
+    },
+    "2024-03-06": {
+     "obs": 24,
+     "precip_mm": 4.4,
+     "temp_max": 12.0,
+     "temp_mean": 2.8,
+     "temp_min": -3.6,
+     "trace_hours": 2,
+     "wind_max_kph": 26.0
+    },
+    "2024-03-07": {
+     "obs": 24,
+     "precip_mm": 3.1,
+     "temp_max": 7.8,
+     "temp_mean": 1.3,
+     "temp_min": -6.8,
+     "trace_hours": 2,
+     "wind_max_kph": 34.5
+    },
+    "2024-03-08": {
+     "obs": 24,
+     "precip_mm": 4.7,
+     "temp_max": 10.2,
+     "temp_mean": 1.7,
+     "temp_min": -5.6,
+     "trace_hours": 4,
+     "wind_max_kph": 35.7
+    },
+    "2024-03-09": {
+     "obs": 22,
+     "precip_mm": 4.0,
+     "temp_max": 10.8,
+     "temp_mean": 1.2,
+     "temp_min": -5.5,
+     "trace_hours": 4,
+     "wind_max_kph": 24.9
+    },
+    "2024-03-10": {
+     "obs": 23,
+     "precip_mm": 5.7,
+     "temp_max": 11.2,
+     "temp_mean": 2.6,
+     "temp_min": -4.8,
+     "trace_hours": 2,
+     "wind_max_kph": 32.7
+    },
+    "2024-03-11": {
+     "obs": 24,
+     "precip_mm": 3.1,
+     "temp_max": 10.7,
+     "temp_mean": 2.1,
+     "temp_min": -4.7,
+     "trace_hours": 2,
+     "wind_max_kph": 27.1
+    },
+    "2024-03-12": {
+     "obs": 24,
+     "precip_mm": 9.6,
+     "temp_max": 10.8,
+     "temp_mean": 1.8,
+     "temp_min": -3.3,
+     "trace_hours": 5,
+     "wind_max_kph": 36.2
+    },
+    "2024-03-13": {
+     "obs": 24,
+     "precip_mm": 7.6,
+     "temp_max": 10.7,
+     "temp_mean": 2.2,
+     "temp_min": -5.7,
+     "trace_hours": 1,
+     "wind_max_kph": 32.9
+    },
+    "2024-03-14": {
+     "obs": 24,
+     "precip_mm": 6.7,
+     "temp_max": 13.1,
+     "temp_mean": 1.4,
+     "temp_min": -6.8,
+     "trace_hours": 4,
+     "wind_max_kph": 30.2
+    },
+    "2024-03-15": {
+     "obs": 24,
+     "precip_mm": 10.2,
+     "temp_max": 11.9,
+     "temp_mean": 1.7,
+     "temp_min": -5.3,
+     "trace_hours": 3,
+     "wind_max_kph": 28.4
+    },
+    "2024-03-16": {
+     "obs": 24,
+     "precip_mm": 3.4,
+     "temp_max": 9.0,
+     "temp_mean": 1.2,
+     "temp_min": -5.9,
+     "trace_hours": 5,
+     "wind_max_kph": 27.4
+    },
+    "2024-03-17": {
+     "obs": 24,
+     "precip_mm": 12.2,
+     "temp_max": 10.7,
+     "temp_mean": 2.2,
+     "temp_min": -4.9,
+     "trace_hours": 6,
+     "wind_max_kph": 26.1
+    },
+    "2024-03-18": {
+     "obs": 24,
+     "precip_mm": 7.1,
+     "temp_max": 10.2,
+     "temp_mean": 2.2,
+     "temp_min": -6.0,
+     "trace_hours": 2,
+     "wind_max_kph": 29.9
+    },
+    "2024-03-19": {
+     "obs": 23,
+     "precip_mm": 2.2,
+     "temp_max": 7.8,
+     "temp_mean": 2.1,
+     "temp_min": -4.0,
+     "trace_hours": 3,
+     "wind_max_kph": 33.8
+    },
+    "2024-03-20": {
+     "obs": 24,
+     "precip_mm": 0.9,
+     "temp_max": 10.7,
+     "temp_mean": 1.9,
+     "temp_min": -4.8,
+     "trace_hours": 3,
+     "wind_max_kph": 26.6
+    },
+    "2024-03-21": {
+     "obs": 23,
+     "precip_mm": 10.4,
+     "temp_max": 11.5,
+     "temp_mean": 1.0,
+     "temp_min": -9.9,
+     "trace_hours": 3,
+     "wind_max_kph": 29.2
+    },
+    "2024-03-22": {
+     "obs": 24,
+     "precip_mm": 6.4,
+     "temp_max": 10.4,
+     "temp_mean": 3.0,
+     "temp_min": -5.9,
+     "trace_hours": 4,
+     "wind_max_kph": 26.5
+    },
+    "2024-03-23": {
+     "obs": 24,
+     "precip_mm": 4.4,
+     "temp_max": 11.7,
+     "temp_mean": 1.9,
+     "temp_min": -3.9,
+     "trace_hours": 0,
+     "wind_max_kph": 36.0
+    },
+    "2024-03-24": {
+     "obs": 24,
+     "precip_mm": 11.2,
+     "temp_max": 10.4,
+     "temp_mean": 1.9,
+     "temp_min": -5.3,
+     "trace_hours": 2,
+     "wind_max_kph": 28.0
+    },
+    "2024-03-25": {
+     "obs": 24,
+     "precip_mm": 4.7,
+     "temp_max": 9.8,
+     "temp_mean": 2.2,
+     "temp_min": -5.0,
+     "trace_hours": 1,
+     "wind_max_kph": 30.5
+    },
+    "2024-03-26": {
+     "obs": 22,
+     "precip_mm": 11.9,
+     "temp_max": 9.5,
+     "temp_mean": 1.3,
+     "temp_min": -5.9,
+     "trace_hours": 3,
+     "wind_max_kph": 24.7
+    },
+    "2024-03-27": {
+     "obs": 24,
+     "precip_mm": 8.5,
+     "temp_max": 9.1,
+     "temp_mean": 1.8,
+     "temp_min": -3.9,
+     "trace_hours": 0,
+     "wind_max_kph": 27.3
+    },
+    "2024-03-28": {
+     "obs": 24,
+     "precip_mm": 8.1,
+     "temp_max": 9.5,
+     "temp_mean": 1.4,
+     "temp_min": -7.3,
+     "trace_hours": 2,
+     "wind_max_kph": 32.9
+    },
+    "2024-03-29": {
+     "obs": 24,
+     "precip_mm": 2.1,
+     "temp_max": 10.8,
+     "temp_mean": 1.6,
+     "temp_min": -5.9,
+     "trace_hours": 1,
+     "wind_max_kph": 34.2
+    },
+    "2024-03-30": {
+     "obs": 23,
+     "precip_mm": 4.8,
+     "temp_max": 8.3,
+     "temp_mean": 1.8,
+     "temp_min": -3.8,
+     "trace_hours": 6,
+     "wind_max_kph": 35.0
+    },
+    "2024-03-31": {
+     "obs": 24,
+     "precip_mm": 6.3,
+     "temp_max": 15.2,
+     "temp_mean": 1.6,
+     "temp_min": -5.5,
+     "trace_hours": 1,
+     "wind_max_kph": 42.7
+    }
+   },
+   "name": "Logan Intl Airport"
+  },
+  "KCON": {
+   "days": {
+    "2024-03-01": {
+     "obs": 24,
+     "precip_mm": 9.2,
+     "temp_max": 7.2,
+     "temp_mean": -1.0,
+     "temp_min": -8.2,
+     "trace_hours": 2,
+     "wind_max_kph": 27.0
+    },
+    "2024-03-02": {
+     "obs": 24,
+     "precip_mm": 4.0,
+     "temp_max": 9.0,
+     "temp_mean": 0.3,
+     "temp_min": -7.9,
+     "trace_hours": 2,
+     "wind_max_kph": 34.0
+    },
+    "2024-03-03": {
+     "obs": 23,
+     "precip_mm": 8.2,
+     "temp_max": 7.6,
+     "temp_mean": -0.1,
+     "temp_min": -8.6,
+     "trace_hours": 1,
+     "wind_max_kph": 32.3
+    },
+    "2024-03-04": {
+     "obs": 24,
+     "precip_mm": 7.9,
+     "temp_max": 7.6,
+     "temp_mean": -0.1,
+     "temp_min": -6.4,
+     "trace_hours": 2,
+     "wind_max_kph": 33.6
+    },
+    "2024-03-05": {
+     "obs": 24,
+     "precip_mm": 3.5,
+     "temp_max": 6.4,
+     "temp_mean": -0.5,
+     "temp_min": -7.5,
+     "trace_hours": 1,
+     "wind_max_kph": 34.2
+    },
+    "2024-03-06": {
+     "obs": 24,
+     "precip_mm": 11.3,
+     "temp_max": 9.0,
+     "temp_mean": -0.4,
+     "temp_min": -8.4,
+     "trace_hours": 1,
+     "wind_max_kph": 34.4
+    },
+    "2024-03-07": {
+     "obs": 24,
+     "precip_mm": 7.3,
+     "temp_max": 7.9,
+     "temp_mean": -0.8,
+     "temp_min": -6.6,
+     "trace_hours": 2,
+     "wind_max_kph": 28.5
+    },
+    "2024-03-08": {
+     "obs": 23,
+     "precip_mm": 0.6,
+     "temp_max": 5.6,
+     "temp_mean": -0.7,
+     "temp_min": -6.6,
+     "trace_hours": 2,
+     "wind_max_kph": 33.8
+    },
+    "2024-03-09": {
+     "obs": 24,
+     "precip_mm": 4.8,
+     "temp_max": 9.5,
+     "temp_mean": -0.5,
+     "temp_min": -9.7,
+     "trace_hours": 1,
+     "wind_max_kph": 27.6
+    },
+    "2024-03-10": {
+     "obs": 24,
+     "precip_mm": 2.7,
+     "temp_max": 7.8,
+     "temp_mean": -0.7,
+     "temp_min": -7.4,
+     "trace_hours": 3,
+     "wind_max_kph": 33.1
+    },
+    "2024-03-11": {
+     "obs": 24,
+     "precip_mm": 0.8,
+     "temp_max": 10.5,
+     "temp_mean": 0.6,
+     "temp_min": -4.7,
+     "trace_hours": 0,
+     "wind_max_kph": 36.1
+    },
+    "2024-03-12": {
+     "obs": 24,
+     "precip_mm": 6.6,
+     "temp_max": 6.9,
+     "temp_mean": -0.5,
+     "temp_min": -6.8,
+     "trace_hours": 2,
+     "wind_max_kph": 29.6
+    },
+    "2024-03-13": {
+     "obs": 24,
+     "precip_mm": 5.5,
+     "temp_max": 13.5,
+     "temp_mean": -0.5,
+     "temp_min": -7.4,
+     "trace_hours": 4,
+     "wind_max_kph": 32.9
+    },
+    "2024-03-14": {
+     "obs": 24,
+     "precip_mm": 5.3,
+     "temp_max": 7.9,
+     "temp_mean": -0.3,
+     "temp_min": -6.3,
+     "trace_hours": 1,
+     "wind_max_kph": 35.0
+    },
+    "2024-03-15": {
+     "obs": 23,
+     "precip_mm": 7.4,
+     "temp_max": 9.1,
+     "temp_mean": 0.2,
+     "temp_min": -8.7,
+     "trace_hours": 2,
+     "wind_max_kph": 29.1
+    },
+    "2024-03-16": {
+     "obs": 24,
+     "precip_mm": 6.8,
+     "temp_max": 10.3,
+     "temp_mean": -0.6,
+     "temp_min": -7.9,
+     "trace_hours": 5,
+     "wind_max_kph": 33.7
+    },
+    "2024-03-17": {
+     "obs": 23,
+     "precip_mm": 4.0,
+     "temp_max": 9.5,
+     "temp_mean": -0.7,
+     "temp_min": -6.9,
+     "trace_hours": 3,
+     "wind_max_kph": 36.8
+    },
+    "2024-03-18": {
+     "obs": 24,
+     "precip_mm": 3.3,
+     "temp_max": 5.9,
+     "temp_mean": -0.3,
+     "temp_min": -5.1,
+     "trace_hours": 2,
+     "wind_max_kph": 24.4
+    },
+    "2024-03-19": {
+     "obs": 24,
+     "precip_mm": 4.3,
+     "temp_max": 10.9,
+     "temp_mean": -0.0,
+     "temp_min": -7.9,
+     "trace_hours": 4,
+     "wind_max_kph": 33.8
+    },
+    "2024-03-20": {
+     "obs": 24,
+     "precip_mm": 2.8,
+     "temp_max": 6.6,
+     "temp_mean": -0.4,
+     "temp_min": -6.0,
+     "trace_hours": 0,
+     "wind_max_kph": 23.4
+    },
+    "2024-03-21": {
+     "obs": 24,
+     "precip_mm": 1.6,
+     "temp_max": 7.7,
+     "temp_mean": -0.6,
+     "temp_min": -9.3,
+     "trace_hours": 2,
+     "wind_max_kph": 30.9
+    },
+    "2024-03-22": {
+     "obs": 24,
+     "precip_mm": 5.9,
+     "temp_max": 10.7,
+     "temp_mean": -0.8,
+     "temp_min": -8.0,
+     "trace_hours": 3,
+     "wind_max_kph": 27.2
+    },
+    "2024-03-23": {
+     "obs": 24,
+     "precip_mm": 5.1,
+     "temp_max": 6.4,
+     "temp_mean": -0.5,
+     "temp_min": -6.7,
+     "trace_hours": 3,
+     "wind_max_kph": 31.0
+    },
+    "2024-03-24": {
+     "obs": 24,
+     "precip_mm": 7.1,
+     "temp_max": 8.9,
+     "temp_mean": -1.0,
+     "temp_min": -8.2,
+     "trace_hours": 1,
+     "wind_max_kph": 25.9
+    },
+    "2024-03-25": {
+     "obs": 24,
+     "precip_mm": 9.0,
+     "temp_max": 9.8,
+     "temp_mean": -0.3,
+     "temp_min": -8.2,
+     "trace_hours": 1,
+     "wind_max_kph": 44.4
+    },
+    "2024-03-26": {
+     "obs": 24,
+     "precip_mm": 7.0,
+     "temp_max": 7.2,
+     "temp_mean": -1.2,
+     "temp_min": -8.4,
+     "trace_hours": 5,
+     "wind_max_kph": 30.3
+    },
+    "2024-03-27": {
+     "obs": 24,
+     "precip_mm": 2.1,
+     "temp_max": 6.4,
+     "temp_mean": -0.3,
+     "temp_min": -7.3,
+     "trace_hours": 4,
+     "wind_max_kph": 30.8
+    },
+    "2024-03-28": {
+     "obs": 23,
+     "precip_mm": 6.9,
+     "temp_max": 6.4,
+     "temp_mean": -2.0,
+     "temp_min": -8.2,
+     "trace_hours": 0,
+     "wind_max_kph": 22.5
+    },
+    "2024-03-29": {
+     "obs": 24,
+     "precip_mm": 12.0,
+     "temp_max": 8.1,
+     "temp_mean": -1.2,
+     "temp_min": -6.9,
+     "trace_hours": 1,
+     "wind_max_kph": 29.8
+    },
+    "2024-03-30": {
+     "obs": 24,
+     "precip_mm": 12.8,
+     "temp_max": 7.8,
+     "temp_mean": -0.4,
+     "temp_min": -10.8,
+     "trace_hours": 1,
+     "wind_max_kph": 28.9
+    },
+    "2024-03-31": {
+     "obs": 24,
+     "precip_mm": 7.8,
+     "temp_max": 7.2,
+     "temp_mean": -1.5,
+     "temp_min": -9.7,
+     "trace_hours": 2,
+     "wind_max_kph": 33.2
+    }
+   },
+   "name": "Concord Municipal"
+  },
+  "KMWN": {
+   "days": {
+    "2024-03-01": {
+     "obs": 23,
+     "precip_mm": 6.6,
+     "temp_max": 13.2,
+     "temp_mean": 3.8,
+     "temp_min": -2.8,
+     "trace_hours": 2,
+     "wind_max_kph": 29.3
+    },
+    "2024-03-02": {
+     "obs": 24,
+     "precip_mm": 11.4,
+     "temp_max": 11.9,
+     "temp_mean": 2.9,
+     "temp_min": -3.6,
+     "trace_hours": 3,
+     "wind_max_kph": 32.0
+    },
+    "2024-03-03": {
+     "obs": 24,
+     "precip_mm": 5.9,
+     "temp_max": 10.5,
+     "temp_mean": 3.6,
+     "temp_min": -4.3,
+     "trace_hours": 2,
+     "wind_max_kph": 35.7
+    },
+    "2024-03-04": {
+     "obs": 24,
+     "precip_mm": 10.2,
+     "temp_max": 13.8,
+     "temp_mean": 3.0,
+     "temp_min": -4.1,
+     "trace_hours": 1,
+     "wind_max_kph": 31.3
+    },
+    "2024-03-05": {
+     "obs": 24,
+     "precip_mm": 16.2,
+     "temp_max": 13.3,
+     "temp_mean": 3.1,
+     "temp_min": -1.7,
+     "trace_hours": 2,
+     "wind_max_kph": 22.6
+    },
+    "2024-03-06": {
+     "obs": 24,
+     "precip_mm": 0.0,
+     "temp_max": 11.2,
+     "temp_mean": 3.7,
+     "temp_min": -3.3,
+     "trace_hours": 2,
+     "wind_max_kph": 42.8
+    },
+    "2024-03-07": {
+     "obs": 24,
+     "precip_mm": 14.3,
+     "temp_max": 12.0,
+     "temp_mean": 3.6,
+     "temp_min": -3.7,
+     "trace_hours": 3,
+     "wind_max_kph": 35.0
+    },
+    "2024-03-08": {
+     "obs": 24,
+     "precip_mm": 10.3,
+     "temp_max": 11.4,
+     "temp_mean": 2.8,
+     "temp_min": -2.2,
+     "trace_hours": 3,
+     "wind_max_kph": 27.2
+    },
+    "2024-03-09": {
+     "obs": 23,
+     "precip_mm": 2.6,
+     "temp_max": 13.9,
+     "temp_mean": 4.2,
+     "temp_min": -7.4,
+     "trace_hours": 1,
+     "wind_max_kph": 26.3
+    },
+    "2024-03-10": {
+     "obs": 23,
+     "precip_mm": 4.1,
+     "temp_max": 11.7,
+     "temp_mean": 4.0,
+     "temp_min": -5.0,
+     "trace_hours": 0,
+     "wind_max_kph": 24.1
+    },
+    "2024-03-11": {
+     "obs": 24,
+     "precip_mm": 8.6,
+     "temp_max": 11.1,
+     "temp_mean": 3.7,
+     "temp_min": -3.7,
+     "trace_hours": 3,
+     "wind_max_kph": 37.3
+    },
+    "2024-03-12": {
+     "obs": 24,
+     "precip_mm": 2.0,
+     "temp_max": 11.3,
+     "temp_mean": 3.4,
+     "temp_min": -4.4,
+     "trace_hours": 1,
+     "wind_max_kph": 30.5
+    },
+    "2024-03-13": {
+     "obs": 24,
+     "precip_mm": 5.2,
+     "temp_max": 10.5,
+     "temp_mean": 2.0,
+     "temp_min": -5.2,
+     "trace_hours": 1,
+     "wind_max_kph": 30.2
+    },
+    "2024-03-14": {
+     "obs": 23,
+     "precip_mm": 10.2,
+     "temp_max": 12.1,
+     "temp_mean": 3.6,
+     "temp_min": -1.0,
+     "trace_hours": 3,
+     "wind_max_kph": 34.7
+    },
+    "2024-03-15": {
+     "obs": 24,
+     "precip_mm": 6.5,
+     "temp_max": 14.5,
+     "temp_mean": 4.1,
+     "temp_min": -2.5,
+     "trace_hours": 0,
+     "wind_max_kph": 30.2
+    },
+    "2024-03-16": {
+     "obs": 24,
+     "precip_mm": 7.4,
+     "temp_max": 14.2,
+     "temp_mean": 3.5,
+     "temp_min": -6.3,
+     "trace_hours": 2,
+     "wind_max_kph": 33.2
+    },
+    "2024-03-17": {
+     "obs": 24,
+     "precip_mm": 3.2,
+     "temp_max": 10.6,
+     "temp_mean": 2.3,
+     "temp_min": -6.3,
+     "trace_hours": 4,
+     "wind_max_kph": 34.3
+    },
+    "2024-03-18": {
+     "obs": 24,
+     "precip_mm": 7.2,
+     "temp_max": 13.9,
+     "temp_mean": 3.6,
+     "temp_min": -7.2,
+     "trace_hours": 5,
+     "wind_max_kph": 24.9
+    },
+    "2024-03-19": {
+     "obs": 24,
+     "precip_mm": 0.4,
+     "temp_max": 13.7,
+     "temp_mean": 4.1,
+     "temp_min": -3.4,
+     "trace_hours": 0,
+     "wind_max_kph": 31.8
+    },
+    "2024-03-20": {
+     "obs": 24,
+     "precip_mm": 13.7,
+     "temp_max": 9.7,
+     "temp_mean": 3.3,
+     "temp_min": -3.7,
+     "trace_hours": 3,
+     "wind_max_kph": 29.4
+    },
+    "2024-03-21": {
+     "obs": 24,
+     "precip_mm": 8.2,
+     "temp_max": 12.6,
+     "temp_mean": 4.0,
+     "temp_min": -3.5,
+     "trace_hours": 1,
+     "wind_max_kph": 30.4
+    },
+    "2024-03-22": {
+     "obs": 23,
+     "precip_mm": 6.5,
+     "temp_max": 8.4,
+     "temp_mean": 2.4,
+     "temp_min": -6.5,
+     "trace_hours": 2,
+     "wind_max_kph": 34.1
+    },
+    "2024-03-23": {
+     "obs": 24,
+     "precip_mm": 4.4,
+     "temp_max": 11.0,
+     "temp_mean": 3.3,
+     "temp_min": -3.9,
+     "trace_hours": 2,
+     "wind_max_kph": 29.7
+    },
+    "2024-03-24": {
+     "obs": 23,
+     "precip_mm": 3.3,
+     "temp_max": 12.6,
+     "temp_mean": 3.8,
+     "temp_min": -6.0,
+     "trace_hours": 2,
+     "wind_max_kph": 25.8
+    },
+    "2024-03-25": {
+     "obs": 24,
+     "precip_mm": 16.1,
+     "temp_max": 12.6,
+     "temp_mean": 3.9,
+     "temp_min": -4.0,
+     "trace_hours": 3,
+     "wind_max_kph": 32.7
+    },
+    "2024-03-26": {
+     "obs": 24,
+     "precip_mm": 1.5,
+     "temp_max": 15.5,
+     "temp_mean": 3.4,
+     "temp_min": -3.8,
+     "trace_hours": 2,
+     "wind_max_kph": 32.5
+    },
+    "2024-03-27": {
+     "obs": 24,
+     "precip_mm": 2.1,
+     "temp_max": 11.6,
+     "temp_mean": 3.8,
+     "temp_min": -2.2,
+     "trace_hours": 3,
+     "wind_max_kph": 37.9
+    },
+    "2024-03-28": {
+     "obs": 24,
+     "precip_mm": 2.7,
+     "temp_max": 13.9,
+     "temp_mean": 2.9,
+     "temp_min": -4.9,
+     "trace_hours": 1,
+     "wind_max_kph": 24.2
+    },
+    "2024-03-29": {
+     "obs": 23,
+     "precip_mm": 12.1,
+     "temp_max": 11.8,
+     "temp_mean": 2.5,
+     "temp_min": -4.6,
+     "trace_hours": 1,
+     "wind_max_kph": 26.5
+    },
+    "2024-03-30": {
+     "obs": 24,
+     "precip_mm": 9.5,
+     "temp_max": 11.8,
+     "temp_mean": 3.5,
+     "temp_min": -3.9,
+     "trace_hours": 3,
+     "wind_max_kph": 22.2
+    },
+    "2024-03-31": {
+     "obs": 24,
+     "precip_mm": 8.9,
+     "temp_max": 10.3,
+     "temp_mean": 3.3,
+     "temp_min": -3.2,
+     "trace_hours": 2,
+     "wind_max_kph": 38.6
+    }
+   },
+   "name": "Mount Washington, NH"
+  },
+  "KORH": {
+   "days": {
+    "2024-03-01": {
+     "obs": 24,
+     "precip_mm": 4.8,
+     "temp_max": 12.1,
+     "temp_mean": 3.1,
+     "temp_min": -5.1,
+     "trace_hours": 2,
+     "wind_max_kph": 32.5
+    },
+    "2024-03-02": {
+     "obs": 23,
+     "precip_mm": 9.4,
+     "temp_max": 12.1,
+     "temp_mean": 2.9,
+     "temp_min": -5.1,
+     "trace_hours": 5,
+     "wind_max_kph": 34.5
+    },
+    "2024-03-03": {
+     "obs": 24,
+     "precip_mm": 6.7,
+     "temp_max": 12.1,
+     "temp_mean": 3.5,
+     "temp_min": -2.1,
+     "trace_hours": 0,
+     "wind_max_kph": 21.9
+    },
+    "2024-03-04": {
+     "obs": 22,
+     "precip_mm": 7.5,
+     "temp_max": 10.1,
+     "temp_mean": 2.7,
+     "temp_min": -4.4,
+     "trace_hours": 0,
+     "wind_max_kph": 39.5
+    },
+    "2024-03-05": {
+     "obs": 23,
+     "precip_mm": 3.7,
+     "temp_max": 12.4,
+     "temp_mean": 2.7,
+     "temp_min": -3.4,
+     "trace_hours": 2,
+     "wind_max_kph": 29.0
+    },
+    "2024-03-06": {
+     "obs": 24,
+     "precip_mm": 7.8,
+     "temp_max": 11.4,
+     "temp_mean": 3.7,
+     "temp_min": -4.4,
+     "trace_hours": 2,
+     "wind_max_kph": 32.4
+    },
+    "2024-03-07": {
+     "obs": 22,
+     "precip_mm": 7.4,
+     "temp_max": 11.7,
+     "temp_mean": 3.7,
+     "temp_min": -2.9,
+     "trace_hours": 2,
+     "wind_max_kph": 27.1
+    },
+    "2024-03-08": {
+     "obs": 22,
+     "precip_mm": 7.7,
+     "temp_max": 9.9,
+     "temp_mean": 2.8,
+     "temp_min": -5.7,
+     "trace_hours": 3,
+     "wind_max_kph": 26.6
+    },
+    "2024-03-09": {
+     "obs": 23,
+     "precip_mm": 4.9,
+     "temp_max": 10.8,
+     "temp_mean": 3.9,
+     "temp_min": -3.5,
+     "trace_hours": 2,
+     "wind_max_kph": 34.5
+    },
+    "2024-03-10": {
+     "obs": 24,
+     "precip_mm": 5.4,
+     "temp_max": 10.5,
+     "temp_mean": 3.2,
+     "temp_min": -5.0,
+     "trace_hours": 0,
+     "wind_max_kph": 27.4
+    },
+    "2024-03-11": {
+     "obs": 24,
+     "precip_mm": 0.4,
+     "temp_max": 11.0,
+     "temp_mean": 3.8,
+     "temp_min": -1.5,
+     "trace_hours": 1,
+     "wind_max_kph": 35.5
+    },
+    "2024-03-12": {
+     "obs": 23,
+     "precip_mm": 1.8,
+     "temp_max": 13.0,
+     "temp_mean": 3.5,
+     "temp_min": -3.9,
+     "trace_hours": 2,
+     "wind_max_kph": 27.9
+    },
+    "2024-03-13": {
+     "obs": 23,
+     "precip_mm": 12.2,
+     "temp_max": 12.6,
+     "temp_mean": 2.3,
+     "temp_min": -2.8,
+     "trace_hours": 1,
+     "wind_max_kph": 36.9
+    },
+    "2024-03-14": {
+     "obs": 24,
+     "precip_mm": 2.0,
+     "temp_max": 11.2,
+     "temp_mean": 2.7,
+     "temp_min": -2.5,
+     "trace_hours": 2,
+     "wind_max_kph": 36.3
+    },
+    "2024-03-15": {
+     "obs": 24,
+     "precip_mm": 17.1,
+     "temp_max": 11.1,
+     "temp_mean": 3.1,
+     "temp_min": -4.9,
+     "trace_hours": 1,
+     "wind_max_kph": 36.0
+    },
+    "2024-03-16": {
+     "obs": 23,
+     "precip_mm": 5.7,
+     "temp_max": 11.1,
+     "temp_mean": 4.1,
+     "temp_min": -1.9,
+     "trace_hours": 2,
+     "wind_max_kph": 32.4
+    },
+    "2024-03-17": {
+     "obs": 24,
+     "precip_mm": 5.6,
+     "temp_max": 11.4,
+     "temp_mean": 3.5,
+     "temp_min": -3.4,
+     "trace_hours": 1,
+     "wind_max_kph": 29.4
+    },
+    "2024-03-18": {
+     "obs": 24,
+     "precip_mm": 0.7,
+     "temp_max": 10.7,
+     "temp_mean": 3.6,
+     "temp_min": -4.9,
+     "trace_hours": 2,
+     "wind_max_kph": 27.5
+    },
+    "2024-03-19": {
+     "obs": 24,
+     "precip_mm": 1.8,
+     "temp_max": 11.9,
+     "temp_mean": 3.3,
+     "temp_min": -6.2,
+     "trace_hours": 4,
+     "wind_max_kph": 29.2
+    },
+    "2024-03-20": {
+     "obs": 24,
+     "precip_mm": 8.1,
+     "temp_max": 12.0,
+     "temp_mean": 3.2,
+     "temp_min": -5.4,
+     "trace_hours": 0,
+     "wind_max_kph": 27.5
+    },
+    "2024-03-21": {
+     "obs": 24,
+     "precip_mm": 24.6,
+     "temp_max": 9.9,
+     "temp_mean": 1.6,
+     "temp_min": -7.2,
+     "trace_hours": 0,
+     "wind_max_kph": 39.6
+    },
+    "2024-03-22": {
+     "obs": 24,
+     "precip_mm": 1.8,
+     "temp_max": 13.6,
+     "temp_mean": 3.4,
+     "temp_min": -5.0,
+     "trace_hours": 0,
+     "wind_max_kph": 28.3
+    },
+    "2024-03-23": {
+     "obs": 24,
+     "precip_mm": 3.7,
+     "temp_max": 10.4,
+     "temp_mean": 4.1,
+     "temp_min": -1.3,
+     "trace_hours": 2,
+     "wind_max_kph": 36.1
+    },
+    "2024-03-24": {
+     "obs": 23,
+     "precip_mm": 0.7,
+     "temp_max": 12.0,
+     "temp_mean": 2.7,
+     "temp_min": -2.6,
+     "trace_hours": 2,
+     "wind_max_kph": 30.6
+    },
+    "2024-03-25": {
+     "obs": 24,
+     "precip_mm": 10.6,
+     "temp_max": 10.5,
+     "temp_mean": 3.5,
+     "temp_min": -2.8,
+     "trace_hours": 2,
+     "wind_max_kph": 31.6
+    },
+    "2024-03-26": {
+     "obs": 23,
+     "precip_mm": 8.3,
+     "temp_max": 13.2,
+     "temp_mean": 3.0,
+     "temp_min": -4.5,
+     "trace_hours": 1,
+     "wind_max_kph": 27.0
+    },
+    "2024-03-27": {
+     "obs": 24,
+     "precip_mm": 1.7,
+     "temp_max": 13.0,
+     "temp_mean": 3.4,
+     "temp_min": -3.4,
+     "trace_hours": 5,
+     "wind_max_kph": 26.4
+    },
+    "2024-03-28": {
+     "obs": 24,
+     "precip_mm": 3.6,
+     "temp_max": 15.6,
+     "temp_mean": 3.2,
+     "temp_min": -4.1,
+     "trace_hours": 2,
+     "wind_max_kph": 31.8
+    },
+    "2024-03-29": {
+     "obs": 24,
+     "precip_mm": 6.7,
+     "temp_max": 10.4,
+     "temp_mean": 2.7,
+     "temp_min": -4.9,
+     "trace_hours": 1,
+     "wind_max_kph": 34.5
+    },
+    "2024-03-30": {
+     "obs": 23,
+     "precip_mm": 3.1,
+     "temp_max": 11.7,
+     "temp_mean": 3.5,
+     "temp_min": -3.9,
+     "trace_hours": 6,
+     "wind_max_kph": 33.6
+    },
+    "2024-03-31": {
+     "obs": 22,
+     "precip_mm": 8.4,
+     "temp_max": 10.5,
+     "temp_mean": 2.9,
+     "temp_min": -6.8,
+     "trace_hours": 0,
+     "wind_max_kph": 31.4
+    }
+   },
+   "name": "Worcester Regional"
+  },
+  "KPVD": {
+   "days": {
+    "2024-03-01": {
+     "obs": 24,
+     "precip_mm": 17.1,
+     "temp_max": 13.6,
+     "temp_mean": 5.5,
+     "temp_min": -0.8,
+     "trace_hours": 2,
+     "wind_max_kph": 34.1
+    },
+    "2024-03-02": {
+     "obs": 24,
+     "precip_mm": 3.5,
+     "temp_max": 19.5,
+     "temp_mean": 6.3,
+     "temp_min": -1.3,
+     "trace_hours": 0,
+     "wind_max_kph": 25.9
+    },
+    "2024-03-03": {
+     "obs": 23,
+     "precip_mm": 2.3,
+     "temp_max": 14.7,
+     "temp_mean": 5.7,
+     "temp_min": -0.4,
+     "trace_hours": 0,
+     "wind_max_kph": 36.2
+    },
+    "2024-03-04": {
+     "obs": 23,
+     "precip_mm": 3.5,
+     "temp_max": 11.9,
+     "temp_mean": 6.3,
+     "temp_min": 1.3,
+     "trace_hours": 2,
+     "wind_max_kph": 23.6
+    },
+    "2024-03-05": {
+     "obs": 24,
+     "precip_mm": 5.2,
+     "temp_max": 11.3,
+     "temp_mean": 5.1,
+     "temp_min": -1.5,
+     "trace_hours": 1,
+     "wind_max_kph": 34.7
+    },
+    "2024-03-06": {
+     "obs": 24,
+     "precip_mm": 5.9,
+     "temp_max": 15.6,
+     "temp_mean": 5.9,
+     "temp_min": -0.5,
+     "trace_hours": 3,
+     "wind_max_kph": 32.1
+    },
+    "2024-03-07": {
+     "obs": 24,
+     "precip_mm": 12.6,
+     "temp_max": 13.1,
+     "temp_mean": 6.0,
+     "temp_min": -1.3,
+     "trace_hours": 2,
+     "wind_max_kph": 33.6
+    },
+    "2024-03-08": {
+     "obs": 24,
+     "precip_mm": 4.1,
+     "temp_max": 14.4,
+     "temp_mean": 6.3,
+     "temp_min": 0.6,
+     "trace_hours": 5,
+     "wind_max_kph": 28.5
+    },
+    "2024-03-09": {
+     "obs": 24,
+     "precip_mm": 11.3,
+     "temp_max": 14.5,
+     "temp_mean": 4.9,
+     "temp_min": -3.0,
+     "trace_hours": 0,
+     "wind_max_kph": 25.0
+    },
+    "2024-03-10": {
+     "obs": 24,
+     "precip_mm": 10.7,
+     "temp_max": 16.3,
+     "temp_mean": 6.8,
+     "temp_min": 0.0,
+     "trace_hours": 0,
+     "wind_max_kph": 43.6
+    },
+    "2024-03-11": {
+     "obs": 24,
+     "precip_mm": 10.1,
+     "temp_max": 13.5,
+     "temp_mean": 5.5,
+     "temp_min": -2.8,
+     "trace_hours": 2,
+     "wind_max_kph": 31.1
+    },
+    "2024-03-12": {
+     "obs": 23,
+     "precip_mm": 14.6,
+     "temp_max": 15.5,
+     "temp_mean": 6.4,
+     "temp_min": 0.8,
+     "trace_hours": 0,
+     "wind_max_kph": 29.5
+    },
+    "2024-03-13": {
+     "obs": 24,
+     "precip_mm": 4.7,
+     "temp_max": 17.9,
+     "temp_mean": 5.6,
+     "temp_min": -4.6,
+     "trace_hours": 5,
+     "wind_max_kph": 34.2
+    },
+    "2024-03-14": {
+     "obs": 22,
+     "precip_mm": 2.1,
+     "temp_max": 15.1,
+     "temp_mean": 5.8,
+     "temp_min": -0.1,
+     "trace_hours": 0,
+     "wind_max_kph": 32.9
+    },
+    "2024-03-15": {
+     "obs": 24,
+     "precip_mm": 3.7,
+     "temp_max": 12.2,
+     "temp_mean": 6.5,
+     "temp_min": -1.7,
+     "trace_hours": 1,
+     "wind_max_kph": 27.7
+    },
+    "2024-03-16": {
+     "obs": 24,
+     "precip_mm": 9.1,
+     "temp_max": 13.5,
+     "temp_mean": 6.8,
+     "temp_min": -1.3,
+     "trace_hours": 1,
+     "wind_max_kph": 33.7
+    },
+    "2024-03-17": {
+     "obs": 24,
+     "precip_mm": 6.7,
+     "temp_max": 15.5,
+     "temp_mean": 6.7,
+     "temp_min": 0.3,
+     "trace_hours": 3,
+     "wind_max_kph": 34.8
+    },
+    "2024-03-18": {
+     "obs": 24,
+     "precip_mm": 4.6,
+     "temp_max": 13.5,
+     "temp_mean": 6.0,
+     "temp_min": 0.8,
+     "trace_hours": 4,
+     "wind_max_kph": 30.2
+    },
+    "2024-03-19": {
+     "obs": 24,
+     "precip_mm": 10.0,
+     "temp_max": 15.6,
+     "temp_mean": 6.7,
+     "temp_min": 0.2,
+     "trace_hours": 4,
+     "wind_max_kph": 30.7
+    },
+    "2024-03-20": {
+     "obs": 23,
+     "precip_mm": 2.1,
+     "temp_max": 16.3,
+     "temp_mean": 5.9,
+     "temp_min": -0.4,
+     "trace_hours": 1,
+     "wind_max_kph": 30.3
+    },
+    "2024-03-21": {
+     "obs": 23,
+     "precip_mm": 5.8,
+     "temp_max": 13.6,
+     "temp_mean": 6.4,
+     "temp_min": 0.3,
+     "trace_hours": 1,
+     "wind_max_kph": 37.7
+    },
+    "2024-03-22": {
+     "obs": 24,
+     "precip_mm": 4.0,
+     "temp_max": 16.4,
+     "temp_mean": 5.4,
+     "temp_min": -0.1,
+     "trace_hours": 3,
+     "wind_max_kph": 36.6
+    },
+    "2024-03-23": {
+     "obs": 24,
+     "precip_mm": 5.7,
+     "temp_max": 15.7,
+     "temp_mean": 6.2,
+     "temp_min": -2.2,
+     "trace_hours": 4,
+     "wind_max_kph": 32.5
+    },
+    "2024-03-24": {
+     "obs": 24,
+     "precip_mm": 10.7,
+     "temp_max": 16.9,
+     "temp_mean": 6.1,
+     "temp_min": 1.4,
+     "trace_hours": 3,
+     "wind_max_kph": 32.1
+    },
+    "2024-03-25": {
+     "obs": 23,
+     "precip_mm": 1.5,
+     "temp_max": 15.0,
+     "temp_mean": 5.7,
+     "temp_min": -1.0,
+     "trace_hours": 4,
+     "wind_max_kph": 30.1
+    },
+    "2024-03-26": {
+     "obs": 24,
+     "precip_mm": 10.5,
+     "temp_max": 13.1,
+     "temp_mean": 5.5,
+     "temp_min": -3.1,
+     "trace_hours": 3,
+     "wind_max_kph": 31.5
+    },
+    "2024-03-27": {
+     "obs": 24,
+     "precip_mm": 7.2,
+     "temp_max": 16.7,
+     "temp_mean": 6.5,
+     "temp_min": -1.7,
+     "trace_hours": 3,
+     "wind_max_kph": 33.3
+    },
+    "2024-03-28": {
+     "obs": 23,
+     "precip_mm": 4.3,
+     "temp_max": 11.9,
+     "temp_mean": 5.5,
+     "temp_min": -0.2,
+     "trace_hours": 2,
+     "wind_max_kph": 27.2
+    },
+    "2024-03-29": {
+     "obs": 23,
+     "precip_mm": 11.6,
+     "temp_max": 16.3,
+     "temp_mean": 6.4,
+     "temp_min": 0.3,
+     "trace_hours": 0,
+     "wind_max_kph": 36.5
+    },
+    "2024-03-30": {
+     "obs": 23,
+     "precip_mm": 8.8,
+     "temp_max": 14.7,
+     "temp_mean": 6.6,
+     "temp_min": -2.3,
+     "trace_hours": 5,
+     "wind_max_kph": 36.0
+    },
+    "2024-03-31": {
+     "obs": 24,
+     "precip_mm": 8.2,
+     "temp_max": 16.6,
+     "temp_mean": 6.9,
+     "temp_min": -2.2,
+     "trace_hours": 4,
+     "wind_max_kph": 31.4
+    }
+   },
+   "name": "T.F. Green Airport"
+  }
+ }
+}

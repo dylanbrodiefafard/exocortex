@@ -1,0 +1,8 @@
+// Supervisor (suggest) + research R1.1/R1.2: deterministic pre-verdict and warning signals
+// (test tampering, stubs, unsupported claims, narrow test runs). Compare against `supervisor`;
+// primary metric: precision of "complete" (D-046).
+{
+	"modules": {
+		"supervisor": { "enabled": true, "mode": "suggest", "preVerdict": true, "warningSignals": true }
+	}
+}

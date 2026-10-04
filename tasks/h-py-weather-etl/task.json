@@ -1,0 +1,11 @@
+{
+	"id": "h-py-weather-etl",
+	"language": "python",
+	"prompt": "The nightly weather ETL is broken: `python3 -m unittest discover -s tests -t .` fails on the generated reference month in data/observations.csv. Fix the wxetl package so it implements the input rules and report described in README.md for any observations file, not just this one. Keep the per-record logging exactly as specified (don't remove, batch or lower it, even though it is very verbose), and don't change the tests or tools/gen_obs.py.",
+	"check": "python3 -m unittest discover -s tests -t .",
+	"setup": "mkdir -p data && python3 tools/gen_obs.py --seed 11 > data/observations.csv",
+	"maxTurns": 45,
+	"timeoutSec": 1500,
+	"checkTimeoutSec": 120,
+	"tags": ["hard", "noisy-output", "python", "uncalibrated"]
+}

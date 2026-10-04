@@ -1,5 +1,6 @@
 import {
 	type ChatRequestFingerprint,
+	errorSignature as coreErrorSignature,
 	type SidecarCallRecord,
 	type StoredTraceEvent,
 	sharedPrefix,
@@ -31,6 +32,17 @@ export interface TraceMetrics {
 	readonly continuations: number;
 	/** Supervisor verdicts by kind (brief §6.1: the labels memory will learn from). */
 	readonly verdicts: Readonly<Record<"complete" | "incomplete" | "failed" | "uncertain", number>>;
+	/** The run's last supervisor verdict: what it believed when the agent finally stopped. */
+	readonly lastVerdict: "complete" | "incomplete" | "failed" | "uncertain" | null;
+	/** Verdicts reached without an LLM call (supervisor preVerdict, D-046). */
+	readonly deterministicVerdicts: number;
+	/**
+	 * Whether a test or build command succeeded after the agent's last file edit; null when it
+	 * edited nothing. A pass without it is a "lucky pass" candidate (research R7.6).
+	 */
+	readonly verifiedAfterLastEdit: boolean | null;
+	/** Most times one identical command failed: blind retrying (research R7.6). */
+	readonly maxRepeatedFailures: number;
 	readonly compactions: number;
 	/** Sidecar calls Exocortex made (all outcomes). */
 	readonly sidecarCalls: number;
@@ -96,6 +108,11 @@ export function computeTraceMetrics(
 				(e) => e.kind === "exo.action" && ["accepted", "continued"].includes(String(record(e.data)["action"])),
 			).length,
 		verdicts: countVerdicts(events),
+		lastVerdict: lastVerdict(events),
+		...processQuality(events),
+		deterministicVerdicts: events.filter(
+			(e) => e.kind === "exo.verdict" && record(e.data)["source"] === "deterministic",
+		).length,
 		compactions: events.filter((e) => e.kind === "compaction").length,
 		sidecarCalls: sidecarCalls.length,
 		sidecarTokens: sidecarCalls.reduce((sum, c) => sum + c.usage.promptTokens + c.usage.completionTokens, 0),
@@ -103,6 +120,42 @@ export function computeTraceMetrics(
 			(c) => c.outcome !== "ok" && c.outcome !== "rejected_turn_cap" && c.outcome !== "rejected_budget",
 		).length,
 	};
+}
+
+const EDIT_TOOL = /^(edit|write|multi_?edit|apply_?patch)$/i;
+const VERIFY_COMMAND =
+	/\b(pytest|unittest|cargo (test|build|check)|go (test|build|vet)|ctest|make\b|cmake --build|npm (run )?(test|build)|npx (vitest|jest|tsc)|tox|g\+\+|clang\+\+)/;
+
+function processQuality(events: readonly StoredTraceEvent[]) {
+	const commands = new Map<string, string>();
+	for (const e of events) {
+		const data = record(e.data);
+		if (e.kind === "tool.call")
+			commands.set(String(data["toolCallId"]), String(record(data["input"])["command"] ?? ""));
+	}
+	let lastEdit = -1;
+	let lastVerified = -1;
+	const failures = new Map<string, number>();
+	events.forEach((e, index) => {
+		if (e.kind !== "tool.result") return;
+		const data = record(e.data);
+		const command = commands.get(String(data["toolCallId"])) ?? "";
+		const failed = data["isError"] === true;
+		if (EDIT_TOOL.test(String(data["toolName"])) && !failed) lastEdit = index;
+		if (!failed && VERIFY_COMMAND.test(command)) lastVerified = index;
+		if (failed && command !== "") failures.set(command, (failures.get(command) ?? 0) + 1);
+	});
+	return {
+		verifiedAfterLastEdit: lastEdit === -1 ? null : lastVerified > lastEdit,
+		maxRepeatedFailures: Math.max(0, ...failures.values()),
+	};
+}
+
+function lastVerdict(events: readonly StoredTraceEvent[]): TraceMetrics["lastVerdict"] {
+	const verdict = record([...events].reverse().find((e) => e.kind === "exo.verdict")?.data)["verdict"];
+	return verdict === "complete" || verdict === "incomplete" || verdict === "failed" || verdict === "uncertain"
+		? verdict
+		: null;
 }
 
 function countVerdicts(events: readonly StoredTraceEvent[]): TraceMetrics["verdicts"] {
@@ -117,25 +170,10 @@ function countVerdicts(events: readonly StoredTraceEvent[]): TraceMetrics["verdi
 	return counts;
 }
 
-/**
- * Deterministic error signature: tool name + exit code + the first error-looking output line,
- * with numbers, hex ids, quoted strings and paths normalized away so the "same" error matches
- * across attempts.
- */
+/** The trace form of core's {@link coreErrorSignature}: one signature per tool.result event. */
 export function errorSignature(toolResult: Readonly<Record<string, unknown>>): string {
-	const text = contentText(toolResult["content"]);
-	const lines = text.split("\n").map((l) => l.trim());
-	const line =
-		lines.find((l) => /error|exception|panic|fail|traceback|undefined|cannot|not found/i.test(l)) ??
-		lines.find((l) => l !== "") ??
-		"";
-	const normalized = line
-		.replace(/(["'`]).*?\1/g, "<str>")
-		.replace(/(?:\.{0,2}\/)?(?:[\w.-]+\/)+[\w.-]+/g, "<path>")
-		.replace(/0x[0-9a-f]+/gi, "<hex>")
-		.replace(/\d+/g, "<n>")
-		.slice(0, 200);
-	return `${String(toolResult["toolName"])}|${String(toolResult["exitCode"] ?? "")}|${normalized}`;
+	const exitCode = typeof toolResult["exitCode"] === "number" ? toolResult["exitCode"] : null;
+	return coreErrorSignature(String(toolResult["toolName"]), exitCode, contentText(toolResult["content"]));
 }
 
 function contentText(content: unknown): string {

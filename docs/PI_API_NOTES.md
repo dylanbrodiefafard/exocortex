@@ -58,6 +58,8 @@ import type { ExtensionAPI, ExtensionContext, ToolResultEvent } from "@earendil-
 import { isBashToolResult, convertToLlm, serializeConversation, CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 ```
 These are exported at `ce/src/index.ts:7,49,96,204,219`.
+- **Verified in Phase 4:** runtime (value) imports work from an extension loaded by path. In Node mode, jiti aliases `@earendil-works/pi-coding-agent` to pi's own entry (`dist/core/extensions/loader.js:37-63`, `getAliases`), so the extension shares pi's module instance. The module host calls `convertToLlm` (`dist/core/messages.d.ts:76`) and `serializeConversation` (`dist/core/compaction/utils.d.ts:37`; it labels `[User]`, `[Assistant]`, `[Assistant thinking]`, `[Assistant tool calls]`, `[Tool result]` and truncates each tool result, `utils.js:101-141`). This is the same serialization pi's default compaction uses (`compaction.js:520-521,728-729`).
+- `CompactionPreparation.fileOps` is `{read, written, edited}` of `Set<string>` (`dist/core/compaction/utils.d.ts:6-10`); `turnPrefixMessages` holds the split turn's start when `isSplitTurn` (`compaction.d.ts:118-134`).
 
 ### CLI flags registered by an extension
 ```ts

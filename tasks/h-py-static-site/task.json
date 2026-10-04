@@ -1,0 +1,10 @@
+{
+	"id": "h-py-static-site",
+	"language": "python",
+	"prompt": "Add an `excerpt` template filter to inkwell for post summaries:\n\n- `{{ post.content | excerpt }}` returns the first N words of the value as plain text with the HTML removed. `{{ post.content | excerpt:25 }}` sets N explicitly. Without an argument, N comes from a new site setting, `build.excerpt_words` (default 40). The setting must be a positive integer and is validated and reported exactly like the other integer settings.\n- HTML is removed exactly the way the `striptags` filter removes it, and words are cut exactly the way `truncatewords` cuts them (same whitespace handling, punctuation trimming and ` ...` suffix).\n- Authors can pick the cut point themselves: if the value contains the exact marker `<!--more-->`, the excerpt is everything before the first marker with the HTML removed, whatever its length and N, with no suffix.\n- An argument that is not an integer >= 1, or more than one argument, is an error reported the same way the other filters report bad arguments.\n- `inkwell filters` must list it with the summary `First N words of the text, without HTML.`\n- Document the filter and the new setting alongside the existing ones, and switch the example blog's index page (examples/blog) to use `excerpt` for its post summaries.\n\nKeep the existing tests passing: `python3 -m unittest discover -q -s tests -t .`",
+	"check": "python3 -m unittest discover -q -s tests -t .",
+	"maxTurns": 50,
+	"timeoutSec": 1500,
+	"checkTimeoutSec": 120,
+	"tags": ["hard", "navigation", "python", "uncalibrated"]
+}

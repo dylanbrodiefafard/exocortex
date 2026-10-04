@@ -1,0 +1,59 @@
+diff --git a/meal/planner.py b/meal/planner.py
+index 31ca279..c02a3ed 100644
+--- a/meal/planner.py
++++ b/meal/planner.py
+@@ -35,5 +35,8 @@ class MealPlan:
+         quantity is normalized to base units. Slots are visited in the order
+         they were added.
+         """
+-        for _day, recipe, servings in self._slots:
+-            yield from (normalize(i) for i in recipe.scaled(servings).ingredients)
++        return [
++            normalize(i)
++            for _day, recipe, servings in self._slots
++            for i in recipe.scaled(servings).ingredients
++        ]
+diff --git a/meal/shopping.py b/meal/shopping.py
+index bfea7eb..52386f1 100644
+--- a/meal/shopping.py
++++ b/meal/shopping.py
+@@ -22,10 +22,10 @@ class Pantry:
+     that was passed in, and every Pantry() starts out independent.
+     """
+ 
+-    def __init__(self, stock={}):
+-        self._stock = stock
+-        for name, qty in list(self._stock.items()):
+-            self._stock[name] = qty.to_base()
++    def __init__(self, stock=None):
++        self._stock = {}
++        for name, qty in (stock or {}).items():
++            self.add(name, qty)
+ 
+     def add(self, name: str, quantity: Quantity) -> None:
+         name = name.lower()
+diff --git a/meal/units.py b/meal/units.py
+index 75c8b18..434cdb8 100644
+--- a/meal/units.py
++++ b/meal/units.py
+@@ -8,8 +8,6 @@ as Fractions so scaling a recipe never introduces rounding error.
+ from dataclasses import dataclass
+ from fractions import Fraction
+ 
+-from .recipe import Ingredient
+-
+ # unit -> (dimension, size of one unit in the base unit)
+ UNITS = {
+     "g": ("mass", Fraction(1)),
+@@ -100,8 +98,10 @@ def parse_quantity(text: str) -> Quantity:
+     return Quantity(amount, unit)
+ 
+ 
+-def normalize(ingredient: Ingredient) -> Ingredient:
++def normalize(ingredient):
+     """A copy of the ingredient with its quantity in base units."""
++    from .recipe import Ingredient
++
+     return Ingredient(ingredient.name, ingredient.quantity.to_base(), ingredient.optional)
+ 
+ 

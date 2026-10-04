@@ -1,0 +1,8 @@
+// Error triage: surfaces buried first errors, flags repeated failures, and adds a grounded
+// sidecar hint from the second occurrence. Slice by the error-recovery tag; watch the
+// repeated-error rate.
+{
+	"modules": {
+		"triage": { "enabled": true }
+	}
+}

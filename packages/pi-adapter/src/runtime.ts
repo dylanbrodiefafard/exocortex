@@ -23,6 +23,8 @@ export interface Runtime {
 	rebuildModules: () => void;
 	/** One status line per active module (set by the module host). */
 	moduleStatus: () => string[];
+	/** Every module id the host knows, enabled or not (set by the module host). */
+	moduleIds: () => readonly string[];
 	/** Flushes and closes the store. */
 	shutdown(): void;
 }
@@ -71,6 +73,7 @@ export function createRuntime(options: RuntimeOptions): Runtime {
 		overrides: { allOff: false, modules: {} },
 		rebuildModules: () => {},
 		moduleStatus: () => [],
+		moduleIds: () => [],
 		shutdown() {
 			try {
 				store?.close();

@@ -1,0 +1,8 @@
+// Every Phase 4 module together: trimmer (deterministic), triage and compaction.
+{
+	"modules": {
+		"trimmer": { "enabled": true },
+		"triage": { "enabled": true },
+		"compaction": { "enabled": true }
+	}
+}

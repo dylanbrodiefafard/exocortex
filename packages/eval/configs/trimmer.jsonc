@@ -1,0 +1,8 @@
+// Trimmer, deterministic tier only: head, tail and error windows of long bash outputs.
+// Phase 4 acceptance: fewer main-model tokens, with no drop in success and no rise in turns or
+// wall-clock (research R2.4). Slice by the noisy-output tag.
+{
+	"modules": {
+		"trimmer": { "enabled": true }
+	}
+}

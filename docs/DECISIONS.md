@@ -472,6 +472,218 @@ Open check: Exocortex's injected `custom_message` reaches ninfer as a second con
 
 ---
 
+### D-040 — Test the adapter in-process; coverage ratchet in `npm run check`; trace inspector · accepted (Phase 4)
+- **Context:** The pi adapter only ran inside spawned pi processes, so its hooks were barely covered: 72% statements and 65% branches overall.
+- **Decision:**
+  - `packages/pi-adapter/test/fake-pi.ts`: a fake `ExtensionAPI` that records handlers and commands and emits events in registration order, the way pi composes them. The module host, sidecars, `/exo`, runtime, trace recorder and entrypoint are tested in-process. The real-pi integration tests stay.
+  - `npm test` runs vitest with v8 coverage. Thresholds sit just below the current numbers and only ever go up. CLI entrypoints (`cli.ts`, `*-cli.ts`) are excluded.
+  - `npm run trace -- sessions | show <id> | calls <id>` inspects the trace store: metrics header, event timeline, per-module sidecar totals, `--json`.
+- **Found by the new tests:** the module host's `textOf` emitted blank lines for non-text parts, so the supervisor's `lastAssistantText` started with a newline whenever the model thought first. Fixed on this branch. Phase 3 behavior is otherwise unchanged.
+
+### D-041 — Tool-result rewrites and shared output analysis · accepted (Phase 4; implements brief §5.4 `onToolResult` rewrites, D-029)
+- **Hook:** `rewriteToolResult(draft, signal) → {text, note} | undefined`.
+  - Modules run in `MODULES` order (trimmer, then triage), and each sees earlier rewrites in `draft.current`.
+  - Only text-only results are offered.
+  - One 20 s budget per tool result covers all modules, because a rewrite holds the agent loop. A module that ignores its signal is cut off.
+- **Pi mapping:**
+  - Return `content` and keep `structuredContent`; replacing content alone would drop it (PI_API_NOTES §4).
+  - Merge `details.exo.rewrites`, never replace `details`.
+  - The original output is already in the trace: the recorder's `tool.result` handler runs before the host's. Each rewrite adds an `exo.rewrite` event.
+- **Cache:** rewriting a new tool result changes only content the model has not seen yet, so the prefix is untouched (D-029).
+- **`core/modules/output.ts`:**
+  - terminal cleanup (ANSI, carriage-return redraws);
+  - per-ecosystem error grammars (Rust, Go, C/C++ and linkers, Python/pytest, TypeScript), split into toolchain-specific and generic matches with false-positive guards;
+  - normalized error signatures.
+  - One definition serves triage, compaction and the eval's repeated-error metric (D-016).
+
+### D-042 — Trimmer: deterministic first, extractive sidecar second · accepted (Phase 4; amends brief §6.2)
+- **Deterministic tier (always):** bash results over 8k characters (~2k tokens).
+  1. Clean terminal noise.
+  2. Collapse runs of lines that differ only in numbers.
+  3. Keep the head (40), the tail (80) and every error line ±3, verbatim. Specific errors win over generic ones, and the earliest windows are favored.
+  4. Cut lines over 400 characters.
+  5. Add a footer pointing at the full output: pi's `fullOutputPath`, else a copy the trimmer saves.
+- **Sidecar tier (opt-in, `sidecar: true`):** runs only when the deterministic result is still over 8k characters.
+  - The sidecar returns **line ranges, never prose**. Lines are copied verbatim, and the tail and the first specific error are always added.
+  - Any failure, invalid range or over-budget selection falls back to the deterministic result.
+  - Deadline 6 s, interactive priority.
+  - Brief §6.2 had the sidecar first. The research (R2.1/R2.2) found extractive, deterministic-first pruning safer for small models: identifiers can't be corrupted and timeouts cost nothing.
+- **Policy:**
+  - `read`, `edit` and `write` are never trimmed, whatever the config. Default `tools: ["bash"]`.
+  - No recall tool: the agent reads the saved file if it needs more.
+- **Not done:** batched retro-masking of old observations through `context_edit` (R2.3). It edits earlier context, so it needs an explicit exception to D-029, measured as a compaction-like cache reset. Deferred until Phase 4 numbers exist.
+
+### D-043 — Triage: gated on repetition · accepted (Phase 4; amends brief §6.3)
+- **Change from the brief:** the brief called the sidecar on every failing result. The main model already sees the raw error, and same-model explanations add little on a first failure (research R3.1). So:
+  - **First failure of a signature:** deterministic only. If the first error is buried more than 20 lines down, a `[exo triage: first error (line N): …]` line goes at the top.
+  - **Repeat (same normalized signature within the task):** a notice that *describes* the repeat instead of echoing the failed command (R3.3). From the second occurrence, an optional sidecar diagnosis of at most 2 sentences that must name a different action. At most 2 hints per signature; deadline 8 s.
+  - **Loop threshold (default 3):** a stronger, still advisory, warning. Tool calls are never blocked (D-010).
+- **Guidance gate (R3.5, brief constraint 5):** a hint naming a path or backticked identifier that appears neither in the evidence nor in the workspace is dropped.
+- **Exit codes:** `grep`/`rg`/`diff`/`test`/`which` exit 1 is an answer, not a failure (configurable `benignCommands`).
+- **Counting:** counts reset on a new user request, not on extension continuations, so supervisor continuations count as the same task.
+
+### D-044 — Compaction: summaries anchored in tracked facts · accepted (Phase 4; refines D-017)
+- **From tracked facts, verbatim** (research R4.1):
+  - every user request, oldest first;
+  - files modified, with git numstat;
+  - files only read;
+  - commands whose last run failed, with exit code and first error;
+  - commands that last succeeded, marked "no need to re-run".
+- **From the sidecar (JSON):** only the narrative: current work, next step, dead ends and key facts.
+  - On later compactions it updates the previous narrative rather than rewriting it (R4.2, anchored summaries).
+  - Critical priority; deadline 90 s; the newest 60k characters of the serialized span.
+- **Context:** the sidecar gets pi's own `serializeConversation(convertToLlm(span))` of the span being compacted, not D-017's `fork-prefix`.
+  - Summarization reads the whole span anyway.
+  - The compact form keeps the module harness-agnostic.
+  - Fork-prefix stays a later optimization if compaction latency matters.
+- **Fallback:**
+  - `harness` (default): pi's own compaction.
+  - `deterministic`: a facts-only summary.
+  - A 120 s host budget and pi's abort signal bound it.
+- **Hook:** `compact(request) → summary` returns `{compaction: {summary, firstKeptEntryId, tokensBefore, details.exo}}` from `session_before_compact`. Each summary is traced as `exo.compaction`.
+
+### D-045 — Phase 4 plan, acceptance and research survey · accepted (2026-10-04)
+- **Research:** `docs/RESEARCH.md` surveys the literature for every module, with evidence tags ([A]/[S]/[X]/[U]) and a table of conflicts with these decisions. Its Phase 4 recommendations shaped D-042 to D-044.
+- **Deferred research recommendations, still open:**
+  - Supervisor (R1.1–R1.6):
+    - a deterministic pre-verdict (a failing check means `incomplete` with no LLM call);
+    - per-criterion verdicts that cite evidence;
+    - claims extracted from the final message;
+    - test-tampering evidence;
+    - thinking on for the verdict.
+  - These change Phase 3 behavior, so they wait for the owner's Phase 3 A/B result, then get their own A/B.
+- **Acceptance (amends brief §8 Phase 4, per R2.4/R7.2):**
+  - **Trimmer:** fewer uncached main input tokens on the `noisy-output` slice, with no drop in success **and no rise in turns or wall-clock** beyond noise. Compression that saves tokens but causes re-reads is a regression.
+  - **Triage:** repeated-error rate on the `error-recovery` slice.
+  - **Compaction:** success on runs with at least one compaction (forced with a smaller context window).
+  - **Statistics:** slices of 3 tasks × 5 repeats can only show very large effects (R7.1). Report them as descriptive, pair runs by task, and grow slices toward 10 tasks.
+  - **Report:** with two or more configs, the summary has a "paired by task" section: mean Δ success with a seeded task-bootstrap 95% CI, an exact sign test, Δ turns/tokens/wall-clock, and the minimum detectable effect for the run count. `npm run eval -- --report <dir> --tags <slice>` re-renders any finished run, including the Phase 3 A/B.
+- **Eval configs:** `trimmer`, `trimmer-llm`, `triage`, `compaction`, `phase4`. A test checks every config is valid and names a known module.
+- **Branching (deviation from D-020):** Phase 4 work began on `claude/phase-4-context`, stacked on the Phase 3 branch, while the owner runs the Phase 3 A/B. It merges only after Phase 3 acceptance.
+
+---
+
+### D-046 — Supervisor research options, off until A/B'd · accepted (amends D-039 as options only)
+- **Context:** `docs/RESEARCH.md` §1 recommends moving the supervisor's decisions toward deterministic evidence: same-model self-verification is weak, and a false "complete" is the costly error. Changing the defaults before the Phase 3 baseline exists would leave nothing to compare against.
+- **Decision:** each recommendation is a setting. Defaults keep D-039's behavior exactly.
+
+| Setting | Research | Effect |
+|---|---|---|
+| `preVerdict` | R1.1 | A failing check command (run at settle, so after every edit) means `incomplete` with no LLM call. No diff, no untracked files and no writes means `uncertain`. |
+| `warningSignals` | R1.2 #4–#7 | Adds a "Warnings" section to the evidence: test files deleted, skip markers added, assertions removed, stub markers outside tests, success claims with no successful matching command after the last edit, and a last test run limited to a subset. |
+| `verdictStyle: "per-criterion"` | R1.4 | The judge rates each item met/unmet/unknown and must quote an evidence line. Code derives the verdict: any unmet → `incomplete`; all met with real quotes → `complete`; otherwise `uncertain`. A quote not found in the evidence counts as unknown. |
+| `finalMessage: "claims"` | R1.3 | The judge sees the final message's success claims, labelled unverified, plus its last 300 characters, instead of 1.5k characters of narrative. |
+| `completeVotes: k` | R1.5 | A `complete` verdict is re-asked k−1 times at temperature 0.7; any dissent means `uncertain`. Only `complete` is re-checked, because it is the costly error. |
+
+- **Not changed:** `thinking` keeps D-008's off default. `supervisor-think` A/Bs it (R1.6).
+- **Trace:** every `exo.verdict` records `source: deterministic | llm` and `votes`. The eval reports **precision of `complete`** (of runs whose last verdict was `complete`, the share whose hidden check passed) and **failures caught**, plus the deterministic-verdict count.
+- **Eval configs:** `supervisor-pre`, `supervisor-items`, `supervisor-votes`, `supervisor-think`, `supervisor-research` (all options on).
+- **Deferred:** ledger `source: explicit|implied` (R1.7), and the in-loop check (R1.8).
+
+### D-047 — Build ahead of GPU acceptance runs; gate merges and defaults, not work · accepted (amends D-020)
+- **Context:** The owner's GPU is often busy. D-020 starts a phase only after the previous phase's acceptance passes, which idles development for days.
+- **Decision:**
+  - Development continues on stacked branches while acceptance runs are pending.
+  - Everything new ships **off by default, or as an option** with an eval config, so one batch of A/B runs can settle several questions.
+  - What stays gated on evidence:
+    - **merging a phase to `main`**, and tagging it (D-022);
+    - **changing a default** (turning a module or option on by default).
+  - Each gated item names its eval command in DECISIONS.
+
+---
+
+### D-048 — Eval rigor: tamper guard, lucky passes, total cost · accepted
+- **Tamper guard (research R7.4):**
+  - After the agent stops and before the hidden overlay and the check, the fixture's original test files are restored (`isTestPath`, shared with the supervisor's warning signals). Editing, skipping or deleting tests can no longer make a run pass.
+  - The run records `tamperedTests`, and the report counts tampered runs per config. New test files the agent adds are kept.
+  - `protectTests: false` opts a task out when its prompt asks for test changes. `h-go-multi-package-config` is the only one: its hidden overlay supplies the updated tests.
+  - `--validate` now fails a fixture whose `solution.patch` edits protected tests. That is how it found this task.
+- **Lucky passes (R7.6):** a passing run counts as "lucky" when either:
+  - no test or build command succeeded after the last file edit; or
+  - one identical command failed 3+ times.
+
+  They are reported per config, because success alone hides reliability gaps.
+- **Cost (R7.3):** a *total tok* column (main input + cached + output + sidecar, per-run mean) shows what each config costs, to weigh against success.
+
+---
+
+### D-049 — Memory v1: verified pitfall cards, recalled into failing tool results · accepted (Phase 5; narrows brief §6.4 per research R5.1–R5.5)
+- **Context:** the research is cautious. A plain Qwen 3.6-27B agent matched memory, workflow and skill modules once token budgets were equal, and Dynamic Cheatsheet helped small models little because they self-judge poorly. So v1 is the highest-precision memory available.
+- **Admission (R5.1/R5.2):** a card is learned only from a *verified error→fix pair*:
+  - a verifying command (build, test or run) fails;
+  - the agent edits files;
+  - the *same* command then passes.
+
+  The pass is the external signal; the model's opinion of its work is never used. If the error changes before the command passes, the episode restarts.
+- **Content:**
+  - A background-priority sidecar phrases the lesson in 1–2 sentences from the error excerpt and the edits. It runs only while the main agent is idle (pool `backgroundWhenIdleOnly`), not in a separate sleep-time worker yet.
+  - The lesson passes the same guidance gate as triage hints: any name it uses must appear in the evidence or the workspace.
+  - Otherwise the card gets a deterministic summary of the edit.
+- **Store:** `~/.exocortex/memory.db` (SQLite with FTS5), separate from the trace.
+  - Cards are scoped by repo (D-018): origin remote URL, else the root commit's tree hash (stable across copies of a fixture), else the path.
+  - Only delta ops (R5.5): ADD, MERGE (same repo and signature: `seen++`, evidence appended), SUPERSEDE and RETIRE (set `valid_to`). Nothing is deleted or rewritten wholesale.
+- **Recall (hot path, no LLM):** a failing tool result's normalized error signature (D-016) is the key.
+  - **Search order:**
+    1. exact signature in this repo;
+    2. the same signature seen in 2+ other repos (D-018 global promotion);
+    3. an FTS5 keyword match on the error line, kept only when the card's trigger shares ≥60% of the error's keywords.
+  - **Injection:** at most 2 cards and ~400 tokens, appended as a tool-result rewrite after trimmer and triage. That is cache-safe (D-029); the brief had user-turn injection, but pitfalls belong next to the error. Each card is recalled at most once per task.
+- **Utility (R5.3):**
+  - **Helped:** the card's error did not recur in the task (credited at settle or on the next request).
+  - **Hurt:** the error recurred after the card was injected.
+  - **Retire:** when `hurt − helped ≥ 2` after 3+ injections.
+  - Recall ranks proven cards first.
+- **Eval:**
+  - Each memory config gets its own card store under the run dir.
+  - Repeats run in order, and the report's "Success by repeat" table shows the learning curve.
+  - Fixtures are separate repos, so this measures same-task replay: an upper bound (research §5c). Cross-task transfer needs sibling tasks in one repo, which is future fixture work.
+  - Configs: `memory`, `memory-triage`.
+- **Deferred:** `procedure`/`fact`/`preference` cards; user-turn retrieval; embeddings (D-026); a sleep-time curator.
+
+---
+
+### D-050 — Phase 6 starts small: verdict votes and diverse hypotheses for stuck loops · accepted (narrows D-015 per research R6.1–R6.3)
+- **Context:** the research found that best-of-N gains come from executable verification. Without it, a same-model judge picking a winner plateaus early and adds false positives.
+- **Decision:**
+  - **Verdict voting** is the supervisor's `completeVotes` option (D-046), capped at 5 (R6.3).
+  - **Diverse hypotheses** are triage's `hypotheses: k` option (off by default):
+    - **Trigger:** the loop threshold, once per error signature per task.
+    - **Calls:** k isolated sidecars run in parallel at temperature 0.8. Each gets a different diagnostic angle from `prompts/frames.v1.md`: the bug is elsewhere in the call path; a wrong API assumption; the environment or setup; a misread expectation; an earlier change.
+    - **Filtering:** each answer must name a check. Answers that fail the guidance gate are dropped, as are near-duplicates (word-set Jaccard > 0.6).
+    - **Output:** shown only when 2+ distinct hypotheses survive, as an unverified list. **No LLM picks a winner.**
+- **Not done:**
+  - D-015's fork-prefix context;
+  - recording contrasting candidates for memory;
+  - execution-based best-of-K. That would run only in the eval sandbox as a headroom study (R6.2).
+- **Eval:** `triage-hypotheses` vs `triage` on `error-recovery`.
+
+---
+
+### D-051 — Hard tier grown to 28 tasks, 7 per failure mode; uncalibrated until a GPU run · accepted (research R7.1)
+- **Context:** with 3 tasks per slice, a per-slice comparison could only detect differences of about 49 points (R7.1).
+- **Decision:**
+  - Each failure-mode slice now has 7 hard tasks: `spec-compliance`, `error-recovery`, `noisy-output` and `navigation`. One new task per language per slice.
+  - The 16 new tasks are tagged `uncalibrated`. Step 0 of `docs/AB_PLAN.md` calibrates them: keep tasks between 1/3 and 2/3, rework or drop the rest, then remove the tag.
+- **Quality bar:**
+  - every task passes `--validate` under the tamper guard (D-048);
+  - every hidden requirement is stated in the prompt or the repo's docs;
+  - the authors confirmed the hidden tests catch the obvious shortcuts (special-casing, `reserve()`, `Box::leak`, removing logging, silencing warnings, a single-registry split).
+- **Known gap:** `h-rust-template-lifetimes` would accept re-parsing on every render.
+- **Next:** sibling tasks that share one repo, for memory's cross-task transfer (D-049); long tasks for compaction.
+
+---
+
+### D-052 — Merge default-off work without waiting for A/B; tags and defaults stay gated · accepted (amends D-047, D-020, D-022; owner's call, 2026-10-04)
+- **Context:** the owner asked to merge and keep moving while GPU runs are pending.
+- **Decision:**
+  - Work that ships **off by default** merges to `main` once `npm run check` and CI are green.
+  - Two things still wait for their acceptance run in `docs/AB_PLAN.md`:
+    - **phase tags** (`phase-3`, `phase-4`, `phase-5`), D-022;
+    - **turning any module or option on by default.**
+- **Applied:** Phase 3 (#5) and the Phase 4/5/6 branch merge on this basis. Neither is tagged until its A/B passes.
+
+---
+
 ## Open questions (carried from brief §10, updated)
 
 1. ~~Resolved by D-029.~~ Exact pi mechanism for injecting into the current user turn without altering prior messages. *(Phase 0)*

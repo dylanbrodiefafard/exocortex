@@ -1,9 +1,9 @@
 #!/usr/bin/env node
-import { writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { renderMarkdown } from "./report.ts";
-import { runEval, validateTasks } from "./run.ts";
+import { type RunRecord, runEval, type ValidationResult, validateTasks } from "./run.ts";
 import { loadTasks, type Task } from "./task.ts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..", "..", "..");
@@ -23,6 +23,8 @@ Options:
   --out <dir>        Output root (default: eval-runs/)
   --keep-workdirs    Keep each run's workspace (under the OS temp dir) for inspection
   --validate         Check fixtures only: pristine must fail, solution.patch must pass
+  --report <dir>     Re-render <dir>/summary.md from a finished (or interrupted) run's results,
+                     optionally restricted with --tasks/--tags (e.g. one failure-mode slice)
   -h, --help`;
 
 type CliValues = ReturnType<typeof parseCli>;
@@ -40,6 +42,7 @@ function parseCli() {
 			out: { type: "string", default: join(REPO_ROOT, "eval-runs") },
 			"keep-workdirs": { type: "boolean", default: false },
 			validate: { type: "boolean", default: false },
+			report: { type: "string" },
 			help: { type: "boolean", short: "h", default: false },
 		},
 		allowPositionals: false,
@@ -57,6 +60,7 @@ async function main(): Promise<number> {
 		process.stderr.write("No tasks matched.\n");
 		return 2;
 	}
+	if (values.report) return report(resolve(values.report), tasks, values);
 	const stamp = new Date().toISOString().replace(/[:.]/g, "-");
 	const outRoot = resolve(values.out);
 	return values.validate
@@ -70,10 +74,14 @@ async function validate(tasks: readonly Task[], scratchDir: string): Promise<num
 		const solution =
 			r.solutionPasses === null ? "no solution.patch" : r.solutionPasses ? "solution passes" : "SOLUTION FAILS";
 		const pristine = r.pristineFails ? "pristine fails" : "PRISTINE PASSES";
-		const mark = r.pristineFails && r.solutionPasses !== false ? "✓" : "✗";
+		const mark = valid(r) ? "✓" : "✗";
 		process.stdout.write(`${mark} ${r.taskId}: ${pristine}, ${solution}${r.detail ? ` — ${r.detail}` : ""}\n`);
 	}
-	return results.every((r) => r.pristineFails && r.solutionPasses !== false) ? 0 : 1;
+	return results.every(valid) ? 0 : 1;
+}
+
+function valid(r: ValidationResult): boolean {
+	return r.pristineFails && r.solutionPasses !== false && !r.solutionEditsProtectedTests;
 }
 
 async function run(tasks: readonly Task[], values: CliValues, runDir: string, stamp: string): Promise<number> {
@@ -101,6 +109,32 @@ async function run(tasks: readonly Task[], values: CliValues, runDir: string, st
 	writeFileSync(join(runDir, "results.json"), JSON.stringify(records, null, 2));
 	writeFileSync(join(runDir, "summary.md"), markdown);
 	process.stdout.write(`\n${markdown}\nWrote ${join(runDir, "summary.md")}\n`);
+	return 0;
+}
+
+/** Rebuilds the summary from results.json, or results.jsonl when the run was interrupted. */
+function report(runDir: string, tasks: readonly Task[], values: CliValues): number {
+	const json = join(runDir, "results.json");
+	const jsonl = join(runDir, "results.jsonl");
+	const all: RunRecord[] = existsSync(json)
+		? (JSON.parse(readFileSync(json, "utf8")) as RunRecord[])
+		: existsSync(jsonl)
+			? readFileSync(jsonl, "utf8")
+					.split("\n")
+					.filter((line) => line.trim() !== "")
+					.map((line) => JSON.parse(line) as RunRecord)
+			: [];
+	const ids = new Set(tasks.map((t) => t.spec.id));
+	const records = all.filter((r) => ids.has(r.taskId));
+	if (records.length === 0) {
+		process.stderr.write(`No results for the selected tasks in ${runDir}\n`);
+		return 1;
+	}
+	const slice = values.tags || values.tasks ? ` · ${[values.tags, values.tasks].filter(Boolean).join(" · ")}` : "";
+	const markdown = renderMarkdown(records, `Eval ${runDir.split("/").at(-1) ?? runDir}${slice}`);
+	const name = slice ? `summary-${(values.tags ?? values.tasks ?? "slice").replace(/[^\w-]+/g, "_")}.md` : "summary.md";
+	writeFileSync(join(runDir, name), markdown);
+	process.stdout.write(`${markdown}\nWrote ${join(runDir, name)}\n`);
 	return 0;
 }
 

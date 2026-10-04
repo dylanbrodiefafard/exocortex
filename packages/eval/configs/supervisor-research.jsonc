@@ -1,0 +1,15 @@
+// Supervisor (suggest) with every research option on at once (R1.1–R1.5), to see the combined
+// effect before ablating with the single-option configs.
+{
+	"modules": {
+		"supervisor": {
+			"enabled": true,
+			"mode": "suggest",
+			"preVerdict": true,
+			"warningSignals": true,
+			"verdictStyle": "per-criterion",
+			"finalMessage": "claims",
+			"completeVotes": 3
+		}
+	}
+}

@@ -1,0 +1,7 @@
+// Supervisor (suggest) with sidecar thinking on (research R1.6 vs D-008's default). Watch verdict
+// latency as well as precision.
+{
+	"modules": {
+		"supervisor": { "enabled": true, "mode": "suggest", "thinking": true }
+	}
+}

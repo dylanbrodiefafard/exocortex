@@ -7,7 +7,7 @@ import { type ParseError, parse as parseJsonc } from "jsonc-parser";
 import { computeTraceMetrics, type TraceMetrics } from "./metrics.ts";
 import { PiRpcProcess, type RunOutcome } from "./pi-rpc.ts";
 import type { Task } from "./task.ts";
-import { applyHiddenOverlay, applyPatch, prepareWorkspace, runShell } from "./workspace.ts";
+import { applyHiddenOverlay, applyPatch, prepareWorkspace, restoreProtectedTests, runShell } from "./workspace.ts";
 
 export interface EvalOptions {
 	readonly tasks: readonly Task[];
@@ -43,6 +43,8 @@ export interface RunRecord {
 	readonly agentMs: number;
 	/** Supervisor (or other) editor suggestions the harness accepted on the user's behalf. */
 	readonly acceptedSuggestions: number;
+	/** Fixture test files the agent changed or deleted (restored before the check, D-048). */
+	readonly tamperedTests?: readonly string[];
 	readonly wallClockMs: number;
 	readonly metrics: TraceMetrics | null;
 	readonly error?: string;
@@ -151,9 +153,11 @@ async function runOne(
 	});
 	await pi.close();
 
+	const tamperedTests = task.spec.protectTests ? restoreProtectedTests(task, workdir) : [];
 	applyHiddenOverlay(task, workdir);
 	const check = await runShell(task.spec.check, workdir, task.spec.checkTimeoutSec * 1000);
 	writeFileSync(join(options.runDir, "logs", `${label}.check.log`), check.outputTail);
+	if (tamperedTests.length > 0) options.log?.(`  restored tests the agent changed: ${tamperedTests.join(", ")}`);
 	const metrics = readMetrics(dbPath, label);
 	if (options.keepWorkdirs) options.log?.(`  workspace kept: ${workdir}`);
 	else rmSync(workdir, { recursive: true, force: true });
@@ -166,6 +170,7 @@ async function runOne(
 		checkTimedOut: check.timedOut,
 		agentMs: agent.durationMs,
 		acceptedSuggestions: agent.acceptedSuggestions,
+		tamperedTests,
 		wallClockMs: Math.round(performance.now() - started),
 		metrics,
 		...(agent.error === undefined ? {} : { error: agent.error }),
@@ -199,11 +204,28 @@ function writeRunConfig(configsDir: string, name: string, runDir: string, dbPath
 	// Machine-specific settings (which engine, how many slots) come from the user's global config,
 	// so sidecars respect the real engine (D-038); the named config decides everything else.
 	const machine = machineSettings(runDir);
-	const merged = { ...machine, ...config, trace: { ...trace, enabled: true, dbPath } };
+	const merged = {
+		...machine,
+		...config,
+		trace: { ...trace, enabled: true, dbPath },
+		...isolatedMemory(config, runDir, name),
+	};
 	const out = join(runDir, "configs", `${name}.json`);
 	mkdirSync(dirname(out), { recursive: true });
 	writeFileSync(out, JSON.stringify(merged, null, 2));
 	return out;
+}
+
+/**
+ * Memory learns across runs of one config within an eval run (repeat 2 sees cards from repeat 1,
+ * brief §8 Phase 5), but never touches the user's real card store.
+ */
+function isolatedMemory(config: Record<string, unknown>, runDir: string, name: string): Record<string, unknown> {
+	const modules = config["modules"];
+	if (typeof modules !== "object" || modules === null) return {};
+	const memory = (modules as Record<string, unknown>)["memory"];
+	if (typeof memory !== "object" || memory === null || "dbPath" in memory) return {};
+	return { modules: { ...modules, memory: { ...memory, dbPath: join(runDir, `memory-${name}.db`) } } };
 }
 
 function machineSettings(cwd: string): Record<string, unknown> {
@@ -216,6 +238,8 @@ export interface ValidationResult {
 	readonly taskId: string;
 	readonly pristineFails: boolean;
 	readonly solutionPasses: boolean | null;
+	/** The reference solution changes test files the tamper guard protects: set `protectTests: false` or fix it. */
+	readonly solutionEditsProtectedTests: boolean;
 	readonly detail: string;
 }
 
@@ -235,10 +259,15 @@ export async function validateTasks(tasks: readonly Task[], scratchDir: string):
 		const pristine = await runShell(task.spec.check, pristineDir, task.spec.checkTimeoutSec * 1000);
 		if (pristine.exitCode === 0) detail += "check passes without any change; ";
 		let solutionPasses: boolean | null = null;
+		let solutionEditsProtectedTests = false;
 		if (task.solutionPatch) {
 			await prepareWorkspace(task, solvedDir);
 			await applyPatch(solvedDir, task.solutionPatch);
 			if (task.spec.setup) await runShell(task.spec.setup, solvedDir, task.spec.checkTimeoutSec * 1000);
+			// The reference solution must pass under the same tamper guard as the agent.
+			const edited = task.spec.protectTests ? restoreProtectedTests(task, solvedDir) : [];
+			solutionEditsProtectedTests = edited.length > 0;
+			if (solutionEditsProtectedTests) detail += `solution.patch edits protected tests (${edited.join(", ")}); `;
 			applyHiddenOverlay(task, solvedDir);
 			const solved = await runShell(task.spec.check, solvedDir, task.spec.checkTimeoutSec * 1000);
 			solutionPasses = solved.exitCode === 0;
@@ -248,6 +277,7 @@ export async function validateTasks(tasks: readonly Task[], scratchDir: string):
 			taskId: task.spec.id,
 			pristineFails: pristine.exitCode !== 0,
 			solutionPasses,
+			solutionEditsProtectedTests,
 			detail: detail.trim(),
 		});
 	}

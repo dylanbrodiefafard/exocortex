@@ -1,0 +1,108 @@
+diff --git a/docs/configuration.md b/docs/configuration.md
+index a618465..7354558 100644
+--- a/docs/configuration.md
++++ b/docs/configuration.md
+@@ -20,6 +20,7 @@ Relative directories are resolved against the folder containing `site.ini`.
+ | `build.date_format` | `%B %d, %Y` | Default format of the `date` filter (`strftime` syntax). |
+ | `build.posts_per_page` | `10` | Posts per index page. Positive integer. |
+ | `build.feed_items` | `20` | Posts in `feed.xml`. Positive integer. |
++| `build.excerpt_words` | `40` | Default length, in words, of the `excerpt` filter. Positive integer. |
+ | `build.drafts` | `no` | Include pages with `draft: true` (`yes`/`no`). |
+ 
+ ## Errors
+diff --git a/docs/filters.md b/docs/filters.md
+index 2a4ab81..36136fc 100644
+--- a/docs/filters.md
++++ b/docs/filters.md
+@@ -71,6 +71,14 @@ and `<style>` contents dropped, block elements (`<p>`, `<li>`, ...) separate
+ words, entities decoded, whitespace collapsed. The result is plain text and
+ is escaped on output.
+ 
++### `excerpt`
++`{{ post.content | excerpt }}` or `{{ post.content | excerpt:25 }}`: the
++first N words (N >= 1) of the text without HTML, for summaries. Without an
++argument N is `build.excerpt_words`. HTML is removed as by `striptags` and
++words are cut as by `truncatewords`. If the value contains `<!--more-->`,
++the excerpt is the text before the first marker, whatever its length, with
++no ` ...` suffix.
++
+ ### `absurl`
+ `{{ page.url | absurl }}`: absolute URL using `site.base_url`.
+ 
+diff --git a/examples/blog/templates/index.html b/examples/blog/templates/index.html
+index b76c3b2..5113d9d 100644
+--- a/examples/blog/templates/index.html
++++ b/examples/blog/templates/index.html
+@@ -7,7 +7,7 @@
+ <section>
+ <h2><a href="{{ post.url }}">{{ post.title }}</a></h2>
+ <p class="meta">{{ post.date | date }}</p>
+-<p>{{ post.content | striptags | truncatewords:20 }}</p>
++<p>{{ post.content | excerpt:20 }}</p>
+ </section>
+ {% empty %}
+ <p>No posts yet.</p>
+diff --git a/inkwell/config.py b/inkwell/config.py
+index 82b4c6c..bc901ea 100644
+--- a/inkwell/config.py
++++ b/inkwell/config.py
+@@ -25,6 +25,7 @@ DEFAULTS = {
+         "date_format": "%B %d, %Y",
+         "posts_per_page": "10",
+         "feed_items": "20",
++        "excerpt_words": "40",
+         "drafts": "no",
+     },
+ }
+@@ -45,6 +46,7 @@ class SiteConfig:
+     date_format: str
+     posts_per_page: int
+     feed_items: int
++    excerpt_words: int
+     drafts: bool
+     source: str = "site.ini"
+ 
+@@ -138,6 +140,7 @@ def parse_config(text, source="site.ini", root=Path(".")):
+         date_format=r.text("build", "date_format", required=True),
+         posts_per_page=r.positive_int("build", "posts_per_page"),
+         feed_items=r.positive_int("build", "feed_items"),
++        excerpt_words=r.positive_int("build", "excerpt_words"),
+         drafts=r.boolean("build", "drafts"),
+         source=source,
+     )
+diff --git a/inkwell/filters/html.py b/inkwell/filters/html.py
+index 3552aba..a10fc07 100644
+--- a/inkwell/filters/html.py
++++ b/inkwell/filters/html.py
+@@ -1,9 +1,10 @@
+ """HTML filters."""
+ 
+-from inkwell.filters.args import str_arg
++from inkwell.filters.args import int_arg, str_arg
+ from inkwell.filters.registry import register_filter
+ from inkwell.site.urls import absolute_url
+ from inkwell.text.html import Markup, escape, strip_tags
++from inkwell.text.words import truncate_words
+ 
+ 
+ @register_filter("escape")
+@@ -24,6 +25,19 @@ def striptags(value):
+     return strip_tags("" if value is None else value)
+ 
+ 
++MORE_MARKER = "<!--more-->"
++
++
++@register_filter("excerpt", args=(0, 1), needs_context=True)
++def excerpt(ctx, value, count=None):
++    """First N words of the text, without HTML."""
++    text = "" if value is None else str(value)
++    words = ctx.config.excerpt_words if count is None else int_arg("excerpt", count, minimum=1)
++    if MORE_MARKER in text:
++        return strip_tags(text.split(MORE_MARKER, 1)[0])
++    return truncate_words(strip_tags(text), words)
++
++
+ @register_filter("absurl", needs_context=True)
+ def absurl(ctx, value):
+     """Absolute URL of a site path, using [site] base_url."""

@@ -306,4 +306,41 @@ describe("pi CLI with the Exocortex extension", { timeout: 30_000 }, () => {
 		expect(run.code).toBe(0);
 		expect(run.stderr).toMatch(/Supervisor: off for this session/);
 	});
+
+	it("trimmer and triage rewrite noisy, repeated failures before the model sees them", async () => {
+		const noisy =
+			"for i in $(seq 1 400); do echo \"compiling unit-$i\"; done; echo 'src/x.c:3:1: error: boom'; " +
+			"seq 1 300 | sed 's/^/linking step /'; exit 2";
+		const run = await runPi(
+			[
+				{ kind: "tool_calls", calls: [{ name: "bash", arguments: { command: noisy } }] },
+				{ kind: "tool_calls", calls: [{ name: "bash", arguments: { command: noisy } }] },
+				{ kind: "text", text: "Giving up." },
+			],
+			{},
+			"build it",
+			{
+				exoConfig: {
+					modules: { trimmer: { enabled: true, minChars: 2000 }, triage: { enabled: true, sidecar: false } },
+				},
+			},
+		);
+		expect(run.code).toBe(0);
+		const toolMessages = (index: number) =>
+			((server?.requests[index] as { messages?: { role: string; content: unknown }[] } | undefined)?.messages ?? [])
+				.filter((m) => m.role === "tool")
+				.map((m) => (typeof m.content === "string" ? m.content : JSON.stringify(m.content)));
+		const [first] = toolMessages(1);
+		expect(first).toContain("src/x.c:3:1: error: boom");
+		expect(first).toMatch(/\[exo trimmer: showing \d+ of \d+ lines; full output: /);
+		// Trimming collapsed the noise, so the error is no longer buried: triage leaves it alone.
+		expect(first).not.toContain("exo triage");
+		const [firstAgain, second] = toolMessages(2);
+		expect(firstAgain).toBe(first); // earlier results are never touched (prompt cache)
+		expect(second).toContain("[exo triage: this failed again with the same error (src/x.c:3:1: error: boom)");
+		const rewrites = readTrace(run.dbPath).events.filter((e) => e.kind === "exo.rewrite");
+		expect(rewrites.map((e) => e.module)).toEqual(["trimmer", "trimmer", "triage"]);
+		const original = readTrace(run.dbPath).events.find((e) => e.kind === "tool.result");
+		expect(JSON.stringify(dataOf(original)["content"])).toContain("compiling unit-200");
+	});
 });

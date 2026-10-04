@@ -1,0 +1,284 @@
+diff --git a/semver/range.py b/semver/range.py
+index 6d09247..cb24b8b 100644
+--- a/semver/range.py
++++ b/semver/range.py
+@@ -2,23 +2,202 @@
+ 
+ from __future__ import annotations
+ 
+-from semver.version import Version
++import re
++
++from semver.version import InvalidVersion, Version
+ 
+ 
+ class InvalidRange(ValueError):
+     """Raised when a string is not a valid range."""
+ 
+ 
++_WILD = {"x", "X", "*"}
++_NUM_RE = re.compile(r"^(0|[1-9]\d*)$")
++_OP_RE = re.compile(r"^(<=|>=|<|>|=|~|\^)?(.*)$")
++
++
++class _Partial:
++    """A possibly partial version: parts is a list of 0-3 ints, plus prerelease."""
++
++    def __init__(self, parts, prerelease=()):
++        self.parts = parts
++        self.prerelease = tuple(prerelease)
++
++    @property
++    def full(self):
++        return len(self.parts) == 3
++
++    def floor(self):
++        p = self.parts + [0] * (3 - len(self.parts))
++        return Version(p[0], p[1], p[2], self.prerelease)
++
++    def next_group(self):
++        """The first version above the group this partial denotes (parts non-empty)."""
++        p = list(self.parts)
++        p[-1] += 1
++        p += [0] * (3 - len(p))
++        return Version(p[0], p[1], p[2])
++
++
++def _parse_partial(text):
++    if text == "":
++        raise InvalidRange("missing version")
++    if text[0] in "v=":
++        text = text[1:]
++        if text[:1] in ("v", "="):
++            raise InvalidRange("invalid version prefix")
++    if text in _WILD:
++        return _Partial([])
++    try:
++        v = Version.parse(text)
++    except InvalidVersion:
++        pass
++    else:
++        if text.strip() != text:
++            raise InvalidRange(f"invalid version {text!r}")
++        return _Partial([v.major, v.minor, v.patch], v.prerelease)
++    pieces = text.split(".")
++    if len(pieces) > 3:
++        raise InvalidRange(f"invalid version {text!r}")
++    parts = []
++    wild = False
++    for piece in pieces:
++        if piece in _WILD:
++            wild = True
++        elif _NUM_RE.match(piece) and not wild:
++            parts.append(int(piece))
++        else:
++            raise InvalidRange(f"invalid version {text!r}")
++    if len(parts) == 3:
++        raise InvalidRange(f"invalid version {text!r}")
++    return _Partial(parts)
++
++
++def _expand(op, p):
++    """Expand one comparator into a list of (op, Version) primitives."""
++    if op in ("", "="):
++        if p.full:
++            return [("=", p.floor())]
++        if not p.parts:
++            return []
++        return [(">=", p.floor()), ("<", p.next_group())]
++    if op == ">=":
++        return [(">=", p.floor())]
++    if op == "<":
++        return [("<", p.floor())]
++    if op == ">":
++        if p.full:
++            return [(">", p.floor())]
++        if not p.parts:
++            return [("<", Version(0, 0, 0))]
++        return [(">=", p.next_group())]
++    if op == "<=":
++        if p.full:
++            return [("<=", p.floor())]
++        if not p.parts:
++            return []
++        return [("<", p.next_group())]
++    if op == "~":
++        if not p.parts:
++            return []
++        if len(p.parts) == 1:
++            upper = Version(p.parts[0] + 1, 0, 0)
++        else:
++            upper = Version(p.parts[0], p.parts[1] + 1, 0)
++        return [(">=", p.floor()), ("<", upper)]
++    if op == "^":
++        if not p.parts:
++            return []
++        parts = p.parts
++        if parts[0] != 0 or len(parts) == 1:
++            upper = Version(parts[0] + 1, 0, 0)
++        elif len(parts) == 2 or parts[1] != 0:
++            upper = Version(0, parts[1] + 1, 0)
++        else:
++            upper = Version(0, 0, parts[2] + 1)
++        return [(">=", p.floor()), ("<", upper)]
++    raise InvalidRange(f"unknown operator {op!r}")
++
++
++def _parse_set(text):
++    tokens = text.split()
++    if not tokens:
++        raise InvalidRange("empty comparator set")
++    # Glue operators to a following version: ">= 1.2.3" -> ">=1.2.3".
++    glued = []
++    i = 0
++    while i < len(tokens):
++        tok = tokens[i]
++        if tok in ("<", "<=", ">", ">=", "=", "~", "^") and i + 1 < len(tokens) and tokens[i + 1] != "-":
++            glued.append(tok + tokens[i + 1])
++            i += 2
++        else:
++            glued.append(tok)
++            i += 1
++    comps = []
++    i = 0
++    while i < len(glued):
++        if i + 2 < len(glued) and glued[i + 1] == "-":
++            lo = _parse_partial(glued[i])
++            hi = _parse_partial(glued[i + 2])
++            comps.append((">=", lo.floor()))
++            if hi.full:
++                comps.append(("<=", hi.floor()))
++            elif hi.parts:
++                comps.append(("<", hi.next_group()))
++            i += 3
++            continue
++        tok = glued[i]
++        if tok == "-":
++            raise InvalidRange("dangling hyphen")
++        m = _OP_RE.match(tok)
++        op, rest = m.group(1) or "", m.group(2)
++        comps.extend(_expand(op, _parse_partial(rest)))
++        i += 1
++    return comps
++
++
++_TESTS = {
++    "=": lambda a, b: a == b,
++    "<": lambda a, b: a < b,
++    "<=": lambda a, b: a <= b,
++    ">": lambda a, b: a > b,
++    ">=": lambda a, b: a >= b,
++}
++
++
++def _set_matches(comps, v):
++    for op, bound in comps:
++        if not _TESTS[op](v, bound):
++            return False
++    if v.prerelease:
++        for _, bound in comps:
++            if bound.prerelease and (bound.major, bound.minor, bound.patch) == (v.major, v.minor, v.patch):
++                return True
++        return False
++    return True
++
++
+ class Range:
+     """A parsed version range."""
+ 
+     def __init__(self, text: str):
+         self.text = text
+-        raise NotImplementedError("Range")
++        if not isinstance(text, str):
++            raise InvalidRange(f"invalid range: {text!r}")
++        if text.strip() == "":
++            self._sets = [[]]
++            return
++        try:
++            self._sets = [_parse_set(alt) for alt in text.split("||")]
++        except InvalidRange as e:
++            raise InvalidRange(f"invalid range {text!r}: {e}") from None
+ 
+     def test(self, version: Version | str) -> bool:
+         """Whether ``version`` satisfies this range."""
+-        raise NotImplementedError("Range.test")
++        if not isinstance(version, Version):
++            version = Version.parse(version)
++        return any(_set_matches(s, version) for s in self._sets)
+ 
+ 
+ def satisfies(version: Version | str, range_text: str) -> bool:
+@@ -28,4 +207,14 @@ def satisfies(version: Version | str, range_text: str) -> bool:
+ 
+ def max_satisfying(versions, range_text: str) -> str | None:
+     """The highest of ``versions`` (strings) that satisfies ``range_text``."""
+-    raise NotImplementedError("max_satisfying")
++    rng = Range(range_text)
++    best = None
++    best_v = None
++    for text in versions:
++        try:
++            v = Version.parse(text)
++        except InvalidVersion:
++            continue
++        if rng.test(v) and (best_v is None or v > best_v):
++            best, best_v = text, v
++    return best
+diff --git a/semver/version.py b/semver/version.py
+index 4d24ad7..959fd7c 100644
+--- a/semver/version.py
++++ b/semver/version.py
+@@ -5,10 +5,13 @@ from __future__ import annotations
+ import re
+ from functools import total_ordering
+ 
++_NUM = r"(0|[1-9]\d*)"
++_PRE_ID = r"(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)"
++_BUILD_ID = r"[0-9A-Za-z-]+"
+ _VERSION_RE = re.compile(
+-    r"^(\d+)\.(\d+)\.(\d+)"
+-    r"(?:-([0-9A-Za-z.-]+))?"
+-    r"(?:\+([0-9A-Za-z.-]+))?$"
++    rf"^[v=]?{_NUM}\.{_NUM}\.{_NUM}"
++    rf"(?:-({_PRE_ID}(?:\.{_PRE_ID})*))?"
++    rf"(?:\+({_BUILD_ID}(?:\.{_BUILD_ID})*))?$"
+ )
+ 
+ 
+@@ -16,6 +19,18 @@ class InvalidVersion(ValueError):
+     """Raised when a string is not a valid semantic version."""
+ 
+ 
++def _pre_key(prerelease):
++    if not prerelease:
++        return (1,)
++    parts = []
++    for ident in prerelease:
++        if ident.isdigit():
++            parts.append((0, int(ident), ""))
++        else:
++            parts.append((1, 0, ident))
++    return (0, tuple(parts))
++
++
+ @total_ordering
+ class Version:
+     """A parsed semantic version: MAJOR.MINOR.PATCH[-PRERELEASE][+BUILD]."""
+@@ -31,6 +46,8 @@ class Version:
+ 
+     @classmethod
+     def parse(cls, text: str) -> Version:
++        if not isinstance(text, str):
++            raise InvalidVersion(f"invalid version: {text!r}")
+         m = _VERSION_RE.match(text.strip())
+         if not m:
+             raise InvalidVersion(f"invalid version: {text!r}")
+@@ -44,7 +61,7 @@ class Version:
+         )
+ 
+     def _key(self):
+-        return (self.major, self.minor, self.patch, self.prerelease, self.build)
++        return (self.major, self.minor, self.patch, _pre_key(self.prerelease))
+ 
+     def __eq__(self, other):
+         if not isinstance(other, Version):

@@ -1,0 +1,8 @@
+// Fact-anchored compaction summaries. Hard tasks rarely reach pi's compaction threshold: run with
+// a smaller context window (pi model `contextWindow`) to exercise it, and compare success on runs
+// with at least one compaction (research §4c).
+{
+	"modules": {
+		"compaction": { "enabled": true }
+	}
+}

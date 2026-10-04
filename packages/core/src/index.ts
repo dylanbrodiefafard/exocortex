@@ -35,16 +35,31 @@ export {
 export { completeStructured, extractJson, StructuredOutputError } from "./inference/structured.ts";
 export { type ToJsonOptions, toJsonValue } from "./json.ts";
 export { type CommandOutput, killGroup, runProcess, runShellCommand } from "./modules/command.ts";
+export {
+	classifyErrorLine,
+	cleanTerminalOutput,
+	type ErrorLineKind,
+	errorLineIndices,
+	errorSignature,
+	firstErrorLine,
+	isTestPath,
+	normalizeErrorLine,
+	ungroundedReferences,
+} from "./modules/output.ts";
 export { loadPrompt, type PromptTemplate, renderPrompt } from "./modules/prompts.ts";
 export type {
+	CompactionRequest,
 	ExoModule,
 	ModuleContext,
 	ModuleFactory,
 	SettleAction,
 	SettleInfo,
 	ToolOutcome,
+	ToolResultDraft,
+	ToolRewrite,
 	UserTurn,
 } from "./modules/types.ts";
+export { openDatabase } from "./trace/sqlite.ts";
 export {
 	type JsonValue,
 	openTraceStore,

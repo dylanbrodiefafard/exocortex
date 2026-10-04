@@ -25,6 +25,11 @@ const TaskSpecSchema = Type.Object(
 		timeoutSec: Type.Number({ minimum: 1, default: 900 }),
 		checkTimeoutSec: Type.Number({ minimum: 1, default: 300 }),
 		tags: Type.Array(Type.String(), { default: [] }),
+		/**
+		 * Restore the fixture's test files before the check (tamper guard, D-048). Turn off only for
+		 * tasks that ask the agent to change existing tests.
+		 */
+		protectTests: Type.Boolean({ default: true }),
 	},
 	{ additionalProperties: false },
 );
@@ -58,6 +63,8 @@ export function loadTasks(tasksDir: string, filters: readonly string[] = [], tag
 		// Directory name == task id (enforced below), so filter before reading anything: a
 		// half-written task elsewhere in tasks/ must not break a filtered run.
 		if (patterns.length > 0 && !patterns.some((p) => p.test(entry))) continue;
+		// Not a task (yet): a directory being authored has no task.json until it is ready.
+		if (!existsSync(join(dir, "task.json"))) continue;
 		const task = loadTask(dir);
 		if (task.spec.id !== entry) throw new Error(`${dir}: task id "${task.spec.id}" must match its directory name`);
 		const idMatches = patterns.length === 0 || patterns.some((p) => p.test(task.spec.id));

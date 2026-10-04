@@ -1,0 +1,172 @@
+diff --git a/src/lib.rs b/src/lib.rs
+index 7b02bd1..6127061 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -50,12 +50,15 @@ impl Table {
+ 
+     /// Sets the alignment of column `col`.
+     pub fn align(&mut self, col: usize, align: Align) -> &mut Self {
++        assert!(col < self.headers.len(), "column {col} out of range");
+         self.align[col] = Some(align);
+         self
+     }
+ 
+     /// Limits the display width of column `col`.
+     pub fn max_width(&mut self, col: usize, width: usize) -> &mut Self {
++        assert!(col < self.headers.len(), "column {col} out of range");
++        assert!(width >= 1, "max width must be at least 1");
+         self.max_width[col] = Some(width);
+         self
+     }
+@@ -75,19 +78,71 @@ impl Table {
+                 got: cells.len(),
+             });
+         }
+-        self.rows.push(cells.iter().map(|c| c.to_string()).collect());
++        let mut row: Vec<String> = cells.iter().map(|c| c.to_string()).collect();
++        row.resize(self.headers.len(), String::new());
++        self.rows.push(row);
+         Ok(())
+     }
+ 
++    fn cell_lines(&self, col: usize, text: &str) -> Vec<String> {
++        text.split('\n')
++            .map(|line| {
++                let line = line.trim_end_matches([' ', '\t', '\r']).replace('\t', " ");
++                match self.max_width[col] {
++                    Some(w) if line.chars().count() > w => {
++                        let mut cut: String = line.chars().take(w - 1).collect();
++                        cut.push('\u{2026}');
++                        cut
++                    }
++                    _ => line,
++                }
++            })
++            .collect()
++    }
++
++    fn column_align(&self, col: usize) -> Align {
++        if let Some(a) = self.align[col] {
++            return a;
++        }
++        let mut any = false;
++        for row in &self.rows {
++            let cell = row[col].trim_end_matches([' ', '\t', '\r']);
++            if cell.is_empty() {
++                continue;
++            }
++            if !is_number(cell) {
++                return Align::Left;
++            }
++            any = true;
++        }
++        if any {
++            Align::Right
++        } else {
++            Align::Left
++        }
++    }
++
+     /// Renders the table.
+     pub fn render(&self) -> String {
+         let n = self.headers.len();
+-        let mut widths: Vec<usize> = self.headers.iter().map(|h| h.len()).collect();
+-        for row in &self.rows {
+-            for (i, cell) in row.iter().enumerate() {
+-                widths[i] = widths[i].max(cell.len());
++        if n == 0 {
++            return String::new();
++        }
++        let header: Vec<Vec<String>> = (0..n).map(|i| self.cell_lines(i, &self.headers[i])).collect();
++        let body: Vec<Vec<Vec<String>>> = self
++            .rows
++            .iter()
++            .map(|row| (0..n).map(|i| self.cell_lines(i, &row[i])).collect())
++            .collect();
++        let mut widths = vec![1usize; n];
++        for row in std::iter::once(&header).chain(body.iter()) {
++            for (i, lines) in row.iter().enumerate() {
++                for l in lines {
++                    widths[i] = widths[i].max(l.chars().count());
++                }
+             }
+         }
++        let aligns: Vec<Align> = (0..n).map(|i| self.column_align(i)).collect();
+ 
+         let border = |fill: char| {
+             let mut s = String::from("+");
+@@ -98,35 +153,53 @@ impl Table {
+             s.push('\n');
+             s
+         };
+-        let line = |cells: &[String]| {
+-            let mut s = String::from("|");
+-            for i in 0..n {
+-                let cell = &cells[i];
+-                let pad = widths[i] - cell.len();
+-                s.push(' ');
+-                match self.align[i].unwrap_or(Align::Left) {
+-                    Align::Right => {
+-                        s.push_str(&" ".repeat(pad));
+-                        s.push_str(cell);
+-                    }
+-                    _ => {
+-                        s.push_str(cell);
+-                        s.push_str(&" ".repeat(pad));
+-                    }
++        let row_lines = |cells: &[Vec<String>], header: bool| {
++            let height = cells.iter().map(Vec::len).max().unwrap_or(1);
++            let mut s = String::new();
++            for li in 0..height {
++                s.push('|');
++                for i in 0..n {
++                    let text = cells[i].get(li).map(String::as_str).unwrap_or("");
++                    let pad = widths[i] - text.chars().count();
++                    let align = if header { Align::Center } else { aligns[i] };
++                    let (left, right) = match align {
++                        Align::Left => (0, pad),
++                        Align::Right => (pad, 0),
++                        Align::Center => (pad / 2, pad - pad / 2),
++                    };
++                    s.push(' ');
++                    s.push_str(&" ".repeat(left));
++                    s.push_str(text);
++                    s.push_str(&" ".repeat(right));
++                    s.push_str(" |");
+                 }
+-                s.push_str(" |");
++                s.push('\n');
+             }
+-            s.push('\n');
+             s
+         };
+ 
+         let mut out = border('-');
+-        out.push_str(&line(&self.headers));
+-        out.push_str(&border('='));
+-        for row in &self.rows {
+-            out.push_str(&line(row));
++        out.push_str(&row_lines(&header, true));
++        if !body.is_empty() {
++            out.push_str(&border('='));
++        }
++        for (ri, row) in body.iter().enumerate() {
++            if ri > 0 && self.separate_rows {
++                out.push_str(&border('-'));
++            }
++            out.push_str(&row_lines(row, false));
+         }
+         out.push_str(&border('-'));
+         out
+     }
+ }
++
++fn is_number(s: &str) -> bool {
++    let s = s.strip_prefix('-').unwrap_or(s);
++    let (int, frac) = match s.split_once('.') {
++        Some((i, f)) => (i, Some(f)),
++        None => (s, None),
++    };
++    let digits = |t: &str| !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit());
++    digits(int) && frac.map_or(true, digits)
++}

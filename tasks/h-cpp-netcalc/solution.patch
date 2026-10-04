@@ -1,0 +1,84 @@
+diff --git a/src/ipv4.cpp b/src/ipv4.cpp
+index e63f71a..131895c 100644
+--- a/src/ipv4.cpp
++++ b/src/ipv4.cpp
+@@ -1,6 +1,5 @@
+ #include "netcalc/ipv4.hpp"
+ 
+-#include <cstdlib>
+ #include <sstream>
+ 
+ namespace netcalc {
+@@ -11,13 +10,20 @@ bool parse_octet(std::string_view part, std::uint32_t& out) {
+     if (part.empty() || part.size() > 3) {
+         return false;
+     }
+-    const std::string digits(part);
+-    char* end = nullptr;
+-    const unsigned long v = std::strtoul(digits.c_str(), &end, 10);
+-    if (end == digits.c_str() || *end != '\0' || v > 255) {
++    if (part.size() > 1 && part[0] == '0') {
+         return false;
+     }
+-    out = static_cast<std::uint32_t>(v);
++    std::uint32_t v = 0;
++    for (char c : part) {
++        if (c < '0' || c > '9') {
++            return false;
++        }
++        v = v * 10 + static_cast<std::uint32_t>(c - '0');
++    }
++    if (v > 255) {
++        return false;
++    }
++    out = v;
+     return true;
+ }
+ 
+@@ -94,21 +100,21 @@ Ipv4 Prefix4::broadcast() const { return Ipv4{addr.value | ~mask()}; }
+ std::uint64_t Prefix4::size() const { return std::uint64_t{1} << (32 - len); }
+ 
+ std::uint64_t Prefix4::usable_hosts() const {
+-    if (len == 32) {
+-        return 1;
++    if (len >= 31) {
++        return size();
+     }
+     return size() - 2;
+ }
+ 
+ Ipv4 Prefix4::first_host() const {
+-    if (len == 32) {
++    if (len >= 31) {
+         return network();
+     }
+     return Ipv4{network().value + 1};
+ }
+ 
+ Ipv4 Prefix4::last_host() const {
+-    if (len == 32) {
++    if (len >= 31) {
+         return broadcast();
+     }
+     return Ipv4{broadcast().value - 1};
+diff --git a/src/ipv6.cpp b/src/ipv6.cpp
+index eed1d70..3e20af7 100644
+--- a/src/ipv6.cpp
++++ b/src/ipv6.cpp
+@@ -95,12 +95,15 @@ std::string Ipv6::str() const {
+         }
+         int j = i;
+         while (j < count && groups[static_cast<std::size_t>(j)] == 0) ++j;
+-        if (best_start < 0 && j - i >= 2) {
++        if (j - i > best_len) {
+             best_start = i;
+             best_len = j - i;
+         }
+         i = j;
+     }
++    if (best_len < 2) {
++        best_start = -1;
++    }
+     std::string out;
+     char buf[8];
+     for (int i = 0; i < count; ++i) {

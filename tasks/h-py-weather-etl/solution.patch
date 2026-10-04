@@ -1,0 +1,49 @@
+diff --git a/wxetl/pipeline.py b/wxetl/pipeline.py
+index 94cd7ad..fb9e0af 100644
+--- a/wxetl/pipeline.py
++++ b/wxetl/pipeline.py
+@@ -1,5 +1,6 @@
+ """Reads an observations file, validates every record and aggregates daily statistics."""
+ 
++import csv
+ import math
+ 
+ from wxetl.log import get_logger
+@@ -41,7 +42,7 @@ class _Day:
+ 
+ 
+ def _split(line):
+-    return line.split(",")
++    return next(csv.reader([line]))
+ 
+ 
+ def run(path):
+diff --git a/wxetl/records.py b/wxetl/records.py
+index 9eb4da4..cf883ee 100644
+--- a/wxetl/records.py
++++ b/wxetl/records.py
+@@ -38,7 +38,10 @@ class Observation:
+ def parse_timestamp(text):
+     if not _TIMESTAMP.fullmatch(text):
+         raise RecordError("timestamp", repr(text))
+-    t = datetime.strptime(text.replace("Z", "+00:00"), "%Y-%m-%dT%H:%M:%S%z")
++    try:
++        t = datetime.strptime(text.replace("Z", "+00:00"), "%Y-%m-%dT%H:%M:%S%z")
++    except ValueError:
++        raise RecordError("timestamp", repr(text)) from None
+     return t.astimezone(timezone.utc)
+ 
+ 
+@@ -72,8 +75,10 @@ def parse_record(fields):
+ 
+     wind_kph = None if wind == "" else _number("wind_kph", wind, 0.0)
+ 
+-    trace = False
+-    if precip == "":
++    trace = precip == "T"
++    if trace:
++        precip_mm = 0.0
++    elif precip == "":
+         precip_mm = None
+     else:
+         precip_mm = _number("precip_mm", precip, 0.0)
