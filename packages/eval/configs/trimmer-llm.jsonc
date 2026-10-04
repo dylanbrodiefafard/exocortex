@@ -1,0 +1,7 @@
+// Trimmer with sidecar line selection: the sidecar picks line ranges to keep, verbatim, when the
+// deterministic tier still leaves more than ~2k tokens. Compare against `trimmer`.
+{
+	"modules": {
+		"trimmer": { "enabled": true, "sidecar": true }
+	}
+}

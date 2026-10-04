@@ -97,6 +97,7 @@ describe("module host", () => {
 		);
 		await h.pi.emit("session_start", { reason: "startup" });
 		expect(h.runtime.moduleStatus()).toEqual(["a ok"]);
+		expect(h.runtime.moduleIds()).toEqual(["a", "b"]);
 		expect(a.context?.cwd).toBe(h.dir);
 		expect(b.context).toBeUndefined();
 	});

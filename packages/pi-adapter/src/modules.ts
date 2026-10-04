@@ -87,6 +87,7 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 	}
 	runtime.rebuildModules = build;
 	runtime.moduleStatus = () => modules.map((m) => m.status?.() ?? m.id);
+	runtime.moduleIds = () => Object.keys(factories);
 
 	function moduleContext(id: string): ModuleContext {
 		return {

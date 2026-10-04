@@ -472,6 +472,96 @@ Open check: Exocortex's injected `custom_message` reaches ninfer as a second con
 
 ---
 
+### D-040 — Test the adapter in-process; coverage ratchet in `npm run check`; trace inspector · accepted (Phase 4)
+- **Context:** The pi adapter only ran inside spawned pi processes, so its hooks were barely covered: 72% statements and 65% branches overall.
+- **Decision:**
+  - `packages/pi-adapter/test/fake-pi.ts`: a fake `ExtensionAPI` that records handlers and commands and emits events in registration order, the way pi composes them. The module host, sidecars, `/exo`, runtime, trace recorder and entrypoint are tested in-process. The real-pi integration tests stay.
+  - `npm test` runs vitest with v8 coverage. Thresholds sit just below the current numbers and only ever go up. CLI entrypoints (`cli.ts`, `*-cli.ts`) are excluded.
+  - `npm run trace -- sessions | show <id> | calls <id>` inspects the trace store: metrics header, event timeline, per-module sidecar totals, `--json`.
+- **Found by the new tests:** the module host's `textOf` emitted blank lines for non-text parts, so the supervisor's `lastAssistantText` started with a newline whenever the model thought first. Fixed on this branch. Phase 3 behavior is otherwise unchanged.
+
+### D-041 — Tool-result rewrites and shared output analysis · accepted (Phase 4; implements brief §5.4 `onToolResult` rewrites, D-029)
+- **Hook:** `rewriteToolResult(draft, signal) → {text, note} | undefined`.
+  - Modules run in `MODULES` order (trimmer, then triage), and each sees earlier rewrites in `draft.current`.
+  - Only text-only results are offered.
+  - One 20 s budget per tool result covers all modules, because a rewrite holds the agent loop. A module that ignores its signal is cut off.
+- **Pi mapping:**
+  - Return `content` and keep `structuredContent`; replacing content alone would drop it (PI_API_NOTES §4).
+  - Merge `details.exo.rewrites`, never replace `details`.
+  - The original output is already in the trace: the recorder's `tool.result` handler runs before the host's. Each rewrite adds an `exo.rewrite` event.
+- **Cache:** rewriting a new tool result changes only content the model has not seen yet, so the prefix is untouched (D-029).
+- **`core/modules/output.ts`:**
+  - terminal cleanup (ANSI, carriage-return redraws);
+  - per-ecosystem error grammars (Rust, Go, C/C++ and linkers, Python/pytest, TypeScript), split into toolchain-specific and generic matches with false-positive guards;
+  - normalized error signatures.
+  - One definition serves triage, compaction and the eval's repeated-error metric (D-016).
+
+### D-042 — Trimmer: deterministic first, extractive sidecar second · accepted (Phase 4; amends brief §6.2)
+- **Deterministic tier (always):** bash results over 8k characters (~2k tokens).
+  1. Clean terminal noise.
+  2. Collapse runs of lines that differ only in numbers.
+  3. Keep the head (40), the tail (80) and every error line ±3, verbatim. Specific errors win over generic ones, and the earliest windows are favored.
+  4. Cut lines over 400 characters.
+  5. Add a footer pointing at the full output: pi's `fullOutputPath`, else a copy the trimmer saves.
+- **Sidecar tier (opt-in, `sidecar: true`):** runs only when the deterministic result is still over 8k characters.
+  - The sidecar returns **line ranges, never prose**. Lines are copied verbatim, and the tail and the first specific error are always added.
+  - Any failure, invalid range or over-budget selection falls back to the deterministic result.
+  - Deadline 6 s, interactive priority.
+  - Brief §6.2 had the sidecar first. The research (R2.1/R2.2) found extractive, deterministic-first pruning safer for small models: identifiers can't be corrupted and timeouts cost nothing.
+- **Policy:**
+  - `read`, `edit` and `write` are never trimmed, whatever the config. Default `tools: ["bash"]`.
+  - No recall tool: the agent reads the saved file if it needs more.
+- **Not done:** batched retro-masking of old observations through `context_edit` (R2.3). It edits earlier context, so it needs an explicit exception to D-029, measured as a compaction-like cache reset. Deferred until Phase 4 numbers exist.
+
+### D-043 — Triage: gated on repetition · accepted (Phase 4; amends brief §6.3)
+- **Change from the brief:** the brief called the sidecar on every failing result. The main model already sees the raw error, and same-model explanations add little on a first failure (research R3.1). So:
+  - **First failure of a signature:** deterministic only. If the first error is buried more than 20 lines down, a `[exo triage: first error (line N): …]` line goes at the top.
+  - **Repeat (same normalized signature within the task):** a notice that *describes* the repeat instead of echoing the failed command (R3.3). From the second occurrence, an optional sidecar diagnosis of at most 2 sentences that must name a different action. At most 2 hints per signature; deadline 8 s.
+  - **Loop threshold (default 3):** a stronger, still advisory, warning. Tool calls are never blocked (D-010).
+- **Guidance gate (R3.5, brief constraint 5):** a hint naming a path or backticked identifier that appears neither in the evidence nor in the workspace is dropped.
+- **Exit codes:** `grep`/`rg`/`diff`/`test`/`which` exit 1 is an answer, not a failure (configurable `benignCommands`).
+- **Counting:** counts reset on a new user request, not on extension continuations, so supervisor continuations count as the same task.
+
+### D-044 — Compaction: summaries anchored in tracked facts · accepted (Phase 4; refines D-017)
+- **From tracked facts, verbatim** (research R4.1):
+  - every user request, oldest first;
+  - files modified, with git numstat;
+  - files only read;
+  - commands whose last run failed, with exit code and first error;
+  - commands that last succeeded, marked "no need to re-run".
+- **From the sidecar (JSON):** only the narrative: current work, next step, dead ends and key facts.
+  - On later compactions it updates the previous narrative rather than rewriting it (R4.2, anchored summaries).
+  - Critical priority; deadline 90 s; the newest 60k characters of the serialized span.
+- **Context:** the sidecar gets pi's own `serializeConversation(convertToLlm(span))` of the span being compacted, not D-017's `fork-prefix`.
+  - Summarization reads the whole span anyway.
+  - The compact form keeps the module harness-agnostic.
+  - Fork-prefix stays a later optimization if compaction latency matters.
+- **Fallback:**
+  - `harness` (default): pi's own compaction.
+  - `deterministic`: a facts-only summary.
+  - A 120 s host budget and pi's abort signal bound it.
+- **Hook:** `compact(request) → summary` returns `{compaction: {summary, firstKeptEntryId, tokensBefore, details.exo}}` from `session_before_compact`. Each summary is traced as `exo.compaction`.
+
+### D-045 — Phase 4 plan, acceptance and research survey · accepted (2026-10-04)
+- **Research:** `docs/RESEARCH.md` surveys the literature for every module, with evidence tags ([A]/[S]/[X]/[U]) and a table of conflicts with these decisions. Its Phase 4 recommendations shaped D-042 to D-044.
+- **Deferred research recommendations, still open:**
+  - Supervisor (R1.1–R1.6):
+    - a deterministic pre-verdict (a failing check means `incomplete` with no LLM call);
+    - per-criterion verdicts that cite evidence;
+    - claims extracted from the final message;
+    - test-tampering evidence;
+    - thinking on for the verdict.
+  - These change Phase 3 behavior, so they wait for the owner's Phase 3 A/B result, then get their own A/B.
+- **Acceptance (amends brief §8 Phase 4, per R2.4/R7.2):**
+  - **Trimmer:** fewer uncached main input tokens on the `noisy-output` slice, with no drop in success **and no rise in turns or wall-clock** beyond noise. Compression that saves tokens but causes re-reads is a regression.
+  - **Triage:** repeated-error rate on the `error-recovery` slice.
+  - **Compaction:** success on runs with at least one compaction (forced with a smaller context window).
+  - **Statistics:** slices of 3 tasks × 5 repeats can only show very large effects (R7.1). Report them as descriptive, pair runs by task, and grow slices toward 10 tasks.
+- **Eval configs:** `trimmer`, `trimmer-llm`, `triage`, `compaction`, `phase4`. A test checks every config is valid and names a known module.
+- **Branching (deviation from D-020):** Phase 4 work began on `claude/phase-4-context`, stacked on the Phase 3 branch, while the owner runs the Phase 3 A/B. It merges only after Phase 3 acceptance.
+
+---
+
 ## Open questions (carried from brief §10, updated)
 
 1. ~~Resolved by D-029.~~ Exact pi mechanism for injecting into the current user turn without altering prior messages. *(Phase 0)*

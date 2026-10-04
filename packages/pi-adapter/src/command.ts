@@ -3,20 +3,26 @@ import type { Runtime } from "./runtime.ts";
 
 const PING_TIMEOUT_MS = 30_000;
 
-const SUBCOMMANDS = ["status", "ping", "on", "off", "supervisor"];
+const COMMANDS = ["status", "ping", "on", "off"];
+/** Modes some modules accept besides on/off. */
+const MODULE_MODES: Readonly<Record<string, readonly string[]>> = { supervisor: ["suggest", "auto"] };
 
 /**
  * `/exo` slash command:
  * - `/exo` or `/exo status`: config state, modules and sidecar pool statistics;
  * - `/exo ping`: one tiny sidecar call, to check the sidecar engine is reachable;
  * - `/exo off` / `/exo on`: kill switch for every module (brief §5.3), this session only;
- * - `/exo supervisor on|off|suggest|auto`: toggle the supervisor or switch its mode.
+ * - `/exo <module> on|off`: toggle one module, e.g. `/exo trimmer on`;
+ * - `/exo supervisor suggest|auto`: also switch the supervisor's mode.
  */
 export function registerExoCommand(pi: ExtensionAPI, runtime: Runtime): void {
+	const subcommands = () => [...COMMANDS, ...runtime.moduleIds()];
 	pi.registerCommand("exo", {
-		description: "Exocortex: status | ping | on | off | supervisor on|off|suggest|auto",
+		description: "Exocortex: status | ping | on | off | <module> on|off | supervisor suggest|auto",
 		getArgumentCompletions: (prefix) =>
-			SUBCOMMANDS.filter((name) => name.startsWith(prefix.trim())).map((name) => ({ value: name, label: name })),
+			subcommands()
+				.filter((name) => name.startsWith(prefix.trim()))
+				.map((name) => ({ value: name, label: name })),
 		handler: async (args, ctx) => {
 			try {
 				const [sub = "status", arg] = args.trim().split(/\s+/).filter(Boolean);
@@ -26,8 +32,8 @@ export function registerExoCommand(pi: ExtensionAPI, runtime: Runtime): void {
 					runtime.overrides.allOff = sub === "off";
 					runtime.rebuildModules();
 					say(ctx, `Exocortex modules ${sub === "off" ? "off" : "back on"} for this session.`);
-				} else if (sub === "supervisor") toggleSupervisor(runtime, ctx, arg);
-				else say(ctx, `Unknown /exo subcommand "${sub}". Try: ${SUBCOMMANDS.join(", ")}`, "warning");
+				} else if (runtime.moduleIds().includes(sub)) toggleModule(runtime, ctx, sub, arg);
+				else say(ctx, `Unknown /exo subcommand "${sub}". Try: ${subcommands().join(", ")}`, "warning");
 			} catch (error) {
 				say(ctx, `/exo failed: ${String(error)}`, "error");
 			}
@@ -35,22 +41,22 @@ export function registerExoCommand(pi: ExtensionAPI, runtime: Runtime): void {
 	});
 }
 
-function toggleSupervisor(runtime: Runtime, ctx: ExtensionCommandContext, arg: string | undefined): void {
-	const override = runtime.overrides.modules["supervisor"] ?? {};
-	runtime.overrides.modules["supervisor"] = override;
+function toggleModule(runtime: Runtime, ctx: ExtensionCommandContext, id: string, arg: string | undefined): void {
+	const modes = MODULE_MODES[id] ?? [];
+	const override = runtime.overrides.modules[id] ?? {};
+	runtime.overrides.modules[id] = override;
 	if (arg === "on" || arg === "off") override["enabled"] = arg === "on";
-	else if (arg === "suggest" || arg === "auto") {
+	else if (arg !== undefined && modes.includes(arg)) {
 		override["enabled"] = true;
 		override["mode"] = arg;
 	} else {
-		say(ctx, "Usage: /exo supervisor on|off|suggest|auto", "warning");
+		say(ctx, `Usage: /exo ${id} ${["on", "off", ...modes].join("|")}`, "warning");
 		return;
 	}
 	runtime.rebuildModules();
-	say(
-		ctx,
-		`Supervisor: ${override["enabled"] ? `on (${String(override["mode"] ?? "configured mode")})` : "off"} for this session.`,
-	);
+	const name = id.charAt(0).toUpperCase() + id.slice(1);
+	const mode = modes.length > 0 ? ` (${String(override["mode"] ?? "configured mode")})` : "";
+	say(ctx, `${name}: ${override["enabled"] ? `on${mode}` : "off"} for this session.`);
 }
 
 function status(runtime: Runtime): string {

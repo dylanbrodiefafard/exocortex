@@ -33,7 +33,7 @@
 	},
 
 	// Modules are off unless enabled here. Every module also takes "maxCallsPerTurn" (default 4)
-	// and "maxTokensPerCall" (default 1024). Toggle live in pi with /exo on|off and /exo supervisor ….
+	// and "maxTokensPerCall" (default 1024). Toggle live in pi with /exo on|off and /exo <module> on|off.
 	"modules": {
 		"supervisor": {
 			"enabled": false,
@@ -43,6 +43,29 @@
 			"runPromptChecks": true, // also run commands quoted verbatim in your request
 			"checkTimeoutMs": 120000,
 			"thinking": false // sidecar reasoning for the ledger/verdict calls
+		},
+		"trimmer": {
+			"enabled": false,
+			"tools": ["bash"], // tools whose results may be trimmed (read/edit/write never are)
+			"minChars": 8000, // shorter results are left alone (~4 chars per token)
+			"headLines": 40,
+			"tailLines": 80,
+			"contextLines": 3, // kept around each error line
+			"sidecar": false, // let a sidecar pick the lines to keep (verbatim) for still-long outputs
+			"sidecarTimeoutMs": 6000 // it holds the agent loop; on timeout the deterministic result is used
+		},
+		"triage": {
+			"enabled": false,
+			"sidecar": true, // a two-sentence hint when the same failure repeats (never on the first)
+			"loopThreshold": 3, // repeats before the stronger "this approach is not working" warning
+			"hintTimeoutMs": 8000,
+			"benignCommands": ["grep", "egrep", "fgrep", "rg", "ag", "diff", "cmp", "test", "[", "which", "pgrep", "git diff"] // exit 1 = an answer
+		},
+		"compaction": {
+			"enabled": false,
+			"fallback": "harness", // without a sidecar summary: "harness" (pi's own) or "deterministic"
+			"timeoutMs": 90000,
+			"maxConversationChars": 60000 // newest part of the compacted span sent to the sidecar
 		}
 	}
 }

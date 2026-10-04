@@ -11,6 +11,7 @@ afterEach(() => {
 
 function setup(config: Record<string, unknown> = {}, options: { hasUI?: boolean } = {}) {
 	harness = createAdapterHarness(config, options);
+	harness.runtime.moduleIds = () => ["trimmer", "supervisor"];
 	registerExoCommand(harness.pi.api, harness.runtime);
 	return harness;
 }
@@ -81,6 +82,17 @@ describe("/exo", () => {
 		expect(notices(h).at(-1)).toEqual(["Usage: /exo supervisor on|off|suggest|auto", "warning"]);
 	});
 
+	it("toggles any hosted module on and off", async () => {
+		const h = setup();
+		await h.pi.command("exo", "trimmer on");
+		expect(h.runtime.overrides.modules["trimmer"]).toEqual({ enabled: true });
+		expect(notices(h).at(-1)?.[0]).toBe("Trimmer: on for this session.");
+		await h.pi.command("exo", "trimmer auto");
+		expect(notices(h).at(-1)).toEqual(["Usage: /exo trimmer on|off", "warning"]);
+		await h.pi.command("exo", "trimmer off");
+		expect(notices(h).at(-1)?.[0]).toBe("Trimmer: off for this session.");
+	});
+
 	it("warns on unknown subcommands and reports handler failures", async () => {
 		const h = setup();
 		await h.pi.command("exo", "frobnicate");
@@ -99,6 +111,7 @@ describe("/exo", () => {
 			{ value: "status", label: "status" },
 			{ value: "supervisor", label: "supervisor" },
 		]);
+		expect(complete?.("t")).toEqual([{ value: "trimmer", label: "trimmer" }]);
 	});
 
 	it("prints to stderr without a UI", async () => {
