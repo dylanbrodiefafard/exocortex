@@ -25,6 +25,8 @@ export interface ModuleHostOptions {
 	readonly runtime: Runtime;
 	readonly onError: (where: string, error: unknown) => void;
 	readonly log: (message: string) => void;
+	/** Module factories by config id; defaults to every module Exocortex ships. */
+	readonly modules?: Readonly<Record<string, ModuleFactory>>;
 }
 
 /**
@@ -37,6 +39,7 @@ export interface ModuleHostOptions {
  */
 export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions): void {
 	const { runtime, onError } = options;
+	const factories = options.modules ?? MODULES;
 	let modules: ExoModule[] = [];
 	let cwd = process.cwd();
 
@@ -44,7 +47,7 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 		modules = [];
 		const config = runtime.config;
 		if (!config?.enabled || runtime.overrides.allOff) return;
-		for (const [id, factory] of Object.entries(MODULES)) {
+		for (const [id, factory] of Object.entries(factories)) {
 			const settings = { ...config.modules[id], ...runtime.overrides.modules[id] };
 			if (settings.enabled !== true) continue;
 			try {
@@ -199,11 +202,10 @@ function textOf(content: unknown): string {
 	if (typeof content === "string") return content;
 	if (!Array.isArray(content)) return "";
 	return content
-		.map((part: unknown) =>
-			typeof part === "object" && part !== null && (part as { type?: unknown }).type === "text"
-				? String((part as { text?: unknown }).text ?? "")
-				: "",
+		.filter(
+			(part: unknown) => typeof part === "object" && part !== null && (part as { type?: unknown }).type === "text",
 		)
+		.map((part: { text?: unknown }) => String(part.text ?? ""))
 		.join("\n");
 }
 
