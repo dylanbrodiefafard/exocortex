@@ -37,6 +37,23 @@ export interface ToolOutcome {
 	readonly output: string;
 }
 
+/** A tool result offered to modules for rewriting, before the main model sees it. */
+export interface ToolResultDraft extends ToolOutcome {
+	readonly toolCallId: string;
+	/** The text so far: the original output, or an earlier module's rewrite of it. */
+	readonly current: string;
+	/** Where the harness saved the untruncated output, if it did. */
+	readonly fullOutputPath: string | null;
+}
+
+/** A module's replacement for a tool result's text. */
+export interface ToolRewrite {
+	/** The new text the main model sees (replaces {@link ToolResultDraft.current}). */
+	readonly text: string;
+	/** Short description for the trace and status, e.g. "trimmed 1200→140 lines". */
+	readonly note: string;
+}
+
 /** The main agent has stopped and is about to hand control back to the user. */
 export interface SettleInfo {
 	readonly outcome: "completed" | "aborted" | "error";
@@ -60,6 +77,12 @@ export interface ExoModule {
 	readonly id: string;
 	onUserTurn?(turn: UserTurn): void;
 	onToolResult?(tool: ToolOutcome): void;
+	/**
+	 * Rewrites a tool result before it enters the context (D-029: cache-safe, it is new content).
+	 * Awaited within a short budget, since it holds the agent loop; modules run in order, each
+	 * seeing earlier rewrites in `current`.
+	 */
+	rewriteToolResult?(draft: ToolResultDraft, signal: AbortSignal): Promise<ToolRewrite | undefined>;
 	/** Awaited by the harness before it settles, within a time budget. */
 	onSettle?(info: SettleInfo, signal: AbortSignal): Promise<SettleAction | undefined>;
 	/** Short status for `/exo status` and the status line. */

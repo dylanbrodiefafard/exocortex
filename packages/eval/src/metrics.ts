@@ -1,5 +1,6 @@
 import {
 	type ChatRequestFingerprint,
+	errorSignature as coreErrorSignature,
 	type SidecarCallRecord,
 	type StoredTraceEvent,
 	sharedPrefix,
@@ -117,25 +118,10 @@ function countVerdicts(events: readonly StoredTraceEvent[]): TraceMetrics["verdi
 	return counts;
 }
 
-/**
- * Deterministic error signature: tool name + exit code + the first error-looking output line,
- * with numbers, hex ids, quoted strings and paths normalized away so the "same" error matches
- * across attempts.
- */
+/** The trace form of core's {@link coreErrorSignature}: one signature per tool.result event. */
 export function errorSignature(toolResult: Readonly<Record<string, unknown>>): string {
-	const text = contentText(toolResult["content"]);
-	const lines = text.split("\n").map((l) => l.trim());
-	const line =
-		lines.find((l) => /error|exception|panic|fail|traceback|undefined|cannot|not found/i.test(l)) ??
-		lines.find((l) => l !== "") ??
-		"";
-	const normalized = line
-		.replace(/(["'`]).*?\1/g, "<str>")
-		.replace(/(?:\.{0,2}\/)?(?:[\w.-]+\/)+[\w.-]+/g, "<path>")
-		.replace(/0x[0-9a-f]+/gi, "<hex>")
-		.replace(/\d+/g, "<n>")
-		.slice(0, 200);
-	return `${String(toolResult["toolName"])}|${String(toolResult["exitCode"] ?? "")}|${normalized}`;
+	const exitCode = typeof toolResult["exitCode"] === "number" ? toolResult["exitCode"] : null;
+	return coreErrorSignature(String(toolResult["toolName"]), exitCode, contentText(toolResult["content"]));
 }
 
 function contentText(content: unknown): string {

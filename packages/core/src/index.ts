@@ -35,6 +35,15 @@ export {
 export { completeStructured, extractJson, StructuredOutputError } from "./inference/structured.ts";
 export { type ToJsonOptions, toJsonValue } from "./json.ts";
 export { type CommandOutput, killGroup, runProcess, runShellCommand } from "./modules/command.ts";
+export {
+	classifyErrorLine,
+	cleanTerminalOutput,
+	type ErrorLineKind,
+	errorLineIndices,
+	errorSignature,
+	firstErrorLine,
+	normalizeErrorLine,
+} from "./modules/output.ts";
 export { loadPrompt, type PromptTemplate, renderPrompt } from "./modules/prompts.ts";
 export type {
 	ExoModule,
@@ -43,6 +52,8 @@ export type {
 	SettleAction,
 	SettleInfo,
 	ToolOutcome,
+	ToolResultDraft,
+	ToolRewrite,
 	UserTurn,
 } from "./modules/types.ts";
 export {

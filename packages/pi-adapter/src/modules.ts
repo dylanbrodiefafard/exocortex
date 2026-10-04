@@ -1,4 +1,9 @@
-import type { AgentBeforeSettleEvent, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type {
+	AgentBeforeSettleEvent,
+	ExtensionAPI,
+	ExtensionContext,
+	ToolResultEvent,
+} from "@earendil-works/pi-coding-agent";
 import {
 	type ExoModule,
 	type JsonValue,
@@ -6,6 +11,9 @@ import {
 	type ModuleFactory,
 	runShellCommand,
 	type SettleAction,
+	type ToolOutcome,
+	type ToolResultDraft,
+	type ToolRewrite,
 	toJsonValue,
 } from "@exocortex/core";
 import { createSupervisor, SUPERVISOR_ID } from "@exocortex/mod-supervisor";
@@ -19,6 +27,8 @@ const MODULES: Readonly<Record<string, ModuleFactory>> = {
 
 /** Hard cap on how long settle hooks may hold pi before it settles (checks + verdict). */
 const SETTLE_BUDGET_MS = 5 * 60_000;
+/** Hard cap on how long tool-result rewrites may hold the agent loop, across all modules. */
+const REWRITE_BUDGET_MS = 20_000;
 const STATUS_KEY = "exo";
 
 export interface ModuleHostOptions {
@@ -27,6 +37,8 @@ export interface ModuleHostOptions {
 	readonly log: (message: string) => void;
 	/** Module factories by config id; defaults to every module Exocortex ships. */
 	readonly modules?: Readonly<Record<string, ModuleFactory>>;
+	/** Overrides the hold-the-loop budgets (tests). */
+	readonly budgetsMs?: { readonly rewrite?: number; readonly settle?: number };
 }
 
 /**
@@ -40,6 +52,8 @@ export interface ModuleHostOptions {
 export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions): void {
 	const { runtime, onError } = options;
 	const factories = options.modules ?? MODULES;
+	const rewriteBudgetMs = options.budgetsMs?.rewrite ?? REWRITE_BUDGET_MS;
+	const settleBudgetMs = options.budgetsMs?.settle ?? SETTLE_BUDGET_MS;
 	let modules: ExoModule[] = [];
 	let cwd = process.cwd();
 
@@ -98,17 +112,21 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 		return undefined;
 	});
 
-	pi.on("tool_result", (event) => {
-		each("onToolResult", (m) =>
-			m.onToolResult?.({
-				toolName: event.toolName,
-				input: toObject(event.input),
-				isError: event.isError,
-				exitCode: exitCodeOf(event.structuredContent),
-				output: textOf(event.content),
-			}),
-		);
-		return undefined;
+	pi.on("tool_result", async (event) => {
+		const outcome: ToolOutcome = {
+			toolName: event.toolName,
+			input: toObject(event.input),
+			isError: event.isError,
+			exitCode: exitCodeOf(event.structuredContent),
+			output: textOf(event.content),
+		};
+		each("onToolResult", (m) => m.onToolResult?.(outcome));
+		try {
+			return await rewrite(event, outcome);
+		} catch (error) {
+			onError("modules.tool_result", error);
+			return undefined;
+		}
 	});
 
 	pi.on("agent_before_settle", async (event, ctx) => {
@@ -125,12 +143,60 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 		return undefined;
 	});
 
+	/**
+	 * Lets modules rewrite a text-only tool result in turn. The original stays in the trace (the
+	 * recorder's `tool.result` runs first); each rewrite is traced as `exo.rewrite` and noted in
+	 * merged `details.exo.rewrites` (D-029).
+	 */
+	async function rewrite(event: ToolResultEvent, outcome: ToolOutcome) {
+		const rewriters = modules.filter((m) => m.rewriteToolResult);
+		if (rewriters.length === 0 || !event.content.every((part) => part.type === "text")) return undefined;
+		const controller = new AbortController();
+		const budget = setTimeout(() => controller.abort(), rewriteBudgetMs);
+		const draft = {
+			...outcome,
+			toolCallId: event.toolCallId,
+			current: outcome.output,
+			fullOutputPath: fullOutputPathOf(event.details, event.structuredContent),
+		};
+		try {
+			const { text, notes } = await applyRewrites(rewriters, draft, controller.signal);
+			return notes.length === 0 ? undefined : rewrittenResult(event, text, notes);
+		} finally {
+			clearTimeout(budget);
+		}
+	}
+
+	async function applyRewrites(rewriters: readonly ExoModule[], draft: ToolResultDraft, signal: AbortSignal) {
+		const notes: RewriteNote[] = [];
+		let current = draft.current;
+		for (const module of rewriters) {
+			if (signal.aborted) break;
+			const result = await untilAborted(module.rewriteToolResult?.({ ...draft, current }, signal), signal).catch(
+				(error: unknown) => {
+					onError(`${module.id}.rewriteToolResult`, error);
+					return undefined;
+				},
+			);
+			if (!result || result.text === current) continue;
+			current = result.text;
+			notes.push({ module: module.id, note: result.note });
+			runtime.traceSession?.append({
+				kind: "exo.rewrite",
+				synthetic: true,
+				module: module.id,
+				data: { toolCallId: draft.toolCallId, note: result.note, chars: result.text.length },
+			});
+		}
+		return { text: current, notes };
+	}
+
 	async function settle(event: AgentBeforeSettleEvent, ctx: ExtensionContext) {
 		const settling = modules.filter((m) => m.onSettle);
 		if (settling.length === 0) return undefined;
 		const info = { outcome: event.outcome, lastAssistantText: lastAssistantText(event) };
 		const controller = new AbortController();
-		const budget = setTimeout(() => controller.abort(), SETTLE_BUDGET_MS);
+		const budget = setTimeout(() => controller.abort(), settleBudgetMs);
 		if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, "exo: checking the work…");
 		try {
 			for (const module of settling) {
@@ -216,4 +282,46 @@ function toObject(value: unknown): { readonly [key: string]: JsonValue } {
 
 function isJsonObject(value: JsonValue): value is { readonly [key: string]: JsonValue } {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+interface RewriteNote {
+	readonly module: string;
+	readonly note: string;
+}
+
+/** The pi `tool_result` patch for rewritten text: merged `details.exo`, structuredContent kept. */
+function rewrittenResult(event: ToolResultEvent, text: string, notes: readonly RewriteNote[]) {
+	const details = isRecord(event.details) ? event.details : {};
+	const exo = isRecord(details["exo"]) ? details["exo"] : {};
+	return {
+		content: [{ type: "text" as const, text }],
+		details: { ...details, exo: { ...exo, rewrites: notes } },
+		// Replacing content without structuredContent would drop it (PI_API_NOTES §4).
+		...(event.structuredContent === undefined ? {} : { structuredContent: event.structuredContent }),
+	};
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Bash reports where it saved untruncated output in `details` and `structuredContent`. */
+function fullOutputPathOf(details: unknown, structured: unknown): string | null {
+	const fromDetails = isRecord(details) ? details["fullOutputPath"] : undefined;
+	const fromStructured = isRecord(structured) ? structured["full_output_path"] : undefined;
+	const path = fromDetails ?? fromStructured;
+	return typeof path === "string" && path !== "" ? path : null;
+}
+
+/** Resolves with `promise`, or with undefined once `signal` aborts (a module that ignores its signal cannot hold pi). */
+function untilAborted(
+	promise: Promise<ToolRewrite | undefined> | undefined,
+	signal: AbortSignal,
+): Promise<ToolRewrite | undefined> {
+	if (!promise) return Promise.resolve(undefined);
+	return new Promise((resolve, reject) => {
+		const onAbort = () => resolve(undefined);
+		signal.addEventListener("abort", onAbort, { once: true });
+		promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+	});
 }
