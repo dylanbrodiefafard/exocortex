@@ -1,0 +1,10 @@
+{
+	"id": "h-py-todo-cli",
+	"language": "python",
+	"prompt": "Add due dates to the todo CLI (`python3 todo.py ...`, code in the todo/ package). Requirements:\n\n1. `add TEXT --due YYYY-MM-DD` sets an optional due date. The value must be exactly YYYY-MM-DD (4-digit year, 2-digit month and day) and a real calendar date. Anything else: print an error to stderr, exit with status 2, and leave the data file untouched. Store the date in the data file under a `due` key on each task (the string, or null when there is none).\n2. `list` shows tasks that have a due date first, earliest due date first, then tasks without a due date. Ties (same due date, or both undated) are ordered by id. A task with a due date prints as `3. [ ] Pay rent (due 2024-05-01)`; tasks without one keep the current format.\n3. `list --overdue` shows only tasks that are not done and whose due date is strictly before today. \"Today\" comes from the TODO_TODAY environment variable (YYYY-MM-DD) when it is set, otherwise the system date. Same ordering as `list`.\n4. `done` accepts one or more ids, e.g. `todo.py done 1 3 4`. It is all-or-nothing: if any id does not exist, print an error naming the unknown id(s) to stderr, exit with status 2, and change nothing. Marking an already-done task again is not an error.\n5. Data files written by the current version (tasks with no `due` key) must still load; those tasks simply have no due date.\n6. `list --json` prints a JSON array instead of text, in the same order as `list`: one object per task with exactly the keys `id` (int), `text` (string), `done` (bool) and `due` (\"YYYY-MM-DD\" string or null). It can be combined with `--overdue`. With no matching tasks it prints `[]`.\n\nEverything that works today (add/list/done/remove, the TODO_FILE env var for the data file location) must keep working. Tests run with `python3 -m unittest discover -s tests -t .`.",
+	"check": "python3 -m unittest discover -q -s tests -t .",
+	"maxTurns": 40,
+	"timeoutSec": 1200,
+	"checkTimeoutSec": 120,
+	"tags": ["hard", "spec-compliance", "python"]
+}
