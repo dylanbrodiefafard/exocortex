@@ -226,8 +226,8 @@ Ranked by value to Exocortex. None of these is required for v0.
 6. **New:** Can the pi adapter observe the exact outgoing LLM request (needed for byte-exact `fork-prefix`, D-007)? *(Phase 0)*
 7. **New:** Can pi's UI API pre-fill the editor or offer one-key accept for supervisor suggestions (D-010)? *(Phase 0)*
 8. ~~ninfer fork details~~ — mostly answered by D-023. Remaining: confirm the 6-slot build vs. the public 1-4 cap.
+9. **New:** Thinking-mode defaults per module (D-008). *(Phase 3+, eval)*
 10. ~~Superseded by R4 in NINFER_REQUIREMENTS.~~ Does a named `tool_choice` enforce the XGrammar schema well enough to use as structured output (D-023)? *(Phase 2)*
 11. ~~Superseded by R1.~~ After a fork-prefix sidecar claims main's retained state, does main's next request still hit cache (D-024)? *(Phase 2)*
 12. **New:** Main's `reasoning_effort` / thinking setting decides which sidecar settings can share its prefix. Pick the main default with this in mind (D-008, D-023). *(Phase 2)*
-9. **New:** Thinking-mode defaults per module (D-008). *(Phase 3+, eval)*
 13. **New:** Can pi attach per-session headers or extra body fields to main's requests (needed to tag main with `session_id`/`retain`, D-028)? *(Phase 0)*
