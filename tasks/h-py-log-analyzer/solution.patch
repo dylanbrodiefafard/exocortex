@@ -1,0 +1,148 @@
+diff --git a/logscan/parsers.py b/logscan/parsers.py
+index 65db93f..d62458f 100644
+--- a/logscan/parsers.py
++++ b/logscan/parsers.py
+@@ -2,7 +2,6 @@
+ 
+ import json
+ import re
+-import shlex
+ from dataclasses import dataclass, field
+ 
+ LEVELS = ("TRACE", "DEBUG", "INFO", "WARN", "ERROR", "FATAL")
+@@ -15,6 +14,9 @@ TEXT_RE = re.compile(
+ CODE_RE = re.compile(r"(?:^|\s)code=(\S+)")
+ EXCEPTION_HEADER_RE = re.compile(r"^(?P<cls>(?:[A-Za-z_$][\w$]*\.)+[A-Za-z_$][\w$]*)(?::\s.*)?$")
+ CAUSED_BY_PREFIX = "Caused by: "
++KV_TOKEN_RE = re.compile(r'(?P<key>[^\s=]+)=(?:"(?P<quoted>(?:[^"\\]|\\.)*)"|(?P<bare>\S*))')
++KV_UNESCAPE_RE = re.compile(r"\\(.)")
++LEVEL_ALIASES = {"WARNING": "WARN", "ERR": "ERROR", "CRITICAL": "FATAL"}
+ 
+ 
+ @dataclass
+@@ -32,7 +34,8 @@ class Entry:
+ 
+ 
+ def normalize_level(raw):
+-    return raw.strip().upper()
++    level = raw.strip().upper()
++    return LEVEL_ALIASES.get(level, level)
+ 
+ 
+ def parse_text(line):
+@@ -54,9 +57,12 @@ def parse_kv(line):
+     if not line.startswith("ts="):
+         return None
+     fields = {}
+-    for token in shlex.split(line):
+-        key, _, value = token.partition("=")
+-        fields[key] = value
++    for m in KV_TOKEN_RE.finditer(line):
++        if m.group("quoted") is not None:
++            value = KV_UNESCAPE_RE.sub(r"\1", m.group("quoted"))
++        else:
++            value = m.group("bare")
++        fields.setdefault(m.group("key"), value)
+     return Entry(
+         ts=fields.get("ts", ""),
+         level=normalize_level(fields.get("level", "")),
+@@ -80,10 +86,17 @@ def parse_json(line):
+         level=normalize_level(str(obj.get("level", ""))),
+         service=str(obj.get("service", "")),
+         message=str(obj.get("msg", "")),
+-        code=obj.get("code") or None,
++        code=_json_code(obj),
+     )
+ 
+ 
++def _json_code(obj):
++    code = obj.get("code")
++    if not code and isinstance(obj.get("error"), dict):
++        code = obj["error"].get("code")
++    return str(code) if code else None
++
++
+ def parse_entry(line):
+     """Parse a line that starts a new log entry, or return None."""
+     for parser in (parse_text, parse_kv, parse_json):
+@@ -96,14 +109,19 @@ def parse_entry(line):
+ def is_continuation(line):
+     """True for stack-trace lines that belong to the preceding entry."""
+     return (
+-        line.startswith("\tat ")
++        (line[:1].isspace() and line.strip() != "")
+         or line.startswith(CAUSED_BY_PREFIX)
+         or EXCEPTION_HEADER_RE.match(line) is not None
+     )
+ 
+ 
+ def exception_class(trace):
+-    """The exception class reported for a stack trace, or None."""
++    """The root-cause exception class of a stack trace, or None."""
++    for line in reversed(trace):
++        if line.startswith(CAUSED_BY_PREFIX):
++            m = EXCEPTION_HEADER_RE.match(line[len(CAUSED_BY_PREFIX):])
++            if m:
++                return m.group("cls")
+     for line in trace:
+         m = EXCEPTION_HEADER_RE.match(line)
+         if m:
+diff --git a/logscan/report.py b/logscan/report.py
+index 4042ffc..da420c0 100644
+--- a/logscan/report.py
++++ b/logscan/report.py
+@@ -1,6 +1,7 @@
+ """Aggregate parsed log entries into the summary report described in README.md."""
+ 
+ from collections import Counter
++from datetime import datetime, timezone
+ 
+ from logscan.parsers import exception_class, is_continuation, parse_entry
+ 
+@@ -30,11 +31,12 @@ class _Accumulator:
+             cls = exception_class(entry.trace)
+             if cls:
+                 self.exceptions[cls] += 1
+-        if entry.ts:
+-            if self.first_ts is None or entry.ts < self.first_ts:
+-                self.first_ts = entry.ts
+-            if self.last_ts is None or entry.ts > self.last_ts:
+-                self.last_ts = entry.ts
++        ts = _parse_ts(entry.ts)
++        if ts is not None:
++            if self.first_ts is None or ts < self.first_ts:
++                self.first_ts = ts
++            if self.last_ts is None or ts > self.last_ts:
++                self.last_ts = ts
+ 
+     def result(self):
+         top = sorted(self.error_codes.items(), key=lambda kv: (-kv[1], kv[0]))[:TOP_CODES]
+@@ -51,10 +53,20 @@ class _Accumulator:
+         }
+ 
+ 
++def _parse_ts(raw):
++    try:
++        ts = datetime.fromisoformat(raw)
++    except ValueError:
++        return None
++    if ts.tzinfo is None:
++        ts = ts.replace(tzinfo=timezone.utc)
++    return ts.astimezone(timezone.utc)
++
++
+ def _format_ts(ts):
+     if ts is None:
+         return None
+-    return ts[:19] + "Z"
++    return ts.strftime("%Y-%m-%dT%H:%M:%SZ")
+ 
+ 
+ def build_report(lines):
+@@ -79,5 +91,5 @@ def build_report(lines):
+ 
+ 
+ def analyze_file(path):
+-    with open(path, encoding="utf-8") as fh:
++    with open(path, encoding="utf-8", errors="replace", newline="\n") as fh:
+         return build_report(fh)

@@ -318,6 +318,30 @@ Open check: Exocortex's injected `custom_message` reaches ninfer as a second con
 
 ---
 
+### D-035 — Hard task tier · accepted (2026-10-04; calibration pending)
+- **Context:** D-034 showed the seed tasks are at ceiling.
+- **Decision:** add a `hard` tier of 12 tasks, three per failure mode a module targets. Tag them so results can be sliced:
+
+  | Failure mode | Tasks |
+  |---|---|
+  | `spec-compliance` (supervisor) | `h-py-todo-cli`, `h-go-ratelimiter`, `h-rust-ini-parser` |
+  | `error-recovery` (triage) | `h-rust-borrow-refactor`, `h-cpp-template-errors`, `h-go-aliasing-bug` |
+  | `noisy-output` (trimmer) | `h-py-log-analyzer`, `h-py-noisy-test-suite`, `h-cpp-build-log` |
+  | `navigation` / `algorithmic` | `h-py-mini-framework`, `h-go-multi-package-config`, `h-rust-forth` |
+
+- **Harness support:**
+  - **`hidden/` acceptance overlays:** applied after the agent settles, and during validation. Every hidden requirement must be stated in the prompt.
+  - **`--tags`** selects a tier.
+  - **Workspaces under the OS temp dir,** so the agent can't read `tasks/` (solutions, hidden tests).
+  - **Task id must equal its directory name;** `--tasks` filters by directory before loading anything.
+- **Resource safety:** checks that could blow up on a wrong solution cap their memory. `h-rust-forth` runs its test binary under `ulimit -v 4 GiB`, because a naive exponential expansion would otherwise exhaust host RAM next to the inference server.
+- **Calibration:**
+  - **Pending.** The owner runs `npm run eval -- --tags hard --repeat 3`. Tasks outside a 1/3–2/3 success rate get reworked or dropped, and the decision is recorded here.
+  - **Authors' guesses:** `h-go-multi-package-config`, `h-py-noisy-test-suite` and `h-rust-forth` may land too easy; `h-py-log-analyzer` (six bugs) and `h-py-mini-framework` may land too hard.
+- **Authoring rules:** `docs/EVAL_TASKS.md`.
+
+---
+
 ## Open questions (carried from brief §10, updated)
 
 1. ~~Resolved by D-029.~~ Exact pi mechanism for injecting into the current user turn without altering prior messages. *(Phase 0)*
