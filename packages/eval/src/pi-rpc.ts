@@ -1,7 +1,7 @@
 import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { createWriteStream, type WriteStream } from "node:fs";
 import { StringDecoder } from "node:string_decoder";
-import { killGroup } from "./workspace.ts";
+import { killGroup } from "@exocortex/core";
 
 export type RunOutcome = "settled" | "max_turns" | "timeout" | "crashed";
 

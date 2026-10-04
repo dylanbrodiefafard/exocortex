@@ -34,6 +34,17 @@ export {
 } from "./inference/pool.ts";
 export { completeStructured, extractJson, StructuredOutputError } from "./inference/structured.ts";
 export { type ToJsonOptions, toJsonValue } from "./json.ts";
+export { type CommandOutput, killGroup, runProcess, runShellCommand } from "./modules/command.ts";
+export { loadPrompt, type PromptTemplate, renderPrompt } from "./modules/prompts.ts";
+export type {
+	ExoModule,
+	ModuleContext,
+	ModuleFactory,
+	SettleAction,
+	SettleInfo,
+	ToolOutcome,
+	UserTurn,
+} from "./modules/types.ts";
 export {
 	type JsonValue,
 	openTraceStore,

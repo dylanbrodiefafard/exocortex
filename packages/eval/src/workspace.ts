@@ -1,16 +1,8 @@
-import { spawn } from "node:child_process";
 import { cpSync, mkdirSync } from "node:fs";
+import { type CommandOutput, runProcess, runShellCommand } from "@exocortex/core";
 import type { Task } from "./task.ts";
 
-export interface CommandResult {
-	readonly exitCode: number | null;
-	readonly timedOut: boolean;
-	readonly durationMs: number;
-	/** Last ~4 KB of combined stdout+stderr. */
-	readonly outputTail: string;
-}
-
-const OUTPUT_TAIL_CHARS = 4096;
+export type CommandResult = CommandOutput;
 const GIT_ENV = {
 	GIT_AUTHOR_NAME: "exo-eval",
 	GIT_AUTHOR_EMAIL: "exo-eval@localhost",
@@ -50,7 +42,7 @@ export async function applyPatch(workdir: string, patchPath: string): Promise<vo
 }
 
 export function runShell(command: string, cwd: string, timeoutMs: number): Promise<CommandResult> {
-	return runCommand("bash", ["-c", command], { cwd, timeoutMs });
+	return runShellCommand(command, { cwd, timeoutMs });
 }
 
 function runCommand(
@@ -58,43 +50,5 @@ function runCommand(
 	args: readonly string[],
 	options: { readonly cwd: string; readonly timeoutMs: number; readonly env?: Readonly<Record<string, string>> },
 ): Promise<CommandResult> {
-	const started = performance.now();
-	return new Promise((resolve) => {
-		const child = spawn(command, args, {
-			cwd: options.cwd,
-			env: { ...process.env, ...options.env },
-			stdio: ["ignore", "pipe", "pipe"],
-			detached: true,
-		});
-		let tail = "";
-		let timedOut = false;
-		const append = (chunk: Buffer) => {
-			tail = (tail + chunk.toString()).slice(-OUTPUT_TAIL_CHARS);
-		};
-		child.stdout.on("data", append);
-		child.stderr.on("data", append);
-		const timer = setTimeout(() => {
-			timedOut = true;
-			killGroup(child.pid);
-		}, options.timeoutMs);
-		const finish = (exitCode: number | null) => {
-			clearTimeout(timer);
-			resolve({ exitCode, timedOut, durationMs: Math.round(performance.now() - started), outputTail: tail });
-		};
-		child.on("error", (error) => {
-			append(Buffer.from(String(error)));
-			finish(null);
-		});
-		child.on("close", (code) => finish(timedOut ? null : code));
-	});
-}
-
-/** Kills a detached child's whole process group (build tools spawn grandchildren). */
-export function killGroup(pid: number | undefined): void {
-	if (pid === undefined) return;
-	try {
-		process.kill(-pid, "SIGKILL");
-	} catch {
-		// Already gone.
-	}
+	return runProcess(command, args, options);
 }
