@@ -31,7 +31,7 @@ All four count, and each maps to modules and metrics:
 ### D-004 — Models: Qwen 3.8 27B now, Qwen 4 27B later · accepted
 - **Decision:** Target Qwen 3.8 27B, and switch to Qwen 4 27B when it's released. Nothing may hard-code model-specific behaviour outside config and prompt files. The eval baseline must be re-run on every model change.
 
-### D-005 — Inference server: owner's ninfer fork with a shared prefix cache · accepted
+### D-005 — Inference server: owner's ninfer fork with a shared prefix cache · accepted, amended by D-023
 - **Context:** The owner runs a custom server forked from ninfer. Its prefix cache is *shared across requests* (block/radix style, LRU eviction), not per slot. The owner can add server features.
 - **Decision:**
   - Talk to it over the OpenAI-compatible API. Isolate server-specific extensions (cache hints, priority classes) behind a small `InferenceClient` interface in core.
@@ -43,7 +43,7 @@ All four count, and each maps to modules and metrics:
 - **Decision:** One loaded model (the same 27B) serves main and sidecars. The pool is the only concurrency control. Because sidecars share main's blind spots, prefer deterministic signals wherever possible (brief §9).
 - **Consequences:** No separate small model to manage. Sidecar latency is 27B latency, so the trimmer/triage timeouts and fallbacks matter.
 
-### D-007 — Sidecar context: hybrid, per module · accepted
+### D-007 — Sidecar context: hybrid, per module · accepted, amended by D-024
 - **Context:** With a shared prefix cache, a sidecar that sends main's exact conversation and then appends an instruction gets its prefill almost free.
 - **Decision:** Each module declares a context strategy:
   - `fork-prefix` (trimmer, triage, compaction): main's exact message prefix + a short appended sidecar instruction. Cheap, and it knows the current goal.
@@ -95,7 +95,7 @@ All four count, and each maps to modules and metrics:
 ### D-018 — Memory: repo-scoped by default · accepted
 - **Decision:** Cards attach to the repo they came from. Promote one to global only when the same lesson independently appears in 2+ repos. Project/repo identity comes from the git remote URL (fallback: repo root path).
 
-### D-019 — Embeddings served by the inference server · accepted (resolves brief §10.4)
+### D-019 — Embeddings served by the inference server · superseded by D-026
 - **Decision:** Serve a small embedding model (e.g. a Qwen3-Embedding-class ~0.6B) as an endpoint on the owner's server, behind the same `InferenceClient`. No in-process ML dependencies in pi's process. Hybrid retrieval = FTS5 BM25 + embeddings, per the brief. Needed only from Phase 5.
 
 ### D-020 — Phase order: as in the brief · accepted
@@ -126,6 +126,74 @@ All four count, and each maps to modules and metrics:
 
 ---
 
+## ninfer survey (2026-10-04)
+
+Findings from reading `dylanbrodiefafard/ninfer` at `e04fad3` (paths are relative to that repo). The owner's description: 6 decode slots, prefill interleaved (or soon will be), a shared KV pool of about 700k tokens, and a model maximum of about 260k.
+
+### D-023 — ninfer facts Exocortex designs around · accepted (amends D-005)
+- **Hardware/model:** single RTX 5090. Product identity is `qwen3.8-27b/nvfp4`, with optional MTP/DFlash speculative decoding. One resident model; the `model` field is informational.
+- **API:**
+  - OpenAI `/v1/chat/completions`, `/v1/responses`, Anthropic `/v1/messages`, plus `count_tokens`/`input_tokens`, `/health` and `/v1/models`.
+  - No `/v1/completions`, `/v1/embeddings` or `/metrics`.
+- **Structured output:**
+  - `response_format` must be `text`, so there's no JSON mode or `json_schema`.
+  - XGrammar constrains **tool-call arguments** only (`docs/serving.md:341-396`).
+  - → Sidecars that need JSON use a **forced tool call** (a single tool whose parameters are the output schema, with a named `tool_choice`). The response is validated with TypeBox, with one repair retry (brief §5.2). Whether a named `tool_choice` actually enforces the grammar is a *Phase 2 check*. Fallback: prompt for JSON and validate.
+- **Prefix reuse is checkpoint-based and single-owner, not a shared radix cache** (`docs/maintainer/paged-kv-cache.md` §10, `docs/maintainer/concurrent-inference-architecture.md` §6.4-6.5):
+  - The KV *pool* is shared (`--kv-capacity`), but a saved prefix ("retained bundle") is claimed by **one** request at a time.
+  - There's no copy-on-write or fan-out, and no arbitrary longest-common-prefix reuse.
+  - Reuse happens only at: the previous request's end frontier (exact append), a turn-closure checkpoint, a context-checkpoint ladder (MTP/DFlash only, at 24k/36k/53k/78k/102k/152k tokens) and a single turn-rollback pin.
+  - Qwen3.x's hybrid linear-attention state is why: a hit needs a complete saved recurrent state at the exact boundary.
+- **Template effects on prefix identity:**
+  - With `preserve_thinking=false` (the default), reasoning is stripped from assistant turns before the last real user message.
+  - The reasoning-effort instruction and the tool list are rendered into the leading system block. So a request with a different effort or thinking setting, a different tool list, or `tool_choice` none/named does **not** share main's prefix.
+- **Scheduling:**
+  - FIFO queue with backfill.
+  - Admission reserves KV for prompt + `max_tokens` (the default `max_tokens` is 8192).
+  - One request prefills at a time, using a "prefill-first" policy, so **a long sidecar prefill stalls main's decode**.
+  - No priority, QoS or preemption (listed as non-goals in `AGENTS.md:78-84`).
+  - Client disconnect cancels at the next chunk/round boundary.
+- **Observability:**
+  - Per-request `usage.prompt_tokens_details.cached_tokens`, plus `…ninfer.{reuse_source, prefix_reuse_path, ttft_ms, prefill, decode}`, and `reasoning_tokens`.
+  - Optional `--request-log-jsonl`. The eval and trace store will record these.
+- **Sampling:** the default "p-less" sampler ignores top_p/top_k/penalties, and Qwen3.8 defaults to temperature 2.0. Sidecars set their own temperature explicitly. Whether low temperature behaves well under p-less is a *Phase 2 check*.
+- **Discrepancy:** the public code caps `--max-concurrency` at 1-4, but the owner runs 6 slots. Presumably that's local or unpushed work; the pool reads the concurrency limit from config and doesn't hard-code it.
+
+### D-024 — Sidecar context under single-owner reuse · accepted (amends D-007)
+- **Context:** D-007 assumed fork-prefix sidecars get main's prefix almost free. Under D-023 that's only true when the sidecar runs **while main is idle**, and even then the sidecar *claims* main's saved state. Main resumes via the turn-rollback pin or turn-closure checkpoint, but that is unverified.
+- **Decision:**
+  1. **Default is `isolated`**: short prompts, cold prefill, cheap because they're short. Keep them well under ~4k tokens so they don't stall main's decode.
+  2. **`fork-prefix` is allowed only on idle-main hooks**, where main is waiting on us anyway: trimmer/triage at `tool_result` (before main's next request), compaction, and supervisor-free moments at `agent_end`.
+     - At most **one** fork-prefix sidecar per main checkpoint at a time, serialized. There's no N-way fan-out on main's prefix, so voting/parallel diagnoses (D-015) use isolated or compact-summary prompts.
+  3. A fork-prefix request must be byte-identical to main's last request up to the suffix:
+     - same system prompt and tool list;
+     - same thinking/effort settings;
+     - no `tool_choice` none or named, so these return prompted JSON, not forced tool calls;
+     - the instruction appended as a **system**-role message, which doesn't move the last-user index and so doesn't trigger reasoning stripping.
+  4. **Phase 2 must measure it before any module relies on it:** sidecar `cached_tokens`, *and* main's `cached_tokens` on its next request (does main still hit after a sidecar claimed its state?). If main loses its cache, fork-prefix is disabled by default.
+- **Consequences:** Sidecars usually can't see main's full context. Modules get compact, deterministic context from the trace instead (current goal, last command, error lines). That fits the "keep sidecar prompts short" rule anyway.
+
+### D-025 — Pool policy for ninfer · accepted (refines brief §5.2)
+- Every sidecar sets an explicit small `max_tokens` (admission reserves it) and explicit sampling params.
+- `reservedForMain` stays (default 2 of the configured slots). Since the server has no priority, Exocortex's own queue is the only priority mechanism. Interactive sidecars get tight client-side timeouts and abort through disconnect, which ninfer honours.
+- A per-sidecar prompt-size cap protects main's decode from prefill stalls.
+- Background jobs (memory reflection) run only when no main session is active (brief §6.4 already says this).
+
+### D-026 — Embeddings: BM25 first, embeddings via a separate endpoint later · accepted (supersedes D-019)
+- **Context:** ninfer has no embeddings endpoint, supports a closed model set, and lists new features as non-goals. VRAM on the single 5090 is fully used by weights + KV.
+- **Decision:**
+  - Phase 5 ships with FTS5 BM25 + structured triggers (file globs, normalized error signatures) only.
+  - Add embeddings only if eval shows retrieval recall is the bottleneck. They'd go behind `InferenceClient.embed()` against any OpenAI-compatible `/v1/embeddings` server, e.g. a small CPU-hosted embedding model.
+
+### D-027 — Candidate ninfer features (owner's call, not blocking) · proposed
+Ranked by value to Exocortex. None of these is required for v0.
+1. **Request priority classes** (main > interactive sidecar > background) in admission and prefill ordering, or at least a "low priority: don't preempt main's decode" flag.
+2. **Retained-bundle fork / copy-on-write**, so a sidecar can reuse main's prefix without claiming it. This is the biggest cost lever for fork-prefix sidecars. Upstream notes say it needs a redesign (`paged-kv-cache.md:840-842`).
+3. **User-supplied `json_schema` structured output**, reusing the existing XGrammar tool-argument path.
+4. An `/v1/embeddings` endpoint (lowest; D-026 doesn't need it).
+
+---
+
 ## Open questions (carried from brief §10, updated)
 
 1. Exact pi mechanism for injecting into the current user turn without altering prior messages. *(Phase 0)*
@@ -135,5 +203,8 @@ All four count, and each maps to modules and metrics:
 5. Reliably detecting "agent asked the user a question" vs. "agent claims done". *(Phase 3)*
 6. **New:** Can the pi adapter observe the exact outgoing LLM request (needed for byte-exact `fork-prefix`, D-007)? *(Phase 0)*
 7. **New:** Can pi's UI API pre-fill the editor or offer one-key accept for supervisor suggestions (D-010)? *(Phase 0)*
-8. **New:** ninfer fork details: concurrency limit, context length, cache-hit stats, priority support. *(Phase 0, owner input)*
+8. ~~ninfer fork details~~ — mostly answered by D-023. Remaining: confirm the 6-slot build vs. the public 1-4 cap.
+10. **New:** Does a named `tool_choice` enforce the XGrammar schema well enough to use as structured output (D-023)? *(Phase 2)*
+11. **New:** After a fork-prefix sidecar claims main's retained state, does main's next request still hit cache (D-024)? *(Phase 2)*
+12. **New:** Main's `reasoning_effort` / thinking setting decides which sidecar settings can share its prefix. Pick the main default with this in mind (D-008, D-023). *(Phase 2)*
 9. **New:** Thinking-mode defaults per module (D-008). *(Phase 3+, eval)*
