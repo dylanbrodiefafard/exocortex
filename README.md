@@ -84,7 +84,7 @@ Measures how much the sidecar pool slows the main agent: main requests alone, th
 npm run loadtest -- --base-url http://127.0.0.1:8080/v1 --model qwen3.8-27b --profile ninfer
 ```
 
-Writes `eval-runs/loadtest-<timestamp>/summary.md`. Run `npm run loadtest -- --help` for sizes and concurrency.
+Pass `--max-concurrent` equal to the engine's real slot count (and `--reserved`, at least 1). If the pool thinks it has more slots than the engine, sidecars crowd out the main agent (D-038). Writes `eval-runs/loadtest-<timestamp>/summary.md`. Run `npm run loadtest -- --help` for sizes and concurrency.
 
 ## Layout
 

@@ -402,6 +402,24 @@ Open check: Exocortex's injected `custom_message` reaches ninfer as a second con
 
 ---
 
+### D-038 — First load test on ninfer: pool config must match the engine's real slots · accepted (2026-10-04)
+- **Sidecar check:** `/exo ping` on the owner's machine took 75 ms, with 15 of 19 prompt tokens cached. Sidecars work against ninfer, using pi's main model as the engine.
+- **Load test as run:**
+  - ninfer had **2** slots, but the pool used the defaults (6 slots, 2 reserved, so 4 sidecar slots). Main context was about 16k estimated tokens.
+  - Main alone: TTFT p50 175 ms, total p50 709 ms, about 436 tok/s decode.
+  - With 20 sidecars kept in flight: TTFT p50 1303 ms (+644%), total p50 2083 ms (+194%), decode 305 tok/s.
+  - Sidecars: 47 completed, 0 failed, p50 latency 1976 ms.
+- **Reading:**
+  - The pool believed it had 4 sidecar slots on a 2-slot engine, so sidecars took **both** real slots. ninfer has no request priority and serves requests FIFO, so main queued behind them.
+  - This is the case `reservedForMain` exists to prevent, and it only works when `pool.maxConcurrent` matches the engine's real slot count. It doesn't measure what the pool does when configured correctly. **Phase 2 acceptance stays pending** until a re-run with matching config: `--max-concurrent 2 --reserved 1` now, then `6 / 2` once ninfer runs 6 slots.
+  - Even when configured correctly, a sidecar's prefill still shares the GPU with main's decode. The remaining regression measures what F5 (request priority) and interleaved prefill would buy, which is direct evidence for that ninfer parity ask (`docs/INFERENCE_ENGINES.md`).
+  - Cached tokens were 24,576 on every main request. That's ninfer's first context-checkpoint rung: each load-test request diverges after the shared system prompt, so reuse falls back to the nearest checkpoint. A real agent loop appends instead, and in eval reached 95% cache hit (D-037).
+- **Follow-ups:**
+  - Document that `pool.maxConcurrent` must equal the engine's slot count. The example config and README say so.
+  - `h-rust-forth` validates on the owner's 32-core machine, so its 0/3 is the model's failure, not the environment's. The next calibration run should use `--keep-workdirs` to see why.
+
+---
+
 ## Open questions (carried from brief §10, updated)
 
 1. ~~Resolved by D-029.~~ Exact pi mechanism for injecting into the current user turn without altering prior messages. *(Phase 0)*
