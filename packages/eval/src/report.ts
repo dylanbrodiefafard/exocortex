@@ -1,4 +1,5 @@
 import type { RunRecord } from "./run.ts";
+import { minimumDetectableEffect, type PairedComparison, pairedComparison } from "./stats.ts";
 
 export interface ConfigSummary {
 	readonly config: string;
@@ -101,7 +102,53 @@ export function renderMarkdown(records: readonly RunRecord[], title: string): st
 		});
 		lines.push(`| ${task} | ${cells.join(" | ")} |`);
 	}
+	lines.push(...pairedSection(records, summaries));
 	return `${lines.join("\n")}\n`;
+}
+
+/** Each config against the first one (the baseline), task by task, with the run counts' power. */
+function pairedSection(records: readonly RunRecord[], summaries: readonly ConfigSummary[]): string[] {
+	const [baseline, ...treatments] = summaries;
+	if (!baseline || treatments.length === 0) return [];
+	const comparisons = treatments.map((t) => pairedComparison(records, baseline.config, t.config));
+	// Pooled rate, kept off 0 and 1 where the normal approximation says nothing.
+	const pooled = records.filter((r) => r.success).length / records.length;
+	const mde = minimumDetectableEffect(Math.min(0.95, Math.max(0.05, pooled)), baseline.runs);
+	return [
+		"",
+		`## Paired by task vs \`${baseline.config}\``,
+		"",
+		"| config | tasks | Δ success | 95% CI | wins/losses/ties | sign test p | Δ turns | Δ input tok | Δ wall |",
+		"|---|---|---|---|---|---|---|---|---|",
+		...comparisons.map((c) => `| ${pairedRow(c)} |`),
+		"",
+		`Δ success is the mean over tasks of the per-task success-rate difference, in points; the CI is a task-level bootstrap. Δ turns, input tokens and wall-clock are mean per-task relative changes. With ${baseline.runs} runs per config at a ${pct(pooled)} pooled success rate, an unpaired comparison can only detect differences of about ${Math.round(mde * 100)} points (α = 0.05, 80% power): treat smaller differences, and any per-slice result, as descriptive (D-045).`,
+	];
+}
+
+function pairedRow(c: PairedComparison): string {
+	return [
+		c.treatment,
+		String(c.tasks),
+		points(c.meanDelta),
+		`[${points(c.ci[0])}, ${points(c.ci[1])}]`,
+		`${c.wins}/${c.losses}/${c.ties}`,
+		c.signTestP.toFixed(2),
+		change(c.turnsChange),
+		change(c.inputTokensChange),
+		change(c.wallClockChange),
+	].join(" | ");
+}
+
+function points(delta: number): string {
+	const value = Math.round(delta * 100);
+	return `${value > 0 ? "+" : ""}${value}`;
+}
+
+function change(value: number | null): string {
+	if (value === null) return "—";
+	const rounded = Math.round(value * 100);
+	return `${rounded > 0 ? "+" : ""}${rounded}%`;
 }
 
 function sum(values: readonly number[]): number {
