@@ -273,6 +273,37 @@ Open check: Exocortex's injected `custom_message` reaches ninfer as a second con
 
 ---
 
+## Phase 1 (2026-10-04)
+
+### D-033 — Trace store, config and eval harness as built · accepted (Phase 1; resolves open question 15)
+- **Config:**
+  - Sources: defaults ← `~/.exocortex/config.jsonc` (or `EXO_CONFIG`) ← `<cwd>/.exocortex/config.jsonc`, deep-merged and TypeBox-validated.
+  - Unknown keys or invalid values **disable Exocortex** (fail closed), and pi shows a warning in UI modes. A missing `EXO_CONFIG` file counts as a problem.
+  - Example: `exocortex.config.example.jsonc`.
+- **Trace store (`@exocortex/core`):**
+  - One SQLite DB per user by default; eval uses one per run. WAL mode, `node:sqlite`.
+  - Only Node's SQLite `ExperimentalWarning` is suppressed, and only while the module loads.
+  - Schema v1 has just `sessions` and `events`. The brief's `injections`, `verdicts` and `sidecar_calls` tables arrive as migrations in the phases that write them.
+  - Appends are buffered in memory and written in one transaction per flush (after 50 ms, or at 256 ops, at `agent_settled`, or at shutdown). Write errors go to a callback and never throw into pi.
+- **Event mapping (pi → trace):**
+  - Kinds: `session.start/end`, `user.input`, `llm.request`, `message`, `tool.call`, `tool.result`, `turn.end`, `agent.settled`, `compaction`, `model.change`.
+  - `llm.request` stores a **fingerprint**, not the payload: a hash per message, the tools hash, total characters and params. That keeps the DB small and still lets eval measure prefix stability.
+  - `message` stores the full message, minus inline binary data.
+  - `tool.result` stores the **original** tool output plus the bash `exit_code`.
+  - `exo.*` custom messages are tagged `synthetic` with their module.
+- **Eval harness (`@exocortex/eval`):**
+  - **Own RPC driver** instead of pi's `RpcClient`, because it must auto-dismiss extension dialogs, enforce turn and wall-clock limits, kill whole process groups, and keep pi's stderr out of the console.
+  - **Runs** go sequentially, one main agent at a time, so they don't compete for the inference server.
+  - **Workspace** per run: copy the fixture's `repo/` into the run dir and `git init` + commit it, so diffs are visible.
+  - **pi flags:** `-ne -ns -np -nc --no-themes`, `--session-dir` per run, Exocortex loaded with `-e`. The user's `~/.pi/agent` supplies models and auth unless `--pi-agent-dir` is given.
+  - **Metrics** come only from the trace: turns, tokens (input/cached/output), cache-hit rate, prefix-kept rate, tool errors, repeated-error rate (deterministic normalized signatures), injections, continuations, compactions. The check command decides success.
+  - **Fixtures:** `tasks/<id>/{task.json, repo/, solution.patch}`. `npm run eval -- --validate` (also run in CI) requires the pristine repo to fail the check and the solution to pass. Six seed tasks: 3 Python, 1 Go, 1 Rust, 1 C++.
+- **Phase 1 acceptance status:**
+  - Mechanics are verified end to end against a scripted fake model: success, failure and max-turns paths, plus the report for all 6 tasks.
+  - The required baseline table on a real model has to be run on the owner's machine: `npm run eval -- --model <provider>/<model> --repeat 3`. Tag `phase-1` after that table exists.
+
+---
+
 ## Open questions (carried from brief §10, updated)
 
 1. ~~Resolved by D-029.~~ Exact pi mechanism for injecting into the current user turn without altering prior messages. *(Phase 0)*
@@ -289,4 +320,4 @@ Open check: Exocortex's injected `custom_message` reaches ninfer as a second con
 12. **New:** Main's `reasoning_effort` / thinking setting decides which sidecar settings can share its prefix. Pick the main default with this in mind (D-008, D-023). *(Phase 2)*
 13. ~~Resolved by D-029 (yes, both).~~ Can pi attach per-session headers or extra body fields to main's requests (needed to tag main with `session_id`/`retain`, D-028)? *(Phase 0)*
 14. **New:** Does ninfer's Qwen template accept two consecutive `user` messages (injected `custom_message`, D-031)? *(Phase 2)*
-15. **New:** Keep `node:sqlite`'s ExperimentalWarning out of the pi TUI (D-030). *(Phase 1)*
+15. ~~Resolved by D-033.~~ Keep `node:sqlite`'s ExperimentalWarning out of the pi TUI (D-030).
