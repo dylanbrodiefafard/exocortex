@@ -114,6 +114,16 @@ All four count, and each maps to modules and metrics:
   - **CI:** GitHub Actions: typecheck, lint, knip, unit tests on every push. Evals run locally on the owner's GPU, never in CI.
 - **Consequences:** The repo should be easy to work in without TS expertise: a single `npm run check` runs everything that CI runs.
 
+### D-022 — Branching: trunk-based on `main`, short-lived branches, phase tags · accepted
+- **Context:** Solo owner plus coding agents, pre-v0, no external users yet. Choice delegated.
+- **Decision:**
+  - `main` is the only long-lived branch and must stay green (`npm run check` + CI).
+  - Work happens on short-lived branches (one slice of a phase each, ideally < ~1 day of work), merged into `main` by PR with a **squash merge**. Agent sessions use their assigned branch names.
+  - No long-lived `v0` branch. It would only collect merge debt, and nobody depends on `main` being stable yet. Unfinished features are kept safe by D-001's "default off until proven" module toggles, not by branches.
+  - Tag each phase whose acceptance check passes: `phase-0`, `phase-1`, … Tag `v0.1.0` when Phase 3 (supervisor in suggest mode) is usable daily. Before 1.0, semver minor versions may break things.
+  - Commit messages: Conventional Commits (`feat(core): …`, `fix(pool): …`, `docs: …`).
+- **Consequences:** The owner's daily install should track a tag, not `main` HEAD.
+
 ---
 
 ## Open questions (carried from brief §10, updated)
