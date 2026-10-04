@@ -13,7 +13,10 @@ export interface ModuleContext {
 	/** Appends to the current session's trace; a no-op when tracing is off. */
 	readonly record: (event: Omit<TraceEventInput, "module" | "synthetic">) => void;
 	/** Runs a shell command in `cwd` (process group killed on timeout). */
-	readonly runCommand: (command: string, options: { readonly timeoutMs: number }) => Promise<CommandOutput>;
+	readonly runCommand: (
+		command: string,
+		options: { readonly timeoutMs: number; readonly tailChars?: number; readonly signal?: AbortSignal },
+	) => Promise<CommandOutput>;
 	/** Debug log (no-op unless the harness's debug output is on). */
 	readonly log: (message: string) => void;
 }
@@ -45,12 +48,12 @@ export interface SettleInfo {
  * What a module wants done when the agent settles.
  * - `suggest`: offer `text` as the user's next message (the user sends or edits it).
  * - `continue`: send `text` as a synthetic follow-up and keep the agent going.
- * - `notify`: just tell the user.
+ * - `notify`: just tell the user (`info` goes to the status line, `warning` also notifies).
  */
 export type SettleAction =
 	| { readonly kind: "suggest"; readonly text: string; readonly summary: string }
 	| { readonly kind: "continue"; readonly text: string; readonly summary: string }
-	| { readonly kind: "notify"; readonly summary: string };
+	| { readonly kind: "notify"; readonly summary: string; readonly level: "info" | "warning" };
 
 /** One module instance per harness session; hooks are optional and must never throw. */
 export interface ExoModule {
