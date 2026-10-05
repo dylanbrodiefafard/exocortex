@@ -373,6 +373,9 @@ registerCommand(name: string, options: {
     - on overflow or length recovery.
   - Manual compaction: `/compact` or `ctx.compact(opts)`.
   - Settings: `compaction.enabled`, `reserveTokens`, `keepRecentTokens` and `modelOverrides` (`compaction.md:417-463`).
+- **Overflow recovery** (`dist/core/agent-session.js:2335-2370`): pi compacts with `reason: "overflow"` when the last assistant message is a context overflow (`isContextOverflow`, `pi-ai/dist/utils/overflow.d.ts:57`) **or** a recoverable length stop, then retries the turn once. A second overflow in a row emits `session_compact_failed` with `reason: "overflow"` and `errorMessage` "Context overflow recovery failed after one compact-and-retry attempt…" (`:2346-2364`).
+  - `SessionCompactFailedEvent` is `{reason: "manual"|"threshold"|"overflow", errorMessage?, aborted, willRetry, fromExtension}` (`dist/core/extensions/types.d.ts:600-613`). The trace records it as `compaction.failed` (D-059).
+  - `isContextOverflow` matches known providers' error texts. A custom provider's overflow error may not match (`overflow.d.ts:44-52`); the turn then just ends with `stopReason: "error"` and no compaction.
 - **`session_before_compact` payload** (`types.ts:762-772`):
   - `preparation: CompactionPreparation` (`compaction.ts:772-788`): `{firstKeptEntryId, messagesToSummarize, turnPrefixMessages, isSplitTurn, tokensBefore, previousSummary?, fileOps, settings}`.
   - `branchEntries`, `customInstructions?`, `reason: "manual"|"threshold"|"overflow"`, `willRetry`, `signal`.

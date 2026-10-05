@@ -65,6 +65,57 @@ export function pairedComparison(
 	};
 }
 
+export interface PairedChange {
+	/** Tasks with a non-zero baseline value under both configs. */
+	readonly tasks: number;
+	/** Mean over tasks of (treatment − baseline) / baseline. */
+	readonly mean: number;
+	/** 95% task-cluster bootstrap interval for {@link mean}. */
+	readonly ci: readonly [number, number];
+	/**
+	 * Smallest mean relative change this many tasks could detect, given how much the per-task
+	 * changes vary (two-sided α = 0.05, 80% power). Null with fewer than 2 tasks.
+	 */
+	readonly detectable: number | null;
+}
+
+/**
+ * Relative change of any per-run quantity, paired by task like {@link pairedComparison}: each
+ * task's runs are averaged per config first. Null when no task has data under both configs.
+ */
+export function pairedRelativeChange(
+	records: readonly RunRecord[],
+	baseline: string,
+	treatment: string,
+	measure: (record: RunRecord) => number | null,
+	seed = 1,
+): PairedChange | null {
+	const byTask = (config: string) => {
+		const values = new Map<string, number[]>();
+		for (const r of records) {
+			const value = r.config === config ? measure(r) : null;
+			if (value !== null) values.set(r.taskId, [...(values.get(r.taskId) ?? []), value]);
+		}
+		return values;
+	};
+	const base = byTask(baseline);
+	const treat = byTask(treatment);
+	const changes = [...base].flatMap(([task, values]) => {
+		const b = mean(values);
+		const t = mean(treat.get(task) ?? []);
+		return b === null || t === null || b === 0 ? [] : [(t - b) / b];
+	});
+	const average = mean(changes);
+	if (average === null) return null;
+	const variance = changes.reduce((sum, c) => sum + (c - average) ** 2, 0) / Math.max(1, changes.length - 1);
+	return {
+		tasks: changes.length,
+		mean: average,
+		ci: bootstrapCi(changes, seed),
+		detectable: changes.length < 2 ? null : Z_SUM * Math.sqrt(variance / changes.length),
+	};
+}
+
 /**
  * Smallest success-rate difference detectable with `runsPerArm` independent runs per config at a
  * baseline rate `p` (two-sided α = 0.05, 80% power, normal approximation).

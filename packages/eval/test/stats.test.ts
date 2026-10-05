@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { computeTraceMetrics } from "../src/metrics.ts";
 import { renderMarkdown } from "../src/report.ts";
 import type { RunRecord } from "../src/run.ts";
-import { minimumDetectableEffect, pairedComparison, signTest } from "../src/stats.ts";
+import { minimumDetectableEffect, pairedComparison, pairedRelativeChange, signTest } from "../src/stats.ts";
 
 function run(taskId: string, config: string, success: boolean, extra: Partial<RunRecord> = {}): RunRecord {
 	return {
@@ -86,6 +86,46 @@ describe("pairedComparison", () => {
 	});
 });
 
+describe("pairedRelativeChange", () => {
+	const tokens = (r: RunRecord) => r.metrics?.inputTokens ?? null;
+	const spent = (taskId: string, config: string, inputTokens: number) =>
+		run(taskId, config, true, { metrics: { ...computeTraceMetrics([]), inputTokens } });
+
+	it("averages per-task relative changes and says what it could detect", () => {
+		const change = pairedRelativeChange(
+			[
+				spent("a", "off", 100),
+				spent("a", "off", 300),
+				spent("a", "on", 220),
+				spent("b", "off", 100),
+				spent("b", "on", 130),
+				spent("c", "off", 0),
+				spent("c", "on", 50),
+				run("d", "off", true),
+				spent("d", "on", 50),
+			],
+			"off",
+			"on",
+			tokens,
+		);
+		// a: 200 → 220 (+10%), b: +30%; c has a zero baseline and d no baseline data.
+		expect(change?.tasks).toBe(2);
+		expect(change?.mean).toBeCloseTo(0.2);
+		expect(change?.ci[0]).toBeGreaterThanOrEqual(0.1 - 1e-9);
+		expect(change?.ci[1]).toBeLessThanOrEqual(0.3 + 1e-9);
+		// sd of (0.1, 0.3) is 0.1414; 2.8 × sd / √2 = 0.28.
+		expect(change?.detectable).toBeCloseTo(0.28);
+	});
+
+	it("is null without shared tasks, and has no detectable size for one task", () => {
+		expect(pairedRelativeChange([spent("a", "off", 100)], "off", "on", tokens)).toBeNull();
+		expect(pairedRelativeChange([spent("a", "off", 100), spent("a", "on", 50)], "off", "on", tokens)).toMatchObject({
+			mean: -0.5,
+			detectable: null,
+		});
+	});
+});
+
 describe("report", () => {
 	it("adds a paired section against the first config", () => {
 		const markdown = renderMarkdown(
@@ -147,6 +187,119 @@ describe("report", () => {
 		);
 		expect(markdown).toContain("| config | r1 | r2 |");
 		expect(markdown).toContain("| memory | 0/1 | 1/1 |");
+	});
+
+	it("puts each config's total tokens side by side next to success by repeat (D-058)", () => {
+		const spent = (taskId: string, config: string, repeat: number, inputTokens: number, memory = 0) =>
+			run(taskId, config, config === "memory", {
+				repeat,
+				metrics: {
+					...computeTraceMetrics([]),
+					inputTokens,
+					outputTokens: 100,
+					sidecarTokens: memory,
+					sidecarTokensByModule: memory > 0 ? { memory } : {},
+				},
+			});
+		const markdown = renderMarkdown(
+			[
+				spent("a", "all-off", 1, 900),
+				spent("b", "all-off", 1, 1900),
+				spent("a", "all-off", 2, 900),
+				spent("b", "all-off", 2, 1900),
+				spent("a", "memory", 1, 900, 200),
+				spent("b", "memory", 1, 1900, 200),
+				spent("a", "memory", 2, 700),
+				spent("b", "memory", 2, 1500),
+			],
+			"t",
+		);
+		expect(markdown).toContain("### Token budget");
+		expect(markdown).toContain(
+			"| config | main tok | memory sidecar tok | total tok | total r1 | total r2 | tok per pass | Δ total vs `all-off` | 95% CI | detectable Δ |",
+		);
+		expect(markdown).toContain("| all-off | 1500 | 0 | 1500 | 1500 | 1500 | — | — | — | — |");
+		// a: 1000 → 1000 (0%), b: 2000 → 1900 (−5%); mean −2.5%, which rounds to −2%.
+		expect(markdown).toMatch(
+			/\| memory \| 1350 \| 100 \| 1450 \| 1700 \| 1200 \| 1450 \| -2% \| \[-5%, 0%\] \| ±7% \|/,
+		);
+		expect(markdown).toContain(
+			"one repeat column has 2 runs per config and can only detect differences of about 100 points",
+		);
+		expect(markdown).toContain("all 2 repeats together (4 runs) about 99 points");
+	});
+
+	it("shows which triage hint preceded the end of each repeated error (D-057)", () => {
+		const errors = (
+			config: string,
+			recurringErrors: NonNullable<ReturnType<typeof computeTraceMetrics>["recurringErrors"]>,
+		) => run("a", config, true, { metrics: { ...computeTraceMetrics([]), recurringErrors } });
+		const markdown = renderMarkdown(
+			[
+				errors("all-off", [
+					{ occurrences: 2, hints: 0, after: "stopped", fixed: true },
+					{ occurrences: 3, hints: 0, after: "recurred", fixed: false },
+					{ occurrences: 5, hints: 0, after: "recurred", fixed: false },
+				]),
+				errors("triage", [
+					{ occurrences: 2, hints: 1, after: "stopped", fixed: true },
+					{ occurrences: 2, hints: 1, after: "stopped", fixed: false },
+					{ occurrences: 3, hints: 2, after: "stopped", fixed: true },
+					{ occurrences: 4, hints: 2, after: "recurred", fixed: false },
+					{ occurrences: 2, hints: 1, after: "ended", fixed: false },
+					{ occurrences: 2, hints: 0, after: "stopped", fixed: false },
+				]),
+			],
+			"t",
+		);
+		expect(markdown).toContain("| all-off | 3 | 1/3 (33%) | 2 | 1/2 (50%) |");
+		expect(markdown).toContain("| triage | 6 | 4/6 (67%) | 2 | 1/2 (50%) |");
+		expect(markdown).toContain("### Which hint preceded the end of the error");
+		expect(markdown).toContain("| triage | 5 | 2 | 1 | 2 | 1 | 1 | 1 | 1 |");
+		expect(markdown).not.toMatch(/\| all-off \| 0 \| 0 \|/);
+	});
+
+	it("leaves the hint table out when no config gave hints, and the section out without repeats", () => {
+		const errors = run("a", "all-off", true, {
+			metrics: {
+				...computeTraceMetrics([]),
+				recurringErrors: [{ occurrences: 2, hints: 0, after: "stopped", fixed: true }],
+			},
+		});
+		expect(renderMarkdown([errors], "t")).toContain("## Repeated errors");
+		expect(renderMarkdown([errors], "t")).not.toContain("Which hint");
+		expect(renderMarkdown([run("a", "all-off", true)], "t")).not.toContain("## Repeated errors");
+	});
+
+	it("counts compactions, overflows and the failures that came with them (D-059)", () => {
+		const pressure = (
+			taskId: string,
+			config: string,
+			success: boolean,
+			extra: Partial<ReturnType<typeof computeTraceMetrics>>,
+		) => run(taskId, config, success, { metrics: { ...computeTraceMetrics([]), ...extra } });
+		const markdown = renderMarkdown(
+			[
+				pressure("a", "all-off", true, {}),
+				pressure("b", "all-off", false, { compactions: 2, overflowCompactions: 1 }),
+				pressure("c", "all-off", false, { failedCompactions: 1, overflowCompactions: 1, errorStops: 2 }),
+				pressure("a", "compaction", true, { compactions: 1, lengthStops: 1 }),
+				pressure("b", "compaction", true, { compactions: 1 }),
+				run("c", "compaction", false),
+			],
+			"t",
+		);
+		expect(markdown).toContain("## Context pressure");
+		expect(markdown).toContain("| all-off | 1/3 | 0/1 | 1/2 | 2 | 1 | 2 | 0 | 2 |");
+		expect(markdown).toContain("| compaction | 2/2 | 2/2 | — | 0 | 0 | 0 | 1 | 0 |");
+	});
+
+	it("says so when nothing compacted, and points at provider errors", () => {
+		expect(renderMarkdown([run("a", "off", true)], "t")).toContain(
+			"No run compacted or overflowed its context window.\n",
+		);
+		const errored = run("a", "off", false, { metrics: { ...computeTraceMetrics([]), errorStops: 3 } });
+		expect(renderMarkdown([errored], "t")).toContain("3 turns ended in a provider error");
 	});
 
 	it("omits it for a single config", () => {

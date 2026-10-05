@@ -1,0 +1,9 @@
+// Supervisor (suggest) + research R1.3: the judge sees only the final message's unverified claims,
+// and nothing else (D-056). CodeJudgeBench found judges do better with the judged response's full
+// text (D-054), so read this as a real test: it may lower precision of "complete". Compare
+// against `supervisor`.
+{
+	"modules": {
+		"supervisor": { "enabled": true, "mode": "suggest", "finalMessage": "claims" }
+	}
+}

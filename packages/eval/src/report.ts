@@ -1,5 +1,12 @@
+import type { RecurringError, TraceMetrics } from "./metrics.ts";
 import type { RunRecord } from "./run.ts";
-import { minimumDetectableEffect, type PairedComparison, pairedComparison } from "./stats.ts";
+import {
+	minimumDetectableEffect,
+	type PairedChange,
+	type PairedComparison,
+	pairedComparison,
+	pairedRelativeChange,
+} from "./stats.ts";
 
 export interface ConfigSummary {
 	readonly config: string;
@@ -68,7 +75,7 @@ export function summarize(records: readonly RunRecord[]): ConfigSummary[] {
 				.join("/"),
 			sidecarFailures: sum(withMetrics.map((m) => m.sidecarFailures)),
 			abnormal: runs.filter((r) => r.outcome !== "settled").length,
-			meanTotalTokens: mean(withMetrics.map((m) => m.inputTokens + m.cachedTokens + m.outputTokens + m.sidecarTokens)),
+			meanTotalTokens: mean(withMetrics.map(totalTokens)),
 			tampered: runs.filter((r) => (r.tamperedTests?.length ?? 0) > 0).length,
 			luckyPasses: runs.filter(
 				(r) =>
@@ -139,11 +146,127 @@ export function renderMarkdown(records: readonly RunRecord[], title: string): st
 		});
 		lines.push(`| ${task} | ${cells.join(" | ")} |`);
 	}
-	lines.push(...verdictSection(summaries), ...repeatSection(records, summaries), ...pairedSection(records, summaries));
+	lines.push(
+		...verdictSection(summaries),
+		...recurringSection(records, configs),
+		...contextSection(records, configs),
+		...repeatSection(records, summaries),
+		...pairedSection(records, summaries),
+	);
 	return `${lines.join("\n")}\n`;
 }
 
-/** Success by repeat index: the learning curve for modules that learn across runs (memory). */
+/** Every token a run spent: main input, cached and output, plus all sidecar calls. */
+function totalTokens(m: TraceMetrics): number {
+	return m.inputTokens + m.cachedTokens + m.outputTokens + m.sidecarTokens;
+}
+
+function metricsOf(records: readonly RunRecord[], config: string): TraceMetrics[] {
+	return records.flatMap((r) => (r.config === config && r.metrics ? [r.metrics] : []));
+}
+
+/**
+ * How repeated errors went, and whether each triage hint preceded the end of its error (D-057).
+ * The first table needs no triage, so the baseline row is the natural rate to compare against.
+ */
+function recurringSection(records: readonly RunRecord[], configs: readonly string[]): string[] {
+	const rows = configs.map((config) => ({
+		config,
+		errors: metricsOf(records, config).flatMap((m) => m.recurringErrors ?? []),
+	}));
+	if (rows.every((r) => r.errors.length === 0)) return [];
+	const count = (errors: readonly RecurringError[], test: (e: RecurringError) => boolean) => errors.filter(test).length;
+	const share = (part: number, whole: number) => (whole === 0 ? "—" : `${part}/${whole} (${pct(part / whole)})`);
+	const hinted = rows.filter((r) => r.errors.some((e) => e.hints > 0));
+	const lines = [
+		"",
+		"## Repeated errors",
+		"",
+		"| config | errors seen 2+ times | gone after the 2nd time | errors seen 3+ times | gone after the 3rd time |",
+		"|---|---|---|---|---|",
+		...rows.map(({ config, errors }) => {
+			const thrice = count(errors, (e) => e.occurrences >= 3);
+			return `| ${config} | ${errors.length} | ${share(errors.length - thrice, errors.length)} | ${thrice} | ${share(
+				count(errors, (e) => e.occurrences === 3),
+				thrice,
+			)} |`;
+		}),
+		"",
+		"One row per config, counting each normalized error signature once per run. Triage shows its first hint on the 2nd occurrence and its second on the 3rd, so *gone after the 2nd time* is where hint 1 can act and *gone after the 3rd time* where hint 2 can. Compare each against the baseline row: that is how often the agent gets past the error unaided. An error also counts as gone when the run ended.",
+	];
+	if (hinted.length === 0) return lines;
+	return [
+		...lines,
+		"",
+		"### Which hint preceded the end of the error",
+		"",
+		"| config | errors hinted | stopped after hint 1 | …and fixed | got hint 2 | stopped after hint 2 | …and fixed | came back after the last hint | run ended |",
+		"|---|---|---|---|---|---|---|---|---|",
+		...hinted.map(({ config, errors }) => {
+			const withHints = errors.filter((e) => e.hints > 0);
+			const stopped = (hints: number, fixed = false) =>
+				count(withHints, (e) => e.hints === hints && e.after === "stopped" && (!fixed || e.fixed));
+			return `| ${[
+				config,
+				withHints.length,
+				stopped(1),
+				stopped(1, true),
+				count(withHints, (e) => e.hints >= 2),
+				stopped(2),
+				stopped(2, true),
+				count(withHints, (e) => e.after === "recurred"),
+				count(withHints, (e) => e.after === "ended"),
+			].join(" | ")} |`;
+		}),
+		"",
+		"Each hinted error is credited to the last hint the agent saw for it. *Stopped* means the error did not come back and the agent kept working; *…and fixed* means the command that last failed that way later succeeded. *Run ended* means no tool result followed the hint, so nothing can be said. The second hint earns its sidecar call only if *stopped after hint 2* is a real share of *got hint 2* and beats the baseline's *gone after the 3rd time*; otherwise cap hints at 1 (D-043, AB_PLAN step 3).",
+	];
+}
+
+/** Compactions and context overflows per config: the evidence D-053 asks for before masking is revisited. */
+function contextSection(records: readonly RunRecord[], configs: readonly string[]): string[] {
+	const pressured = (r: RunRecord) =>
+		r.metrics !== null &&
+		r.metrics.compactions + (r.metrics.overflowCompactions ?? 0) + (r.metrics.failedCompactions ?? 0) > 0;
+	const heading = ["", "## Context pressure", ""];
+	if (!records.some(pressured)) {
+		const stopped = sum(records.map((r) => r.metrics?.errorStops ?? 0));
+		return [
+			...heading,
+			`No run compacted or overflowed its context window.${stopped > 0 ? ` ${stopped} turns ended in a provider error: check the logs in case an overflow went unrecognised.` : ""}`,
+		];
+	}
+	const passed = (runs: readonly RunRecord[]) =>
+		runs.length === 0 ? "—" : `${runs.filter((r) => r.success).length}/${runs.length}`;
+	return [
+		...heading,
+		"| config | runs that compacted | success with compaction | success without | overflow compactions | failed compactions | error stops | length stops | failed runs under context pressure |",
+		"|---|---|---|---|---|---|---|---|---|",
+		...configs.map((config) => {
+			const runs = records.filter((r) => r.config === config && r.metrics);
+			const metrics = metricsOf(records, config);
+			const compacted = runs.filter((r) => (r.metrics?.compactions ?? 0) > 0);
+			return `| ${[
+				config,
+				`${compacted.length}/${runs.length}`,
+				passed(compacted),
+				passed(runs.filter((r) => !compacted.includes(r))),
+				sum(metrics.map((m) => m.overflowCompactions ?? 0)),
+				sum(metrics.map((m) => m.failedCompactions ?? 0)),
+				sum(metrics.map((m) => m.errorStops ?? 0)),
+				sum(metrics.map((m) => m.lengthStops ?? 0)),
+				runs.filter((r) => pressured(r) && !r.success).length,
+			].join(" | ")} |`;
+		}),
+		"",
+		"*Overflow compactions* are the ones pi started because a request no longer fit the context window or the reply was cut short, whether they succeeded or not; *failed compactions* could not produce a summary or could not recover. *Error stops* and *length stops* count turns that ended in a provider error or at the output limit: an overflow pi did not recognise shows up there. *Failed runs under context pressure* failed their check after compacting or overflowing. Runs that compact are the long ones, so compare *success with compaction* across configs, not against *success without*. Retro-masking is reconsidered only if these failures are common in the baseline (D-053).",
+	];
+}
+
+/**
+ * Success by repeat index: the learning curve for modules that learn across runs (memory), with
+ * what each config spent, so the comparison can be read at matched budgets (research R5.4, D-058).
+ */
 function repeatSection(records: readonly RunRecord[], summaries: readonly ConfigSummary[]): string[] {
 	const repeats = [...new Set(records.map((r) => r.repeat))].sort((a, b) => a - b);
 	if (repeats.length < 2) return [];
@@ -160,6 +283,68 @@ function repeatSection(records: readonly RunRecord[], summaries: readonly Config
 		...summaries.map((s) => `| ${s.config} | ${repeats.map((r) => cell(s.config, r)).join(" | ")} |`),
 		"",
 		"Repeats run in order (all tasks for r1, then r2, …), so a module that learns, like memory, can only help from r2 on; a rise over r1 that the baseline does not show is its effect on the same tasks (an upper bound, research §5c).",
+		...budgetSection(records, summaries, repeats),
+	];
+}
+
+/** Total tokens per config, side by side and by repeat, with what the run count can detect. */
+function budgetSection(
+	records: readonly RunRecord[],
+	summaries: readonly ConfigSummary[],
+	repeats: readonly number[],
+): string[] {
+	const [baseline] = summaries;
+	if (!baseline) return [];
+	const total = (r: RunRecord) => (r.metrics ? totalTokens(r.metrics) : null);
+	const byRepeat = (repeat: number) => records.filter((r) => r.repeat === repeat);
+	const modules = [...new Set(records.flatMap((r) => Object.keys(r.metrics?.sidecarTokensByModule ?? {})))].sort();
+	const rows = summaries.map((s) => {
+		const metrics = metricsOf(records, s.config);
+		const spent = sum(metrics.map(totalTokens));
+		const delta = s === baseline ? null : pairedRelativeChange(records, baseline.config, s.config, total);
+		return [
+			s.config,
+			fixed(mean(metrics.map((m) => m.inputTokens + m.cachedTokens + m.outputTokens)), 0),
+			...modules.map((id) => fixed(mean(metrics.map((m) => m.sidecarTokensByModule?.[id] ?? 0)), 0)),
+			fixed(s.meanTotalTokens, 0),
+			...repeats.map((repeat) => fixed(mean(metricsOf(byRepeat(repeat), s.config).map(totalTokens)), 0)),
+			s.successes > 0 && metrics.length > 0 ? fixed(spent / s.successes, 0) : "—",
+			...tokenChange(delta),
+		];
+	});
+	const perRepeat = Math.min(
+		...repeats.map((repeat) => byRepeat(repeat).filter((r) => r.config === baseline.config).length),
+	);
+	const pooled = Math.min(0.95, Math.max(0.05, records.filter((r) => r.success).length / records.length));
+	const header = [
+		"config",
+		"main tok",
+		...modules.map((id) => `${id} sidecar tok`),
+		"total tok",
+		...repeats.map((r) => `total r${r}`),
+		"tok per pass",
+		`Δ total vs \`${baseline.config}\``,
+		"95% CI",
+		"detectable Δ",
+	];
+	return [
+		"",
+		"### Token budget",
+		"",
+		`| ${header.join(" | ")} |`,
+		`|${header.map(() => "---").join("|")}|`,
+		...rows.map((row) => `| ${row.join(" | ")} |`),
+		"",
+		`Per-run means. *main tok* is everything the main model read and wrote (input, cached and output), which includes any text a module injected, such as memory's recalled cards; the sidecar columns are each module's own calls; *total tok* is their sum. *tok per pass* is all tokens spent divided by passing runs. *Δ total* is the mean per-task relative change against the baseline, with a task-level bootstrap CI; *detectable Δ* is the smallest mean change these tasks could show (α = 0.05, 80% power), so a CI inside it that spans zero means "no difference this run could see", not "no difference". For success, one repeat column has ${perRepeat} runs per config and can only detect differences of about ${Math.round(minimumDetectableEffect(pooled, perRepeat) * 100)} points; all ${repeats.length} repeats together (${baseline.runs} runs) about ${Math.round(minimumDetectableEffect(pooled, baseline.runs) * 100)} points. Read a learning module at matched budgets (research R5.4, D-055): it must not lose success, and any gain has to outweigh the extra tokens, because a baseline given the same budget often catches up.`,
+	];
+}
+
+function tokenChange(delta: PairedChange | null): string[] {
+	if (!delta) return ["—", "—", "—"];
+	return [
+		change(delta.mean),
+		`[${change(delta.ci[0])}, ${change(delta.ci[1])}]`,
+		delta.detectable === null ? "—" : `±${Math.round(delta.detectable * 100)}%`,
 	];
 }
 

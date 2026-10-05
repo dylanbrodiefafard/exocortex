@@ -107,6 +107,7 @@ npm run eval -- --report eval-runs/<stamp> --tags spec-compliance   # re-render 
 - Each run copies a fixture from `tasks/` into `eval-runs/<timestamp>/work/` and drives pi over RPC with only Exocortex loaded. It then scores the run with the task's check command and computes metrics from the trace.
 - Output goes to `eval-runs/<timestamp>/`: `summary.md`, `results.json`, per-run stderr and check logs, and pi sessions.
 - With two or more configs, the summary compares each one with the first, task by task: the mean success difference with a bootstrap 95% CI, a sign test, changes in turns, tokens and wall-clock, and the smallest difference the run count can detect. A dozen tasks × 5 repeats only detects large effects; see `docs/RESEARCH.md` §7.
+- The summary also shows how repeated errors went and which triage hint preceded the end of each (D-057), compactions and context overflows per config (D-059), and, with `--repeat 2` or more, success and total tokens by repeat (D-058).
 - Models and auth come from your `~/.pi/agent`. Pass `--pi-agent-dir` to use another directory.
 - The fixtures need `python3`, `go`, `cargo` and `g++`/`make`.
 

@@ -187,6 +187,22 @@ export function registerTraceRecorder(pi: ExtensionAPI, options: RecorderOptions
 	);
 
 	pi.on(
+		"session_compact_failed",
+		guard("session_compact_failed", (event) => {
+			record({
+				kind: "compaction.failed",
+				data: toJsonValue({
+					reason: event.reason,
+					errorMessage: event.errorMessage,
+					aborted: event.aborted,
+					willRetry: event.willRetry,
+					fromExtension: event.fromExtension,
+				}),
+			});
+		}),
+	);
+
+	pi.on(
 		"model_select",
 		guard("model_select", (event) => {
 			record({

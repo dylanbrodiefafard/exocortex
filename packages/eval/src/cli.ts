@@ -3,7 +3,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { renderMarkdown } from "./report.ts";
-import { type RunRecord, runEval, type ValidationResult, validateTasks } from "./run.ts";
+import { type RunRecord, readMetrics, runEval, type ValidationResult, validateTasks } from "./run.ts";
 import { loadTasks, type Task } from "./task.ts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..", "..", "..");
@@ -112,7 +112,11 @@ async function run(tasks: readonly Task[], values: CliValues, runDir: string, st
 	return 0;
 }
 
-/** Rebuilds the summary from results.json, or results.jsonl when the run was interrupted. */
+/**
+ * Rebuilds the summary from results.json, or results.jsonl when the run was interrupted. Metrics
+ * are recomputed from the run's trace when it is still there, so a run made before a metric
+ * existed still gets it.
+ */
 function report(runDir: string, tasks: readonly Task[], values: CliValues): number {
 	const json = join(runDir, "results.json");
 	const jsonl = join(runDir, "results.jsonl");
@@ -125,7 +129,10 @@ function report(runDir: string, tasks: readonly Task[], values: CliValues): numb
 					.map((line) => JSON.parse(line) as RunRecord)
 			: [];
 	const ids = new Set(tasks.map((t) => t.spec.id));
-	const records = all.filter((r) => ids.has(r.taskId));
+	const dbPath = join(runDir, "trace.db");
+	const records = all
+		.filter((r) => ids.has(r.taskId))
+		.map((r) => (existsSync(dbPath) ? { ...r, metrics: readMetrics(dbPath, r.label) ?? r.metrics } : r));
 	if (records.length === 0) {
 		process.stderr.write(`No results for the selected tasks in ${runDir}\n`);
 		return 1;

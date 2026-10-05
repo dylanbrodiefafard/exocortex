@@ -708,6 +708,56 @@ Open check: Exocortex's injected `custom_message` reaches ninfer as a second con
 - **New evidence:** VibeMemBench (2609.23570) found execution-verified experience helped held-out solvers by 1.1–4.5 points, but 11 of 12 pairings of existing memory systems with solvers failed to beat memory-off. That supports D-049's narrow design and predicts a small effect.
 - **Implication:** AB_PLAN step 4 (`--repeat 3`) cannot detect a 1–4 point effect. Read it as a learning-curve and harm check: no drop in success, no budget-matched token loss. Do not read it as proof of benefit. No setting changes.
 
+### D-056 — One supervisor option per eval config; `supervisor-claims` added · accepted (2026-10-04; follows D-054, amends D-046's config list)
+- **Context:** `supervisor-items` set both `verdictStyle: "per-criterion"` (R1.4) and `finalMessage: "claims"` (R1.3). D-054 gave the two options opposite priors, so a result from that config could not be pinned on either.
+- **Decision:**
+  - `supervisor-items` sets `verdictStyle: "per-criterion"` only.
+  - New `supervisor-claims` sets `finalMessage: "claims"` only.
+  - `supervisor-research` still turns everything on. `supervisor-pre` keeps `preVerdict` and `warningSignals` together: they are one deterministic layer (R1.1/R1.2).
+  - A test in `packages/eval/test/configs.test.ts` holds each single-option config to its one option, and `supervisor-research` to their union.
+- **AB_PLAN step 2** lists `supervisor-think` first and adds `supervisor-claims`. The "rerun with a local copy" workaround from D-054 is gone.
+- **No module or setting default changes** (D-052).
+
+### D-057 — The eval report follows each repeated error to see which triage hint preceded its end · accepted (2026-10-04; AB_PLAN step 3, measures D-043's cap)
+- **Context:** D-043 allows 2 hints per error signature. Self-Debug's gain came almost entirely from the first feedback turn, so the second hint has to show it earns its sidecar call. Checking that by hand in the trace does not scale to an A/B.
+- **Decision:** `TraceMetrics.recurringErrors` holds one entry per error signature seen 2+ times in a run: `{occurrences, hints, after, fixed}`. It uses only data already in the trace:
+  - **Failures** are `tool.result` events that triage would call a failure (error result or non-zero exit), grouped by the same normalized signature (D-016).
+  - **Hints** are triage's `exo.rewrite` events whose note ends in `+ hint`, joined to the failing result by `toolCallId`. A hint the guidance gate dropped, a timed-out sidecar and a hypothesis list are not hints.
+  - **`after`** describes what followed the last hint: `stopped` (the error did not come back and the agent kept working), `recurred`, or `ended` (no tool result followed, so the hint gets neither credit nor blame).
+  - **`fixed`** is true when the command that last failed that way succeeded later. It is the same external signal memory admits cards on (D-049).
+- **Report:** a "Repeated errors" section.
+  - The first table needs no triage: for every config, how many repeated errors were gone after the 2nd occurrence and after the 3rd. Triage hints at exactly those points, so the baseline row is the counterfactual: how often the agent gets past the error unaided.
+  - The second table credits each hinted error to its last hint: stopped after hint 1, stopped after hint 2, came back, or run ended, each with its "and fixed" count.
+- **Reading it:** cap hints at 1 unless "stopped after hint 2" is a real share of "got hint 2" *and* beats the baseline's "gone after the 3rd time".
+- **Limits:**
+  - "Came before" is not "caused". The baseline row is the only control, and it is not paired by signature.
+  - The report reads triage's note text. Triage's tests pin that text (`repeat 2 + hint`).
+- **Not changed:** `maxHintsPerSignature` stays 2.
+
+### D-058 — Memory's A/B is reported as a budget-matched harm check · accepted (2026-10-04; follows D-055, research R5.4)
+- **Context:** D-055 says to read the memory run as a harm check: no drop in success and no budget-matched token loss. The report had a *total tok* column, but nothing next to the learning curve, no per-repeat cost and no statement of what the run could detect.
+- **Already there:** `total tok` = main input + cached + output + all sidecar tokens. Memory's recalled cards are tool-result rewrites, so they are already counted in main input; its lesson-writing calls are sidecar calls.
+- **Added,** as a "Token budget" table under "Success by repeat":
+  - per config: main tokens, sidecar tokens per module (new `TraceMetrics.sidecarTokensByModule`), total, total per repeat, and tokens per passing run;
+  - Δ total tokens against the first config, paired by task, with a task-level bootstrap CI and the smallest mean change those tasks could detect (2.8 × sd ⁄ √tasks);
+  - the smallest detectable success difference for one repeat column and for all repeats together (D-045's formula).
+- **Why tokens per pass:** in 2606.15017 the baseline caught up once it was given the memory methods' budget. Tokens per pass shows whether a success gain is larger than what the extra tokens would buy.
+- **Limit:** cached tokens count at face value, although a local prefix hit is nearly free. The main table has the cached/uncached split.
+- **`--report` recomputes metrics** from the run directory's `trace.db` when it is still there, so runs made before a metric existed get it too.
+
+### D-059 — The report counts context overflows and compaction failures; failed compactions are traced · accepted (2026-10-04; supplies the evidence D-053 asks for)
+- **Context:** D-053 reconsiders retro-masking only if Phase 4 runs show context-overflow or compaction-driven failures. The report did not show compactions at all, and the trace dropped pi's `session_compact_failed` event.
+- **Decision:**
+  - **Trace:** new event kind `compaction.failed`, recorded from `session_compact_failed` with `{reason, errorMessage, aborted, willRetry, fromExtension}`. No migration is needed: `kind` is free text.
+  - **Metrics:**
+    - `overflowCompactions`: compactions with `reason: "overflow"`, done or failed. Pi decides what an overflow is (PI_API_NOTES §9), so there are no error-text patterns here.
+    - `failedCompactions`.
+    - `errorStops` and `lengthStops`: turns ending with those stop reasons. An overflow error that pi's patterns miss (possible with a custom provider such as ninfer) shows up as an error stop with no compaction.
+  - **Report:** a "Context pressure" section. Per config: runs that compacted, success with and without compaction (AB_PLAN step 3's primary for the compaction run), the four counts above, and **failed runs under context pressure** (failed the check after compacting or overflowing). When nothing compacted it says so in one line.
+- **Trigger for D-053:** failed runs under context pressure in the `all-off` row of the `ninfer32k` run. A handful out of 84 runs is not a case for masking; a clear share of the failures is.
+- **Limit:** a failure after compaction is not proof that compaction caused it. Runs that compact are the long, hard ones, so compare the column across configs on the same tasks.
+- **Retro-masking stays unbuilt.**
+
 ---
 
 ## Open questions (carried from brief §10, updated)

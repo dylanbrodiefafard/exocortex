@@ -108,6 +108,7 @@ export function createTriage(raw: Readonly<Record<string, unknown>>, ctx: Module
 			if (hint) hintsGiven += 1;
 			return {
 				text: `${draft.current}\n${notice}${hint ? `\n[exo triage hint: ${hint}]` : ""}`,
+				// The eval report reads "+ hint" to follow each hint's outcome (D-057).
 				note: `repeat ${count}${hint ? " + hint" : ""}`,
 			};
 		},

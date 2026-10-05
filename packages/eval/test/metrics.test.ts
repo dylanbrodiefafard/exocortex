@@ -86,6 +86,13 @@ describe("computeTraceMetrics", () => {
 			injections: 1,
 			continuations: 1,
 			compactions: 0,
+			overflowCompactions: 0,
+			failedCompactions: 0,
+			errorStops: 0,
+			lengthStops: 0,
+			// The same failure twice with nothing after it: it never had the chance to recur.
+			recurringErrors: [{ occurrences: 2, hints: 0, after: "ended", fixed: false }],
+			sidecarTokensByModule: {},
 			sidecarCalls: 0,
 			sidecarTokens: 0,
 			sidecarFailures: 0,
@@ -119,6 +126,45 @@ describe("computeTraceMetrics", () => {
 			],
 		);
 		expect(metrics).toMatchObject({ sidecarCalls: 3, sidecarTokens: 240, sidecarFailures: 1 });
+	});
+
+	it("splits sidecar tokens by module", () => {
+		const call = (module: string, promptTokens: number) => ({
+			module,
+			priority: "background" as const,
+			outcome: "ok" as const,
+			promptHash: "h",
+			startedAt: 0,
+			queueMs: 0,
+			latencyMs: 10,
+			attempts: 1,
+			maxTokens: 64,
+			usage: { promptTokens, cachedTokens: null, completionTokens: 10 },
+			error: null,
+		});
+		const metrics = computeTraceMetrics([], [call("memory", 100), call("memory", 50), call("triage", 30)]);
+		expect(metrics.sidecarTokensByModule).toEqual({ memory: 170, triage: 40 });
+		expect(metrics.sidecarTokens).toBe(210);
+	});
+
+	it("counts context pressure: overflow and failed compactions, error and length stops", () => {
+		const metrics = computeTraceMetrics([
+			event("turn.end", { stopReason: "error" }),
+			event("compaction", { reason: "overflow", willRetry: true }),
+			event("turn.end", { stopReason: "length" }),
+			event("compaction", { reason: "threshold" }),
+			event("turn.end", { stopReason: "error" }),
+			event("compaction.failed", { reason: "overflow", errorMessage: "recovery failed", aborted: false }),
+			event("compaction.failed", { reason: "threshold", aborted: true }),
+			event("turn.end", { stopReason: "stop" }),
+		]);
+		expect(metrics).toMatchObject({
+			compactions: 2,
+			overflowCompactions: 2,
+			failedCompactions: 2,
+			errorStops: 2,
+			lengthStops: 1,
+		});
 	});
 
 	it("counts supervisor verdicts and continuations (accepted suggestions and auto)", () => {
@@ -161,6 +207,83 @@ describe("computeTraceMetrics", () => {
 			result("6", "bash", false),
 		]);
 		expect(retried).toMatchObject({ verifiedAfterLastEdit: true, maxRepeatedFailures: 3 });
+	});
+
+	describe("recurring errors and triage hints", () => {
+		const ERROR = "error[E0502]: cannot borrow `x` as mutable";
+		let next = 0;
+		/** One bash call and its result; `note` is triage's rewrite note for it, if any. */
+		function bash(command: string, failure: string | null, note?: string) {
+			const toolCallId = `c${++next}`;
+			return [
+				event("tool.call", { toolCallId, toolName: "bash", input: { command } }),
+				event("tool.result", {
+					toolCallId,
+					toolName: "bash",
+					isError: failure !== null,
+					exitCode: failure === null ? 0 : 101,
+					content: [{ type: "text", text: failure ?? "ok" }],
+				}),
+				...(note === undefined
+					? []
+					: [event("exo.rewrite", { toolCallId, note }, { synthetic: true, module: "triage" })]),
+			];
+		}
+		const recurring = (...steps: StoredTraceEvent[][]) => computeTraceMetrics(steps.flat()).recurringErrors;
+
+		it("credits the first hint when the error never comes back", () => {
+			expect(
+				recurring(bash("cargo build", ERROR), bash("cargo build", ERROR, "repeat 2 + hint"), bash("cargo build", null)),
+			).toEqual([{ occurrences: 2, hints: 1, after: "stopped", fixed: true }]);
+		});
+
+		it("credits the second hint when the error outlived the first", () => {
+			expect(
+				recurring(
+					bash("cargo build", ERROR),
+					bash("cargo build", ERROR, "repeat 2 + hint"),
+					bash("cargo build", ERROR, "repeat 3 + hint"),
+					bash("ls", null),
+				),
+			).toEqual([{ occurrences: 3, hints: 2, after: "stopped", fixed: false }]);
+		});
+
+		it("reports an error that came back after its last hint", () => {
+			expect(
+				recurring(
+					bash("cargo build", ERROR),
+					bash("cargo build", ERROR, "repeat 2 + hint"),
+					bash("cargo build", ERROR, "repeat 3 + hint"),
+					bash("cargo build", ERROR, "repeat 4"),
+					bash("cargo build", null),
+				),
+			).toEqual([{ occurrences: 4, hints: 2, after: "recurred", fixed: true }]);
+		});
+
+		it("does not credit a hint the run ended on, or notes without a hint", () => {
+			expect(recurring(bash("cargo build", ERROR), bash("cargo build", ERROR, "repeat 2 + hint"))).toEqual([
+				{ occurrences: 2, hints: 1, after: "ended", fixed: false },
+			]);
+			expect(
+				recurring(
+					bash("cargo build", ERROR),
+					bash("cargo build", ERROR, "repeat 2"),
+					bash("cargo build", ERROR, "repeat 3 + 2 hypotheses"),
+					bash("ls", null),
+				),
+			).toEqual([{ occurrences: 3, hints: 0, after: "recurred", fixed: false }]);
+		});
+
+		it("tracks signatures separately and ignores errors seen once", () => {
+			expect(
+				recurring(
+					bash("cargo build", ERROR),
+					bash("pytest", "FAILED test_a - AssertionError"),
+					bash("cargo build", ERROR),
+					bash("ls", null),
+				),
+			).toEqual([{ occurrences: 2, hints: 0, after: "stopped", fixed: false }]);
+		});
 	});
 
 	it("handles an empty trace", () => {

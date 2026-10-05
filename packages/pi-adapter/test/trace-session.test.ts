@@ -48,6 +48,13 @@ describe("trace recorder (in process)", () => {
 			toolResults: [],
 		});
 		await h.pi.emit("session_compact", { reason: "threshold", fromExtension: false, willRetry: false });
+		await h.pi.emit("session_compact_failed", {
+			reason: "overflow",
+			errorMessage: "still too long",
+			aborted: false,
+			willRetry: false,
+			fromExtension: false,
+		});
 		await h.pi.emit("model_select", {
 			model: { provider: "p", id: "b" },
 			previousModel: { provider: "p", id: "a" },
@@ -75,6 +82,7 @@ describe("trace recorder (in process)", () => {
 			"tool.result",
 			"turn.end",
 			"compaction",
+			"compaction.failed",
 			"model.change",
 			"model.change",
 			"agent.settled",
@@ -85,7 +93,8 @@ describe("trace recorder (in process)", () => {
 		expect(events[2]?.turn).toBe(0);
 		expect(events[4]).toMatchObject({ synthetic: true, module: "supervisor" });
 		expect(events[6]?.data).toMatchObject({ exitCode: 0 });
-		expect(events[10]?.data).toMatchObject({ model: "p/c", previous: null });
+		expect(events[9]?.data).toMatchObject({ reason: "overflow", errorMessage: "still too long", aborted: false });
+		expect(events[11]?.data).toMatchObject({ model: "p/c", previous: null });
 	});
 
 	it("closes the store when pi quits", async () => {

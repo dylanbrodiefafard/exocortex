@@ -23,6 +23,8 @@ export const TRACE_EVENT_KINDS = [
 	"turn.end",
 	"agent.settled",
 	"compaction",
+	/** A compaction failed or was aborted; `reason: "overflow"` means the context window was exceeded. */
+	"compaction.failed",
 	"model.change",
 	/** A module's extracted task goals (e.g. the supervisor's goal ledger). */
 	"exo.ledger",

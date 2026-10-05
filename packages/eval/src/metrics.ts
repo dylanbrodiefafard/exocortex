@@ -44,12 +44,44 @@ export interface TraceMetrics {
 	/** Most times one identical command failed: blind retrying (research R7.6). */
 	readonly maxRepeatedFailures: number;
 	readonly compactions: number;
+	/**
+	 * Context pressure (D-059). Optional: results recorded before these existed lack them.
+	 * Compactions pi started because a request overflowed the context window, done or failed.
+	 */
+	readonly overflowCompactions?: number;
+	/** Compactions that failed or were aborted (`compaction.failed` events). */
+	readonly failedCompactions?: number;
+	/** Turns that ended with `stopReason: "error"`: where an overflow pi did not recognise shows up. */
+	readonly errorStops?: number;
+	/** Turns cut off by the output limit (`stopReason: "length"`). */
+	readonly lengthStops?: number;
+	/** One entry per error signature that occurred 2+ times: how the repeats and triage's hints went (D-057). */
+	readonly recurringErrors?: readonly RecurringError[];
+	/** Sidecar prompt + completion tokens by module (D-058). */
+	readonly sidecarTokensByModule?: Readonly<Record<string, number>>;
 	/** Sidecar calls Exocortex made (all outcomes). */
 	readonly sidecarCalls: number;
 	/** Sidecar prompt + completion tokens. */
 	readonly sidecarTokens: number;
 	/** Sidecar calls that did not succeed (timeout, error, invalid output, ...), excluding cap/budget rejections. */
 	readonly sidecarFailures: number;
+}
+
+/** One normalized error signature that came back within a run. */
+export interface RecurringError {
+	/** Times the signature occurred (2 or more). */
+	readonly occurrences: number;
+	/** Triage hints the agent was shown for it (0 without triage, at most D-043's cap). */
+	readonly hints: number;
+	/**
+	 * What followed the last hint (the last occurrence when no hint was given):
+	 * - `stopped`: the error did not come back and the agent kept working;
+	 * - `recurred`: it came back;
+	 * - `ended`: the run ended before another tool result, so nothing can be said.
+	 */
+	readonly after: "stopped" | "recurred" | "ended";
+	/** The command that last failed this way succeeded later in the run. */
+	readonly fixed: boolean;
 }
 
 export function computeTraceMetrics(
@@ -114,12 +146,81 @@ export function computeTraceMetrics(
 			(e) => e.kind === "exo.verdict" && record(e.data)["source"] === "deterministic",
 		).length,
 		compactions: events.filter((e) => e.kind === "compaction").length,
+		overflowCompactions: events.filter(
+			(e) => (e.kind === "compaction" || e.kind === "compaction.failed") && record(e.data)["reason"] === "overflow",
+		).length,
+		failedCompactions: events.filter((e) => e.kind === "compaction.failed").length,
+		errorStops: stops(events, "error"),
+		lengthStops: stops(events, "length"),
+		recurringErrors: recurringErrors(events),
+		sidecarTokensByModule: tokensByModule(sidecarCalls),
 		sidecarCalls: sidecarCalls.length,
 		sidecarTokens: sidecarCalls.reduce((sum, c) => sum + c.usage.promptTokens + c.usage.completionTokens, 0),
 		sidecarFailures: sidecarCalls.filter(
 			(c) => c.outcome !== "ok" && c.outcome !== "rejected_turn_cap" && c.outcome !== "rejected_budget",
 		).length,
 	};
+}
+
+function stops(events: readonly StoredTraceEvent[], reason: string): number {
+	return events.filter((e) => e.kind === "turn.end" && record(e.data)["stopReason"] === reason).length;
+}
+
+function tokensByModule(calls: readonly SidecarCallRecord[]): Record<string, number> {
+	const out: Record<string, number> = {};
+	for (const call of calls) {
+		out[call.module] = (out[call.module] ?? 0) + call.usage.promptTokens + call.usage.completionTokens;
+	}
+	return out;
+}
+
+/** Triage's rewrite note when its sidecar hint was shown (`repeat 3 + hint`, mod-triage). */
+const HINT_NOTE = /\+ hint$/;
+
+/**
+ * Follows each error signature through the run (D-057). A failure is what triage calls one: an
+ * error result or a non-zero exit. Hints are read from triage's `exo.rewrite` notes, joined to
+ * the failing result by tool call id.
+ */
+function recurringErrors(events: readonly StoredTraceEvent[]): RecurringError[] {
+	const commands = new Map<string, string>();
+	const hinted = new Set<string>();
+	for (const e of events) {
+		const data = record(e.data);
+		if (e.kind === "tool.call")
+			commands.set(String(data["toolCallId"]), String(record(data["input"])["command"] ?? ""));
+		if (e.kind === "exo.rewrite" && e.module === "triage" && HINT_NOTE.test(String(data["note"])))
+			hinted.add(String(data["toolCallId"]));
+	}
+	const results = events.filter((e) => e.kind === "tool.result").map((e) => record(e.data));
+	const bySignature = new Map<string, number[]>();
+	results.forEach((result, index) => {
+		if (!failed(result)) return;
+		const signature = errorSignature(result);
+		bySignature.set(signature, [...(bySignature.get(signature) ?? []), index]);
+	});
+	const commandOf = (index: number) => commands.get(String(results[index]?.["toolCallId"])) ?? "";
+	const out: RecurringError[] = [];
+	for (const indexes of bySignature.values()) {
+		if (indexes.length < 2) continue;
+		const last = indexes.at(-1) ?? 0;
+		const hintIndexes = indexes.filter((i) => hinted.has(String(results[i]?.["toolCallId"])));
+		// Without a hint the question is whether the first repeat was also the last.
+		const pivot = hintIndexes.at(-1) ?? indexes[1] ?? last;
+		const command = commandOf(last);
+		out.push({
+			occurrences: indexes.length,
+			hints: hintIndexes.length,
+			after: last > pivot ? "recurred" : pivot === results.length - 1 ? "ended" : "stopped",
+			fixed: command !== "" && results.some((r, i) => i > last && !failed(r) && commandOf(i) === command),
+		});
+	}
+	return out;
+}
+
+function failed(toolResult: Readonly<Record<string, unknown>>): boolean {
+	const exitCode = toolResult["exitCode"];
+	return toolResult["isError"] === true || (typeof exitCode === "number" && exitCode !== 0);
 }
 
 const EDIT_TOOL = /^(edit|write|multi_?edit|apply_?patch)$/i;

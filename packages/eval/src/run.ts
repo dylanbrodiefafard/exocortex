@@ -177,7 +177,8 @@ async function runOne(
 	};
 }
 
-function readMetrics(dbPath: string, label: string): TraceMetrics | null {
+/** Metrics for one labelled run, computed from the run directory's trace; null when it left no session. */
+export function readMetrics(dbPath: string, label: string): TraceMetrics | null {
 	const store = openTraceStore({ path: dbPath });
 	try {
 		const sessions = store.sessions({ label });
