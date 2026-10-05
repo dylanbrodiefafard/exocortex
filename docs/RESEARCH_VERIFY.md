@@ -51,3 +51,20 @@ The survey's cutoff was what search snippets showed on 2026-10-04. Search for ne
 - LLM-judge calibration for Qwen-family models.
 
 Add anything material as new entries with **[V]** tags.
+
+## Done (2026-10-05)
+
+All items above were checked against the papers (arxiv, openreview and huggingface reachable). Results are in `docs/RESEARCH.md` as **[V]** tags with table or section numbers.
+
+| Outcome | Count | Items |
+|---|---|---|
+| Confirmed as written | 14 | VERDI; Factory (artifact trail is 2.19–2.45); ACE collapse and model; Dynamic Cheatsheet small models; 2606.15017 Qwen 3.6-27B; SWE-agent windows and ablations; Liu 2026 retrieval 21.0 → 63.9; Olausson 1.58×; failed-trajectory elongation; HiAgent; Memento; Snell and R2E-Gym ~43%; Reflexion MBPP 16.3%; model identities (ECLoop, LivePlan, Beyond Token Savings) |
+| Corrected | 5 | Complexity Trap (Qwen3-32B row: no masking gain, summary cheaper; cost model ignores local caching) → **D-053**; CodeJudgeBench ("retained reasoning" is the judged response's, and <60% is non-thinking judges) → **D-054**; misalignment 91.49% (of visible resolutions, all symptoms); Self-Debug (gain is in the first turn, not ~2); SWE-Exp (42.0% and 73.0% are two backbones, not a gain) |
+| Not accessible / unsupported | 1 | AI21 variance figures: the cited blog doesn't contain them; source unknown |
+| Can't be settled from the paper | 1 | Verbalized confidence on a 27B (2609.10996 tested proprietary models only) → A/B question |
+
+Also: D-049's paraphrase of Dynamic Cheatsheet ("self-judge poorly") is corrected to "generative competence" in **D-055**, with no change to the rule.
+
+Fresh search (RESEARCH.md §8): EfficientAgent (masking halves a local 30B's prefix-hit rate; supports D-053), VibeMemBench (verified experience helps a little, self-built memory doesn't; supports D-049), JEV-as-a-Judge (no-reasoning judges fall behind on code; supports `supervisor-think`). None challenges a current decision. EfficientAgent challenges the survey's original exec #7 recommendation, which was already deferred.
+
+No setting default or eval config changed. AB_PLAN steps 2–4 carry the reading notes.
