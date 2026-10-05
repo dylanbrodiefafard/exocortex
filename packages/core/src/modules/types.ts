@@ -71,6 +71,11 @@ export interface ToolResultDraft extends ToolOutcome {
 	readonly current: string;
 	/** Where the harness saved the untruncated output, if it did. */
 	readonly fullOutputPath: string | null;
+	/**
+	 * What the harness appended to the output to say how the command ended (its exit status), if
+	 * anything. It is the end of {@link ToolResultDraft.current} but not in the full-output file.
+	 */
+	readonly status: string | null;
 }
 
 /** A module's replacement for a tool result's text. */

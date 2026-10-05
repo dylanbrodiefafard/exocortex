@@ -5,6 +5,7 @@ import {
 	errorLineIndices,
 	errorSignature,
 	firstErrorLine,
+	isRoutineLine,
 	normalizeErrorLine,
 } from "../src/modules/output.ts";
 
@@ -31,6 +32,12 @@ describe("classifyErrorLine", () => {
 		["Traceback (most recent call last):", "specific"],
 		["E   AssertionError: assert 3 == 4", "specific"],
 		["FAILED tests/test_page.py::test_last - assert 1 == 2", "specific"],
+		["FAIL: test_tags (tests.test_catalog.ProductTest.test_tags)", "specific"],
+		["ERROR: test_load (tests.test_io.LoadTest.test_load)", "specific"],
+		["AssertionError", "specific"],
+		["not ok 4311 - ipv6 format: rejects '::ffff:01.2.3.4'", "specific"],
+		["[  FAILED  ] RingTest.Wraps (0 ms)", "specific"],
+		["    holiday_test.go:41: Easter(1981) = 1981-04-26, want 1981-04-19", "specific"],
 		["UnicodeDecodeError: 'utf-8' codec can't decode byte 0xff", "specific"],
 		["src/a.ts(3,1): error TS2322: Type 'x' is not assignable", "specific"],
 		["Something failed badly", "generic"],
@@ -64,6 +71,40 @@ describe("firstErrorLine", () => {
 	it("finds indented go test failures", () => {
 		expect(errorLineIndices(["=== RUN TestA", "    --- FAIL: TestA (0.00s)", "ok"])).toEqual([1]);
 	});
+});
+
+describe("isRoutineLine", () => {
+	it.each([
+		"   Compiling forth v0.1.0 (/tmp/forth)",
+		"  Downloaded serde v1.0.0",
+		"running 12 tests",
+		"test parse::words ... ok",
+		"=== RUN   TestEaster/1981",
+		"    --- PASS: TestEaster/1980 (0.00s)",
+		"PASS",
+		"make[1]: Entering directory '/tmp/x'",
+		"[ 50%] Building CXX object CMakeFiles/x.dir/a.cpp.o",
+		"[ RUN      ] RingTest.Wraps",
+		"[       OK ] RingTest.Wraps (0 ms)",
+		" 3/12 Test  #3: ring_wraps ...............   Passed    0.01 sec",
+		"ok 3701 - prefix4 matrix: first_host(1.1.1.1/0)",
+		"tests/test_page.py ....s..                                   [ 40%]",
+		"tests/test_page.py::test_last PASSED                         [100%]",
+		"test_tags (tests.test_catalog.ProductTest.test_tags) ... ok",
+	])("%s", (line) => expect(isRoutineLine(line)).toBe(true));
+	it.each([
+		"test eval::stack ... FAILED",
+		"test result: ok. 15 passed; 0 failed; 0 ignored",
+		"    --- FAIL: TestEaster/1981 (0.00s)",
+		"ok  \texample.com/workdays/bizday\t0.040s",
+		"not ok 13 - rejects ::1.2.3",
+		"warning: unused variable: `x`",
+		"Downloading 100%",
+		"     Running tests/conversions.rs (target/debug/deps/conversions-5ac3)",
+		"test_tags (tests.test_catalog.ProductTest.test_tags) ... FAIL",
+		"DEBUG   storefront.tax: tax_for(9.99, DE, None) = 1.9",
+		"ok",
+	])("not: %s", (line) => expect(isRoutineLine(line)).toBe(false));
 });
 
 describe("errorSignature", () => {

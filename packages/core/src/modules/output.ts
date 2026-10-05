@@ -16,6 +16,7 @@ const SPECIFIC_ERROR_PATTERNS: readonly RegExp[] = [
 	/^error: test failed/,
 	// Go
 	/^\S+\.go:\d+(:\d+)?: /,
+	/^\s+\S+_test\.go:\d+: /,
 	/^\s*--- FAIL: /,
 	/^panic: /,
 	/^FAIL\s/,
@@ -28,13 +29,45 @@ const SPECIFIC_ERROR_PATTERNS: readonly RegExp[] = [
 	/^CMake Error/,
 	/^\d+% tests passed, \d+ tests? failed/,
 	/^The following tests FAILED/,
+	/^\[\s+FAILED\s+\]/,
+	// TAP
+	/^not ok\b/,
 	// Python / pytest
 	/^Traceback \(most recent call last\):/,
 	/^E {3}/,
 	/^(FAILED|ERROR) \S/,
-	/^[A-Z]\w*(Error|Exception|Exit): /,
+	/^(FAIL|ERROR): /,
+	/^[A-Z]\w*(Error|Exception|Exit)(: |$)/,
 	// TypeScript / Node
 	/error TS\d+: /,
+];
+
+/**
+ * Lines a test or build run prints when nothing is wrong: passing tests, per-test progress and
+ * compile chatter (the lines RTK's and tokf's per-command filters skip). Never a line that can
+ * carry a failure, a warning or a summary count.
+ */
+const ROUTINE_PATTERNS: readonly RegExp[] = [
+	// Rust / cargo
+	/^\s+(Compiling|Checking|Downloading|Downloaded|Fresh|Locking|Updating|Blocking) /,
+	/^running \d+ tests?$/,
+	/^test .+ \.\.\. ok$/,
+	// Go (`go test -v`)
+	/^=== (RUN|PAUSE|CONT|NAME)\s/,
+	/^\s*--- (PASS|SKIP): /,
+	/^PASS$/,
+	// C / C++ / build systems
+	/^make(\[\d+\])?: (Entering|Leaving) directory /,
+	/^\[\s*\d+%\] (Building|Linking|Built target|Generating|Scanning) /,
+	/^\[\s+(RUN|OK)\s+\]/,
+	/^\s*\d+\/\d+ Test\s+#\d+: .*\bPassed\b/,
+	// TAP
+	/^ok \d+/,
+	// Python: pytest progress and verbose passes, unittest -v, pip
+	/^\S+\.py [.sxX]+\s+\[\s*\d+%\]$/,
+	/^\S+::\S+ (PASSED|SKIPPED)\b/,
+	/^\w+ \([\w.]+\)(\s.*)? \.\.\. ok$/,
+	/^(Requirement already satisfied|Collecting|Using cached) /,
 ];
 
 const GENERIC_ERROR_PATTERN =
@@ -65,6 +98,11 @@ export function classifyErrorLine(line: string): ErrorLineKind | undefined {
 	if (SPECIFIC_ERROR_PATTERNS.some((pattern) => pattern.test(line))) return "specific";
 	if (GENERIC_ERROR_PATTERN.test(line) && !FALSE_POSITIVE_PATTERN.test(line)) return "generic";
 	return undefined;
+}
+
+/** Whether a line is routine output of a passing test or a build step: safe to hide before anything else. */
+export function isRoutineLine(line: string): boolean {
+	return ROUTINE_PATTERNS.some((pattern) => pattern.test(line));
 }
 
 /** Indices of error lines, toolchain-specific or generic. */

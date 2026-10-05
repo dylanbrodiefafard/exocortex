@@ -58,6 +58,7 @@ npm run eval -- --model ninfer/coding --tags error-recovery --config all-off,tri
 - **Trimmer:**
   - **Primary:** uncached main input tokens.
   - **Non-inferiority:** success, turns and wall-clock must not rise beyond noise (D-045).
+  - **Read the baseline with pi's cut in mind (D-070):** six of the seven `noisy-output` checks print more than pi's 50 KB, so `all-off` sees only the end of them. The trimmer reads the saved file and can show failures `all-off` never sees, so a rise in success here is plausible, not only a fall in tokens.
   - **Watch for re-reads:** the report's "Trimmed outputs" section counts saved outputs the agent read back (D-061). A high share means something needed was trimmed.
 - **Triage:**
   - **Primary:** repeated-error rate.

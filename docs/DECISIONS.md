@@ -996,6 +996,34 @@ Open check: Exocortex's injected `custom_message` reaches ninfer as a second con
 
 ---
 
+### D-070 — Trimmer: hide routine lines first, keep failures whole, trim from the full output, leave requested content alone · accepted (2026-10-05; owner's request: patch the weakest module before the A/B runs; amends D-042 and D-061)
+- **Why the trimmer.** It runs on every long bash result and is the only module that removes text the model would otherwise read. D-042's design was never compared with another project's code (triage got that in D-069, compaction in D-067).
+- **What others do.** Read at the commits named.
+  - **Position only.** Codex (`3f1ccb7`, `codex-rs/utils/string/src/truncate.rs`): half head, half tail of a 10,000-token budget. Gemini CLI (`fb972b2`, `packages/core/src/utils/fileUtils.ts`): 20% head, 80% tail of 40,000 characters, saved to a file. OpenHands (`39d34ec`, `openhands/sdk/utils/truncate.py`): half and half of 30,000 characters, and the marker says which line of the saved file the cut starts at. Goose (`5bd5e54`, `developer/shell.rs`): the last 50 lines, with a hint to read the file with `sed -n '100,200p'`. opencode (`907b3bc`, `tool/truncate.ts`): 2,000 lines or 50 KB, with "Use Grep to search the full content or Read with offset/limit". pi does the same as opencode but keeps the tail (PI_API_NOTES, `bash`). None of them looks at what the lines say.
+  - **Content.** RTK (`rtk-ai/rtk` at `cf018af`) and tokf (`mpecan/tokf` at `87c93d9`) filter per command. Both remove the lines a passing run prints (`Compiling`, `test … ok`, `=== RUN`, `--- PASS`) and keep each failure as a whole block (RTK's `RegexBlockFilter`: a start pattern plus the indented lines under it; tokf's `[[section]]`). RTK's contributing guide states the rules we borrow: output the agent asked for in detail is not compressed, the result is a subset of the real output in its own format, and anything capped comes with a way to get the rest.
+- **Measured before the change.** The check command of each `noisy-output` task was run on its unsolved fixture, cut the way pi cuts it, then trimmed.
+  - Six of the seven outputs are over pi's 50 KB (135 KB to 455 KB), so the trimmer only ever saw their last 50 KB.
+  - `h-cpp-netcalc`: 63 failing checks. The trimmer showed 8 of them and 87 passing ones. TAP's `not ok` was not in the error grammar.
+  - `h-go-settlement-calendar`: 32 lines say what each failing test got and wanted. The trimmer showed 1, with 152 `--- PASS` lines.
+  - Python `unittest`'s `FAIL:` and `ERROR:` headers were not in the grammar either; they survived only when they fell in the last 80 lines.
+- **Decision.**
+  1. **Routine lines are hidden first** (`hideRoutine`, default on). Core's `isRoutineLine` lists what passing tests and build steps print for the D-016 toolchains and TAP. If what is left fits `minChars`, all of it is shown; only otherwise does D-042's head, tail and error selection run, on what is left. The last 5 lines are never hidden, and neither is a line the error grammar calls specific. Log levels (`DEBUG`, `INFO`) are not routine: they are the program's own output.
+  2. **An error keeps its block.** D-042 kept 3 lines either side. Now the lines after an error are kept while they are indented or continue the diagnostic (a traceback, gcc's `note:` lines), up to `maxBlockLines` (30). 3 lines before stay.
+  3. **The trimmer reads the harness's saved file** when the harness cut the output (`maxFullOutputBytes`, 16 MiB; larger or unreadable files fall back to the text as before). pi's "Showing lines…" notice is dropped, since it is no longer true, and the exit status is added back: the draft gains `status`, which the pi adapter fills from the text.
+  4. **Markers give line numbers** in the saved file (`[… lines 41–1210 omitted …]`), and the footer says to grep the file or read a range. When the trimmer could not read the harness's file the numbers would be wrong, so markers only count, as before.
+  5. **Requested content is left alone.** `cat`, `grep`, `git diff` and the like (`verbatimCommands`) are not logs. D-042 trimmed them as if they were, which cut a file to its first 40 and last 80 lines plus every line containing "error". A command counts when every part of it that prints ends in such a command, so `cargo test 2>&1 | tail -100` counts too: the agent chose those lines. pi's own 50 KB limit still applies. A command line with a heredoc, a substitution or a subshell is not classified and is trimmed as before.
+  6. **Error grammar** (core, so triage, memory and the eval see it too): `unittest`'s `FAIL:`/`ERROR:`, a bare `AssertionError`, TAP `not ok`, GoogleTest `[  FAILED  ]`, and Go's indented `x_test.go:N:` messages.
+- **Result on the same outputs.** `h-cpp-netcalc`: all 63 failures with their got/expected lines, in 8.9k characters (pi gives 51k, the old trimmer 5.4k). `h-go-settlement-calendar`: all 30 failing tests and all 32 messages in 5.9k (old: 12.2k). `h-rust-css-colors`: the same failures as before with no `test … ok` lines (old: 81). The other three change little: their noise is log lines and compiler warnings.
+- **Side effect to know about.** An error signature is the first specific error line. For `unittest`, TAP and GoogleTest runs that is now the first failing test, where it used to be a later line such as `make: *** … Error 1`. Triage's repeat counts and memory's cards for those runners therefore follow which test fails first. Nothing has been A/B'd, so no stored result changes meaning.
+- **Not done.**
+  - **Per-command filters** like RTK's and tokf's (a parser per tool, one-line summaries on success). They rewrite the output into their own format and need a filter for each tool; the routine-line grammar gets the measured gain while every shown line stays verbatim.
+  - **Grouping repeated compiler warnings** (RTK groups clippy warnings by lint). `h-cpp-build-log` and `h-rust-css-colors` are mostly warnings the prompt says to leave. It needs block-level matching across the output; revisit if the A/B shows those two tasks gaining nothing.
+  - **Hiding `DEBUG` lines**, and a setting per toolchain.
+  - **tokf's re-run signal** (the same command run again straight after a filtered result means the agent did not trust it). The report's read-back count (D-061) covers the same question.
+- **A/B.** `trimmer` in AB_PLAN step 3 now measures this design. Apart from the grammar, the old behaviour is `hideRoutine: false`, `maxBlockLines: 0`, `verbatimCommands: []`, `maxFullOutputBytes: 0`; no eval config is added for it.
+
+---
+
 ## Open questions (carried from brief §10, updated)
 
 1. ~~Resolved by D-029.~~ Exact pi mechanism for injecting into the current user turn without altering prior messages. *(Phase 0)*

@@ -65,7 +65,10 @@
 			"minChars": 8000, // shorter results are left alone (~4 chars per token)
 			"headLines": 40,
 			"tailLines": 80,
-			"contextLines": 3, // kept around each error line
+			"contextLines": 3, // kept before each error line
+			"maxBlockLines": 30, // an error's own block (snippet, traceback, notes) is kept up to this many lines
+			"hideRoutine": true, // hide passing tests and compile progress before anything else
+			// "verbatimCommands": [...], // commands whose output is never trimmed; default: cat, grep, git diff, …
 			"sidecar": false, // let a sidecar pick the lines to keep (verbatim) for still-long outputs
 			"sidecarTimeoutMs": 6000 // it holds the agent loop; on timeout the deterministic result is used
 		},

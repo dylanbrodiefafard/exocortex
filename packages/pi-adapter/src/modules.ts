@@ -306,6 +306,7 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 			toolCallId: event.toolCallId,
 			current: outcome.output,
 			fullOutputPath: fullOutputPathOf(event.details, event.structuredContent),
+			status: statusOf(outcome.output),
 		};
 		try {
 			const { text, notes } = await applyRewrites(rewriters, draft, controller.signal);
@@ -519,6 +520,11 @@ function fullOutputPathOf(details: unknown, structured: unknown): string | null 
 	const fromStructured = isRecord(structured) ? structured["full_output_path"] : undefined;
 	const path = fromDetails ?? fromStructured;
 	return typeof path === "string" && path !== "" ? path : null;
+}
+
+/** Bash ends a failing command's text with its exit status, after the output (PI_API_NOTES, `bash`). */
+function statusOf(text: string): string | null {
+	return /\n\n(Command exited with code \d+)$/.exec(text)?.[1] ?? null;
 }
 
 /** Resolves with `promise`, or with undefined once `signal` aborts (a module that ignores its signal cannot hold pi). */

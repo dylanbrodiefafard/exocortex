@@ -52,6 +52,7 @@ export {
 	errorLineIndices,
 	errorSignature,
 	firstErrorLine,
+	isRoutineLine,
 	isTestPath,
 	normalizeErrorLine,
 	ungroundedReferences,

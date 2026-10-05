@@ -325,6 +325,22 @@ const bashResult = (text: string, extra: Record<string, unknown> = {}) => ({
 });
 
 describe("tool-result rewrites", () => {
+	it("tells modules which part of the text is bash's exit status", async () => {
+		const drafts: ToolResultDraft[] = [];
+		const { h } = setup(
+			{
+				trim: rewriter("trim", async (d) => {
+					drafts.push(d);
+					return undefined;
+				}),
+			},
+			{ trim: { enabled: true } },
+		);
+		await h.pi.emit("session_start");
+		await h.pi.emit("tool_result", bashResult("boom\n\nCommand exited with code 2"));
+		expect(drafts[0]?.status).toBe("Command exited with code 2");
+	});
+
 	it("chains rewrites, merges details.exo, keeps structuredContent and traces each rewrite", async () => {
 		const drafts: ToolResultDraft[] = [];
 		const { h } = setup(
@@ -350,6 +366,7 @@ describe("tool-result rewrites", () => {
 			exitCode: 2,
 			fullOutputPath: "/tmp/full.log",
 			output: "boom",
+			status: null,
 		});
 		expect(result).toEqual({
 			content: [{ type: "text", text: "boom [trimmed] [hint]" }],

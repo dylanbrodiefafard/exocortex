@@ -28,6 +28,7 @@ function draft(output: string, extra: Partial<ToolResultDraft> = {}): ToolResult
 		output,
 		current: output,
 		fullOutputPath: null,
+		status: null,
 		...extra,
 	};
 }

@@ -4,6 +4,13 @@ import { Value } from "typebox/value";
 /** Tools whose output the agent is about to act on verbatim: never trimmed (brief §6.2). */
 export const NEVER_TRIMMED: ReadonlySet<string> = new Set(["read", "edit", "write"]);
 
+const VERBATIM_COMMANDS = [
+	..."cat head tail sed awk less more bat nl cut sort uniq wc tr tac column fold".split(" "),
+	..."grep egrep fgrep rg ag ack find fd ls tree stat file du".split(" "),
+	..."jq yq xxd hexdump od strings nm objdump readelf diff cmp echo printf".split(" "),
+	..."diff show log blame grep status ls-files cat-file reflog branch tag".split(" ").map((sub) => `git ${sub}`),
+];
+
 const SettingsSchema = Type.Object(
 	{
 		/** Tools whose results may be trimmed (read/edit/write never are). */
@@ -13,6 +20,20 @@ const SettingsSchema = Type.Object(
 		headLines: Type.Integer({ minimum: 0, default: 40 }),
 		tailLines: Type.Integer({ minimum: 0, default: 80 }),
 		contextLines: Type.Integer({ minimum: 0, default: 3 }),
+		/** An error's block (snippet, traceback, notes) is kept whole up to this many lines. */
+		maxBlockLines: Type.Integer({ minimum: 0, default: 30 }),
+		/** Hide passing tests and compile progress first; if the rest fits `minChars`, all of it is shown. */
+		hideRoutine: Type.Boolean({ default: true }),
+		/**
+		 * Bash commands whose output is content the agent asked for, not a log: left untrimmed when
+		 * every printing part of the command line ends in one (`git` entries name a subcommand).
+		 */
+		verbatimCommands: Type.Array(Type.String({ minLength: 1 }), { default: [...VERBATIM_COMMANDS] }),
+		/**
+		 * When the harness cut the output and saved all of it, trim from the saved file instead of
+		 * the part the harness kept, unless the file is larger than this.
+		 */
+		maxFullOutputBytes: Type.Integer({ minimum: 0, default: 16 * 1024 * 1024 }),
 		maxErrorWindows: Type.Integer({ minimum: 0, default: 40 }),
 		collapseRuns: Type.Integer({ minimum: 2, default: 3 }),
 		maxLineChars: Type.Integer({ minimum: 80, default: 400 }),

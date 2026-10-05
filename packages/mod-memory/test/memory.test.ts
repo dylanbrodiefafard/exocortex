@@ -49,7 +49,7 @@ const edit: ToolOutcome = {
 };
 
 function draft(tool: ToolOutcome) {
-	return { ...tool, toolCallId: "c", current: tool.output, fullOutputPath: null };
+	return { ...tool, toolCallId: "c", current: tool.output, fullOutputPath: null, status: null };
 }
 
 type Embed = (texts: readonly string[]) => number[][] | undefined;

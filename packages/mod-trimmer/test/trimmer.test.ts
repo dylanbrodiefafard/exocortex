@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ToolResultDraft } from "@exocortex/core";
@@ -17,7 +17,7 @@ const signal = new AbortController().signal;
 function buildLog(lines = 600): string {
 	const out = Array.from(
 		{ length: lines },
-		(_, i) => `   Compiling crate-${letters(i)} v0.${i}.0 (registry+https://example.com/index/${i})`,
+		(_, i) => `   Generated crate-${letters(i)} v0.${i}.0 (registry+https://example.com/index/${i})`,
 	);
 	out[300] = "error[E0502]: cannot borrow `self.items` as mutable because it is also borrowed as immutable";
 	out[301] = "  --> src/lib.rs:42:9";
@@ -46,6 +46,7 @@ function draft(current: string, extra: Partial<ToolResultDraft> = {}): ToolResul
 		output: current,
 		current,
 		fullOutputPath: null,
+		status: null,
 		...extra,
 	};
 }
@@ -77,7 +78,9 @@ describe("trimmer", () => {
 		expect(rewrite.text).toContain("  --> src/lib.rs:42:9");
 		expect(rewrite.text).toContain("could not compile `forth`");
 		const saved = join(dir, "saved", "call_1.log");
-		expect(rewrite.text).toMatch(/\[exo trimmer: showing \d+ of 601 lines; full output: .*call_1\.log/);
+		expect(rewrite.text).toMatch(/\[exo trimmer: showing \d+ of 601 lines; full output: .*call_1\.log \(the line/);
+		// Markers name the omitted lines of the saved file, and a diagnostic keeps the lines under it.
+		expect(rewrite.text).toContain("[… lines 41–297 omitted …]");
 		expect(readFileSync(saved, "utf8")).toBe(log);
 		expect(rewrite.note).toMatch(/^trimmed 601→\d+ lines \(head\/tail\/errors\)$/);
 		// The saved path goes to the trace, so the eval can tell when the agent reads it back.
@@ -85,14 +88,74 @@ describe("trimmer", () => {
 		expect(trimmer.status?.()).toMatch(/^trimmer \(1 trimmed, −\d+k chars\)$/);
 	});
 
-	it("points at the harness's saved output instead of saving its own", async () => {
+	it("trims from the harness's saved output, not from the tail the harness kept", async () => {
 		const { trimmer } = setup();
-		const rewrite = await trimmer.rewriteToolResult?.(
-			draft(buildLog(), { fullOutputPath: "/tmp/pi-full.log" }),
-			signal,
+		const log = buildLog(3000);
+		const path = join(dir, "pi-full.log");
+		writeFileSync(path, log);
+		const status = "Command exited with code 101";
+		const kept = `${log.split("\n").slice(-400).join("\n")}\n\n[Showing lines 2602-3001 of 3001. Full output: ${path}]\n\n${status}`;
+		const rewrite = await trimmer.rewriteToolResult?.(draft(kept, { fullOutputPath: path, status }), signal);
+		if (!rewrite) throw new Error("expected a rewrite");
+		// The root error is on line 301, which the harness had cut.
+		expect(kept).not.toContain("error[E0502]");
+		expect(rewrite.text).toContain("error[E0502]: cannot borrow `self.items`");
+		expect(rewrite.text).toContain(`crate-${letters(0)} `);
+		expect(rewrite.text).not.toContain("[Showing lines");
+		expect(rewrite.text).toMatch(
+			/\n\nCommand exited with code 101\n\[exo trimmer: showing \d+ of 3001 lines; full output: /,
 		);
-		expect(rewrite?.text).toContain("full output: /tmp/pi-full.log");
+		expect(rewrite.details).toEqual({ fullOutputPath: path });
 		expect(existsSync(join(dir, "saved"))).toBe(false);
+	});
+
+	it("falls back to what the harness kept when its saved output is missing or too large", async () => {
+		const log = buildLog();
+		const path = join(dir, "pi-full.log");
+		writeFileSync(path, buildLog(3000));
+		for (const [settings, fullOutputPath] of [
+			[{}, "/nonexistent/pi-full.log"],
+			[{ maxFullOutputBytes: 10 }, path],
+		] as const) {
+			const rewrite = await setup(settings).trimmer.rewriteToolResult?.(draft(log, { fullOutputPath }), signal);
+			// Line numbers would not match the file, so markers only count.
+			expect(rewrite?.text).toMatch(/\[… \d+ lines omitted …\]/);
+			expect(rewrite?.text).toMatch(/showing \d+ of 601 lines; full output: \S+ \(grep it/);
+		}
+	});
+
+	it("hides routine lines first and shows everything else when that is enough", async () => {
+		const tap = Array.from({ length: 900 }, (_, i) =>
+			i % 100 === 50 ? `not ok ${i} - ${letters(i)}\n  #   got: 0\n  #   expected: 1` : `ok ${i} - check ${letters(i)}`,
+		);
+		const log = `${tap.join("\n")}\n# 891/900 checks passed`;
+		const { trimmer } = setup();
+		const rewrite = await trimmer.rewriteToolResult?.(draft(log, { input: { command: "make test" } }), signal);
+		if (!rewrite) throw new Error("expected a rewrite");
+		expect(rewrite.text.match(/^not ok /gm)).toHaveLength(9);
+		expect(rewrite.text.match(/expected: 1/g)).toHaveLength(9);
+		expect(rewrite.text.match(/^ok /gm)).toHaveLength(4);
+		expect(rewrite.text).toContain("[… lines 1–50 omitted …]\nnot ok 50 - ");
+		expect(rewrite.text).toContain("; 887 routine lines hidden; full output: ");
+		expect(rewrite.note).toBe("trimmed 919→32 lines (routine lines hidden)");
+		const off = await setup({ hideRoutine: false }).trimmer.rewriteToolResult?.(draft(log), signal);
+		expect(off?.note).toContain("head/tail/errors");
+		expect(off?.text).not.toContain("routine lines hidden");
+	});
+
+	it("leaves output the agent asked to read alone", async () => {
+		const { trimmer } = setup();
+		const log = buildLog();
+		for (const command of ["cat build.log", "cd sub && git diff HEAD~1", "cargo test 2>&1 | tail -n 600"]) {
+			expect(await trimmer.rewriteToolResult?.(draft(log, { input: { command } }), signal)).toBeUndefined();
+		}
+		expect(
+			await trimmer.rewriteToolResult?.(draft(log, { input: { command: "make; cat build.log" } }), signal),
+		).toBeDefined();
+		const none = setup({ verbatimCommands: [] });
+		expect(
+			await none.trimmer.rewriteToolResult?.(draft(log, { input: { command: "cat build.log" } }), signal),
+		).toBeDefined();
 	});
 
 	it("uses the sidecar's line ranges verbatim, always adding the tail and the root error", async () => {
@@ -110,7 +173,7 @@ describe("trimmer", () => {
 		expect(prompts[0]).toContain("301: error[E0502]");
 		expect(rewrite.note).toContain("sidecar selection");
 		const lines = rewrite.text.split("\n");
-		expect(lines[0]).toBe("[… 4 lines omitted …]");
+		expect(lines[0]).toBe("[… lines 1–4 omitted …]");
 		expect(lines[1]).toContain(`crate-${letters(4)} `);
 		expect(rewrite.text).toContain("error[E0502]");
 		expect(rewrite.text).toContain("could not compile");
@@ -147,7 +210,7 @@ describe("trimmer", () => {
 		const lines = Array.from({ length: 1_200 }, (_, i) =>
 			i % 10 === 5
 				? `src/mod_${letters(i)}.rs:${i}:1: error: mismatched types in ${letters(i).repeat(60)}`
-				: `   Compiling crate-${letters(i)} v0.1.0`,
+				: `   Generated crate-${letters(i)} v0.1.0`,
 		);
 		const log = lines.join("\n");
 		const loose = await setup({ maxChars: 1_000_000 }).trimmer.rewriteToolResult?.(draft(log), signal);
@@ -179,7 +242,11 @@ describe("trimmer", () => {
 });
 
 describe("keepFromRanges", () => {
-	const lines = ["a", "error: x", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m"];
+	const lines = ["a", "error: x", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m"].map((text, i) => ({
+		text,
+		first: i + 1,
+		last: i + 1,
+	}));
 	it("converts 1-based inclusive ranges, clamps, ignores reversed ones, adds tail and first error", () => {
 		const keep = keepFromRanges(
 			[

@@ -1,4 +1,5 @@
 import { mkdirSync, writeFileSync } from "node:fs";
+import { readFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -8,11 +9,19 @@ import {
 	type ModuleContext,
 	SIDECAR_MAX_TOKENS,
 	type ToolResultDraft,
-	type ToolRewrite,
 } from "@exocortex/core";
 import { Type } from "typebox";
+import { printsRequestedContent } from "./command.ts";
 import { NEVER_TRIMMED, parseSettings, type TrimmerSettings } from "./settings.ts";
-import { prepareLines, renderSelection, type Trimmed, trimLines } from "./trim.ts";
+import {
+	allLines,
+	type Line,
+	type Prepared,
+	prepareLines,
+	renderSelection,
+	selectLines,
+	type Trimmed,
+} from "./trim.ts";
 
 export const TRIMMER_ID = "trimmer";
 
@@ -28,10 +37,20 @@ const SIDECAR_TAIL_LINES = 10;
 /** The budget never cuts below this many error windows: the first errors are the root causes. */
 const MIN_ERROR_WINDOWS = 4;
 
+/** What gets trimmed: the harness's saved full output when it can be read, else the result text. */
+interface Source {
+	readonly text: string;
+	/** Added back after the trimmed text: the exit status, which the saved file does not hold. */
+	readonly status: string;
+	/** The harness's saved output could not be used, so line numbers would not match it. */
+	readonly partial: boolean;
+}
+
 /**
  * Trims long tool outputs before the main model sees them (brief §6.2, D-029: a rewrite of new
- * content, so the prompt cache is untouched). Deterministic first; optionally a sidecar picks
- * line ranges to keep, verbatim (research R2.2). The full output is always one read away.
+ * content, so the prompt cache is untouched). Routine lines go first; then, deterministically,
+ * head, tail and whole error blocks; optionally a sidecar picks line ranges to keep, verbatim
+ * (research R2.2). The full output is always one read away, and markers say which lines to read.
  */
 export function createTrimmer(raw: Readonly<Record<string, unknown>>, ctx: ModuleContext): ExoModule {
 	const { settings, problems } = parseSettings(raw);
@@ -50,21 +69,28 @@ export function createTrimmer(raw: Readonly<Record<string, unknown>>, ctx: Modul
 		async rewriteToolResult(draft, signal) {
 			if (NEVER_TRIMMED.has(draft.toolName) || !settings.tools.includes(draft.toolName)) return undefined;
 			if (draft.current.length <= settings.minChars) return undefined;
-			const lines = prepareLines(draft.current, settings);
-			let result = trimToBudget(lines, settings);
-			let how = "head/tail/errors";
-			if (settings.sidecar && result.text.length > settings.sidecarAboveChars) {
-				const selected = await selectWithSidecar(ctx, settings, draft, lines, goal, signal);
-				if (selected) {
-					result = selected;
-					how = "sidecar selection";
-				}
-			}
-			if (result.text.length >= draft.current.length) return undefined;
+			if (isRequestedContent(draft, settings)) return undefined;
+			const source = await sourceOf(draft, settings, signal);
+			const prepared = prepareLines(source.text, settings);
+			const { keep, how } = await choose(prepared, draft, signal);
+			const render = (numbered: boolean) =>
+				renderSelection(prepared, keep, { maxLineChars: settings.maxLineChars, numbered });
+			if (render(true).text.length + source.status.length >= draft.current.length) return undefined;
 			const path = draft.fullOutputPath ?? saveFullOutput(settings, draft, ctx);
+			const numbered = path !== undefined && !source.partial;
+			const result = render(numbered);
+			const text = [
+				result.text,
+				...(source.status ? ["", source.status] : []),
+				footer(result, prepared.routineLines, path, numbered),
+			].join("\n");
 			trimmed += 1;
-			charsSaved += draft.current.length - result.text.length;
-			return { ...rewriteOf(result, how, path), ...(path ? { details: { fullOutputPath: path } } : {}) };
+			charsSaved += draft.current.length - text.length;
+			return {
+				text,
+				note: `trimmed ${result.totalLines}→${result.keptLines} lines (${how})`,
+				...(path ? { details: { fullOutputPath: path } } : {}),
+			};
 		},
 
 		status() {
@@ -73,25 +99,67 @@ export function createTrimmer(raw: Readonly<Record<string, unknown>>, ctx: Modul
 				: `${TRIMMER_ID} (${trimmed} trimmed, −${Math.round(charsSaved / 1000)}k chars)`;
 		},
 	};
-}
 
-/** The deterministic tier, with fewer error windows while the result is over `maxChars`. */
-function trimToBudget(lines: readonly string[], settings: TrimmerSettings): Trimmed {
-	let windows = settings.maxErrorWindows;
-	let result = trimLines(lines, settings);
-	while (result.text.length > settings.maxChars && windows > MIN_ERROR_WINDOWS) {
-		windows = Math.max(MIN_ERROR_WINDOWS, Math.floor(windows / 2));
-		result = trimLines(lines, { ...settings, maxErrorWindows: windows });
+	/** Everything that is not routine when that fits; else head, tail and errors, or the sidecar's pick. */
+	async function choose(prepared: Prepared, draft: ToolResultDraft, signal: AbortSignal) {
+		const all = allLines(prepared.lines);
+		if (lengthOf(prepared.lines, all) <= settings.minChars) return { keep: all, how: "routine lines hidden" };
+		const keep = selectToBudget(prepared, settings);
+		if (settings.sidecar && lengthOf(prepared.lines, keep) > settings.sidecarAboveChars) {
+			const selected = await selectWithSidecar(ctx, settings, draft, prepared.lines, goal, signal);
+			if (selected) return { keep: selected, how: "sidecar selection" };
+		}
+		return { keep, how: "head/tail/errors" };
 	}
-	return result;
 }
 
-function rewriteOf(result: Trimmed, how: string, path: string | undefined): ToolRewrite {
-	const where = path ? `; full output: ${path} (read it if you need the omitted lines)` : "";
-	return {
-		text: `${result.text}\n[exo trimmer: showing ${result.keptLines} of ${result.totalLines} lines${where}]`,
-		note: `trimmed ${result.totalLines}→${result.keptLines} lines (${how})`,
-	};
+function isRequestedContent(draft: ToolResultDraft, settings: TrimmerSettings): boolean {
+	const command = draft.input["command"];
+	return typeof command === "string" && printsRequestedContent(command, settings.verbatimCommands);
+}
+
+function footer(result: Trimmed, routineLines: number, path: string | undefined, numbered: boolean): string {
+	const hidden = routineLines > 0 ? `; ${routineLines} routine lines hidden` : "";
+	const how = `${numbered ? "the line numbers above are its lines: " : ""}grep it, or read a range with offset/limit`;
+	const where = path ? `; full output: ${path} (${how})` : "";
+	return `[exo trimmer: showing ${result.keptLines} of ${result.totalLines} lines${hidden}${where}]`;
+}
+
+/**
+ * The harness keeps only the end of a very long output and saves the rest to a file. Trimming
+ * what it kept would never show the first errors, so the saved file is read instead.
+ */
+async function sourceOf(draft: ToolResultDraft, settings: TrimmerSettings, signal: AbortSignal): Promise<Source> {
+	if (draft.fullOutputPath === null) return { text: draft.current, status: "", partial: false };
+	try {
+		if ((await stat(draft.fullOutputPath)).size <= settings.maxFullOutputBytes) {
+			const text = await readFile(draft.fullOutputPath, { encoding: "utf8", signal });
+			return { text, status: draft.status ?? "", partial: false };
+		}
+	} catch {
+		// Unreadable or cut off by the budget: fall through to what the harness kept.
+	}
+	return { text: draft.current, status: "", partial: true };
+}
+
+function lengthOf(lines: readonly Line[], keep: ReadonlySet<number>): number {
+	let length = 0;
+	for (const index of keep) length += (lines[index]?.text.length ?? 0) + 1;
+	return length;
+}
+
+/** The deterministic tier, with fewer error windows while the selection is over `maxChars`. */
+function selectToBudget(prepared: Prepared, settings: TrimmerSettings): Set<number> {
+	const fits = (keep: ReadonlySet<number>) =>
+		renderSelection(prepared, keep, { maxLineChars: settings.maxLineChars, numbered: true }).text.length <=
+		settings.maxChars;
+	let windows = settings.maxErrorWindows;
+	let keep = selectLines(prepared.lines, settings);
+	while (!fits(keep) && windows > MIN_ERROR_WINDOWS) {
+		windows = Math.max(MIN_ERROR_WINDOWS, Math.floor(windows / 2));
+		keep = selectLines(prepared.lines, { ...settings, maxErrorWindows: windows });
+	}
+	return keep;
 }
 
 /** Asks a sidecar which line ranges matter; undefined (fall back to deterministic) on any failure. */
@@ -99,13 +167,13 @@ async function selectWithSidecar(
 	ctx: ModuleContext,
 	settings: TrimmerSettings,
 	draft: ToolResultDraft,
-	lines: readonly string[],
+	lines: readonly Line[],
 	goal: string,
 	signal: AbortSignal,
-): Promise<Trimmed | undefined> {
+): Promise<Set<number> | undefined> {
 	const pool = ctx.pool();
 	if (!pool) return undefined;
-	const numbered = lines.map((line, i) => `${i + 1}: ${line.slice(0, settings.maxLineChars)}`).join("\n");
+	const numbered = lines.map((line, i) => `${i + 1}: ${line.text.slice(0, settings.maxLineChars)}`).join("\n");
 	if (numbered.length > settings.sidecarMaxInputChars) return undefined;
 	ctx.progress("Trimming noisy output…");
 	const result = await pool.run({
@@ -137,9 +205,7 @@ async function selectWithSidecar(
 		ctx.log(`line selection ${result.outcome}: ${result.error}`);
 		return undefined;
 	}
-	const keep = keepFromRanges(result.value.ranges, lines, settings.sidecarMaxLines);
-	if (!keep) return undefined;
-	return renderSelection(lines, keep, settings.maxLineChars);
+	return keepFromRanges(result.value.ranges, lines, settings.sidecarMaxLines);
 }
 
 /**
@@ -149,7 +215,7 @@ async function selectWithSidecar(
  */
 export function keepFromRanges(
 	ranges: readonly (readonly number[])[],
-	lines: readonly string[],
+	lines: readonly Line[],
 	maxLines: number,
 ): Set<number> | undefined {
 	const keep = new Set<number>();
@@ -159,7 +225,7 @@ export function keepFromRanges(
 	}
 	if (keep.size === 0 || keep.size > maxLines) return undefined;
 	for (let i = Math.max(0, lines.length - SIDECAR_TAIL_LINES); i < lines.length; i++) keep.add(i);
-	const firstError = lines.findIndex((line) => classifyErrorLine(line) === "specific");
+	const firstError = lines.findIndex((line) => classifyErrorLine(line.text) === "specific");
 	if (firstError !== -1) keep.add(firstError);
 	return keep;
 }

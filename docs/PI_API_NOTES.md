@@ -519,6 +519,10 @@ The default active tools are `read, bash, edit, write`. `grep, find, ls` and `po
 - `structuredContent` is `{output, truncated, full_output_path?, exit_code, wall_time_seconds}` (`:53-62`, `:391-399`).
   - It is available in `tool_result` and `tool_execution_end`, but **not persisted** (§4).
   - **This is the deterministic exit-code signal for error triage.**
+- **Long output** (read in the installed 1.0.2 build, `dist/core/tools/bash.js` and `output-accumulator.js`; line numbers are the `.js` files'):
+  - The text is the **last** 2,000 lines or 50 KB, whichever is hit first (`truncate.js:10-11`; `output-accumulator.js:70-74` uses `truncateTail`). The start of a long output never reaches the model.
+  - Once either limit is passed, every raw chunk is also written to a temp file (`output-accumulator.js:46-54`, `:205-207`), and the file is closed before the result is built (`bash.js:224-231`: `finishOutput` awaits `closeTempFile`). So at `tool_result` time `details.fullOutputPath` names a complete file.
+  - The file holds the command's raw output only. The notice `\n\n[Showing lines S-E of T (50.0KB limit). Full output: <path>]` (`bash.js:246-249`) and the status `\n\nCommand exited with code N` (`bash.js:254`, `:297`) are appended to the text afterwards, in that order, and are not in the file.
 
 ### Other tools
 - **`read`:** `ReadToolDetails {truncation?}`.
