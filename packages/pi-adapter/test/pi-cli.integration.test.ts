@@ -307,8 +307,20 @@ describe("pi CLI with the Exocortex extension", { timeout: 30_000 }, () => {
 			const store = openMemoryStore(dbPath);
 			const id = store.addPreference("Write the failing test before the implementation.");
 			// Said in two repos, so it applies everywhere, including this run's fresh directory.
-			store.addSighting(id, { scope: "repo-a", session: "s1", standing: false, quote: "tests first" });
-			store.addSighting(id, { scope: "repo-b", session: "s2", standing: false, quote: "tests first please" });
+			store.addSighting(id, {
+				scope: "repo-a",
+				session: "s1",
+				standing: false,
+				correction: false,
+				quote: "tests first",
+			});
+			store.addSighting(id, {
+				scope: "repo-b",
+				session: "s2",
+				standing: false,
+				correction: false,
+				quote: "tests first please",
+			});
 			store.close();
 
 			let main = 0;

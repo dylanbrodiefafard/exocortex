@@ -4,7 +4,7 @@
 
 ## How to read this document
 
-> **Verified 2026-10-05.** Every claim on the `docs/RESEARCH_VERIFY.md` work list was checked against the paper (or, for blogs, the page) and is now tagged [V] with its table or section, or corrected in place with a note on what the snippet had said. One source (the AI21 blog) does not contain the numbers attributed to it; those stay [U]. Corrections that change a recommendation are recorded in D-053 to D-055. Claims tagged [A] that were not on the work list were not re-read. §8 adds post-June-2026 work.
+> **Verified 2026-10-05.** Every claim on the `docs/RESEARCH_VERIFY.md` work list was checked against the paper (or, for blogs, the page) and is now tagged [V] with its table or section, or corrected in place with a note on what the snippet had said. One source (the AI21 blog) does not contain the numbers attributed to it; those stay [U]. Corrections that change a recommendation are recorded in D-053 to D-055. Claims tagged [A] that were not on the work list were not re-read. §8 adds post-June-2026 work. §9 (task alignment and unstated expectations) was added the same day and read in the papers directly.
 
 **Method and its limits.** The network proxy blocked arxiv.org, huggingface.co, openreview.net, alphaxiv.org, factory.ai and blog.jetbrains.com, so I could not open full papers. Every claim below comes from web-search result text: abstracts, publisher pages, author READMEs (GitHub was reachable) and secondary summaries. Each claim carries a tag:
 
@@ -727,6 +727,72 @@ A fresh search on 2026-10-05 for same-model verification, observation masking un
 
 ---
 
+## 9. Task alignment and unstated expectations (added 2026-10-05)
+
+The owner's question: delegation works when expectations are shared, and most of a user's expectations (quality bar, scope and non-goals, level of detail, tone) go unsaid. Can Exocortex learn them and supply them? Every claim below was read in the paper's arXiv HTML and is [V] unless tagged otherwise. All user-side results except SWE-chat's come from simulated users.
+
+### 9(a) Key findings
+
+- *SWE-chat: Coding Agent Interactions From Real Users in the Wild*, Baumann et al., COLM 2026. https://arxiv.org/abs/2604.20779
+  - **[V]** (§4.4, Fig. 8) In Claude Code sessions, users push back after about 46% of prompts and interrupt or push back on 50.2%; the agent stops to ask for clarification in 3.0–3.2% of turns.
+  - **[V]** (§1, §2.1, §3.3, App. C.2) Almost 18,000 real sessions, about 69% from Claude Code. Pushback is corrections, rejections and failure reports. The "expert nitpicker", who keeps one goal and corrects how the agent carries it out, is the most common session persona.
+  - *Corrected:* Dialogue-SWEBench quotes an earlier version of this paper as 44% and 1–2%.
+  - [X] Not every pushback is an unmet expectation: failure reports are in the count.
+- *Ambig-SWE*, Vijayvargiya et al. (CMU), ICLR 2026. https://arxiv.org/abs/2502.13069 (also §1)
+  - **[V]** (abstract, §3) With underspecified issues, letting the agent ask a simulated user improves resolve rates by up to 74% over not asking. Relative to the fully specified issue, Claude Sonnet 4 recovers 89%, Sonnet 3.5 and Haiku 3.5 up to 80%, Deepseek-v2 59% and Llama 3.1 70B 54%.
+  - **[V]** (§4, Table 2) "Without explicit prompting, models almost never interact." With strong encouragement Sonnet 4 separates underspecified from full issues with 89% accuracy. **Qwen 3 Coder (480B) never asked under any prompt: 100% false negatives, 50% accuracy.** It needed a mandatory clarification step to take part in the interaction experiment at all (appendix, "Qwen 3 Coder and Claude Sonnet 4 Evaluation").
+  - **[V]** (§5, Table 6) Claude models explore the code first and ask only what they cannot find: Sonnet 4 got about the same information as Qwen with 4.03 questions against 6.02.
+  - Limits: the underspecified issues are GPT-4o summaries of real ones, the user is a GPT-4o proxy holding the full issue, and detection is measured in the first three turns.
+- *Ask or Assume? Uncertainty-Aware Clarification-Seeking in Coding Agents*, 2026. https://arxiv.org/abs/2603.26233
+  - **[V]** (Fig. 2) SWE-bench Verified, Claude Sonnet 4.5: full issue 70.80%, underspecified 54.80%, always told to ask 70.40%. Left to decide for itself, one agent reaches 61.20%; **a separate "intent agent" that only watches for missing information and makes the main agent ask reaches 69.40%** (p<0.001 against the single agent).
+  - **[V]** (Table 1) The two-agent design asked in 344 of 500 tasks, 3.06 questions on average, and resolved 76.92% of the 156 it did not ask about.
+  - **[V]** (Limitations) Frontier model only; the authors cite earlier work that open-weight models "severely lack the internal calibration" for this. Inference cost more than doubles.
+- *Dialogue-SWEBench*, 2026. https://arxiv.org/abs/2606.13995
+  - **[V]** (§4, Table 1) A "schema-guided" agent drafts the issue type and the details it needs (for a bug: actual behaviour, expected behaviour, reproduction steps), marks the missing ones UNKNOWN and fills them by dialogue. Average resolve rate over four models: plain OpenHands 32.9%, the Ambig-SWE interactive agent 44.1%, schema-guided 46.9%.
+  - **[V]** (Table 1) Models near our size: **Qwen3 Coder 30B-A3B** 23.2% → 25.4% → 32.3%; **Devstral 2 Small 24B** 26.8% → 42.2% → 38.6% (the schema did not help it). Devstral never answered the user in 23–34% of dialogues (§7).
+  - **[V]** (Table 3, n=50) Removing the user's follow-up replies costs Qwen3 Coder 30B 12 points (38 → 26) and Devstral 10.
+  - The simulated user is Llama 3.3 70B. The most transferable result in this section: local-size models, a coding agent.
+- *Asking What Matters: Reward-Driven Clarification for Software Engineering Tasks*, 2026. https://arxiv.org/abs/2604.14624
+  - **[V]** (Table 6) Agent Seed OSS 36B on underspecified issues: 22.4% with no clarification, 41.6% fully specified. GPT-5's questions give 35.6% with 5.1 questions; a **trained Qwen3 8B** question-writer gives 36.8% with 3.0. Supervised training alone gives 24.2%, and dropping the answerability reward 24.4%: unanswerable questions are worth almost nothing.
+  - **[V]** (§4, Fig. 2; §5.3, Fig. 3) Missing error information hurts most (mean SHAP 0.183), then implementation details (0.098), then expected behaviour (0.057), which is the most often missing (65% of issues). The intervals overlap; the authors call the order indicative. More questions do not help: success plateaus and the answerable share falls.
+  - Single-turn, LLM-judged. The question-writer is trained, which we cannot do.
+- *Interactive Task Alignment as a POMDP*, 2026. https://arxiv.org/abs/2607.16412
+  - **[V]** (abstract, §3.2, §3.5) Given an ambiguous request, models commit to the task the user meant 22.0% (shopping), 27.6% (professional work) and 32.2% (Terminal-Bench) of the time; humans in the same setting reach 48%. Models "act prematurely". Qwen3.5-35B-A3B is among the models evaluated.
+- *Aligning LLM Agents by Learning Latent Preference from User Edits* (PRELUDE / CIPHER), Gao et al., NeurIPS 2024. https://arxiv.org/abs/2404.15269
+  - **[V]** (§3, §4.3) Infers a written preference from each user edit, retrieves the preferences of similar past contexts and adds them to the prompt: cumulative edit cost falls 31% (summarization) and 73% (email) against no learning. Preferences depend on the context (the document's source), so retrieval by context matters.
+  - GPT-4 agent, GPT-4 simulated user with preset preferences, writing tasks. It is the precedent for learning from corrections, not evidence that it works for code.
+- *Plan-Then-Execute: An Empirical Study of User Trust and Team Performance When Using LLM Agents As A Daily Assistant*, He et al., CHI 2025. https://arxiv.org/abs/2502.01390
+  - **[V]** (abstract, §1) N=248, six everyday tasks. Letting users edit the plan fixes imperfect plans, but **does not calibrate trust**: plausible plans mislead users into trusting wrong ones. Involvement adds cognitive load and in some tasks lowers plan quality.
+  - Not coding. It argues against a routine "here is my plan, OK?" step.
+- **[U]** The military backbrief (the subordinate restates the task before starting) and the management literature on delegation were not searched properly; what turned up was generic.
+
+### 9(b) Recommendations for Exocortex
+
+**R9.1 — Learn expectations from corrections, keyed by the kind of task.**
+- A correction is an unmet expectation in the user's own words, so it passes D-060's admission rule unchanged. SWE-chat says there are many of them; PRELUDE is the precedent for turning them into written preferences retrieved by context.
+- [X] Key each by task kind (bug fix, refactor, question…): "do not refactor nearby code" is about bug fixes, not about refactors.
+
+**R9.2 — Do not make a 27B judge whether a request is underspecified** (reaffirms R1.7).
+- Qwen 3 Coder at 480B never asked; the one design that decides well uses a frontier model and a separate agent. Supplying learned expectations needs no such judgement.
+- If detection is tried later, it belongs in a separate sidecar (Ask or Assume), and its false-positive rate must be measured first.
+
+**R9.3 — A brief with fixed slots that states assumptions, not a plan.**
+- Fixed slots are what Dialogue-SWEBench's schema is, and they helped the 30B Qwen. Mark each slot stated, learned or assumed.
+- Show it without blocking. Plan-Then-Execute says a plan to approve earns trust it has not deserved [X: applied to coding].
+
+**R9.4 — If the brief ever asks, ask little.**
+- At most three questions, only about what the repo cannot answer (expected behaviour, scope), each tied to something the user can observe.
+- Explore before asking: Ambig-SWE's efficient askers did.
+
+**R9.5 — Count when supplying an expectation did not work.** A correction on an expectation that was already in the conversation is the failure signal D-060 lacks.
+
+### 9(c) What to measure
+
+- Daily use: how often a learned expectation is corrected again after being added, and the share of user turns that are corrections.
+- Eval: underspecified variants of the hard tasks, with a sidecar as the user holding the full task (Ambig-SWE's method). Report hidden, hidden with learned expectations, and full. The current fixtures cannot show this, for D-060's reason: they repeat one prompt per task.
+
+---
+
 ## Conflicts and amendments to existing decisions (for new D-entries)
 
 | Recommendation | Touches | Nature |
@@ -741,6 +807,7 @@ A fresh search on 2026-10-05 for same-model verification, observation masking un
 | R7.1: slice-level supervisor results are descriptive only; grow slices | D-039 Phase 3 acceptance; D-035 (3 tasks per mode) | Statistical caveat; more tasks. |
 | R6.1: Phase 6 narrowed to verdict voting + hypothesis diversity | D-015 | Narrows scope; consistent with D-015's no-execution rule. |
 | R5.1: pitfall cards only at first | Brief §6.4 (four card types) | Phasing within Phase 5. |
+| R9.1: expectations learned from corrections, keyed by task kind | D-060 (preferences are about how, not what; no task kind) | Widens what a preference card may hold (D-064). |
 
 No recommendation conflicts with D-006 (same model for sidecars). But the correlated-errors and self-preference literature is the strongest argument that the D-006 trade-off is costly *specifically for the supervisor*. That is why R1.1–R1.5 push its decisions toward deterministic evidence.
 
@@ -853,3 +920,13 @@ No recommendation conflicts with D-006 (same model for sidecars). But the correl
 - SWE-Bench Illusion 2026, https://dl.acm.org/doi/10.1145/3786583.3786882
 - SWE-rebench 2025, https://arxiv.org/abs/2505.20411
 - Aider Polyglot, https://aider.chat/2024/12/21/polyglot.html
+
+**§9:**
+- SWE-chat 2026, https://arxiv.org/abs/2604.20779
+- Ambig-SWE 2026, https://arxiv.org/abs/2502.13069
+- Ask or Assume? 2026, https://arxiv.org/abs/2603.26233
+- Dialogue-SWEBench 2026, https://arxiv.org/abs/2606.13995
+- Asking What Matters 2026, https://arxiv.org/abs/2604.14624
+- Interactive Task Alignment as a POMDP 2026, https://arxiv.org/abs/2607.16412
+- PRELUDE / CIPHER 2024, https://arxiv.org/abs/2404.15269
+- Plan-Then-Execute 2025, https://arxiv.org/abs/2502.01390

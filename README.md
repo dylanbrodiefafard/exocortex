@@ -73,6 +73,8 @@ Enable with `"memory": { "enabled": true }` or `/exo memory on`. When a build or
 
 With `"preferences": true` it also learns how you like work done. It reads only what you type. Say something as a standing rule ("always write the failing test first", "from now on keep commits small"), or give the same instruction in two sessions, and it becomes a preference. Later prompts that leave it unsaid get it added as a short visible note; your prompt wins on any conflict. `/exo memory preferences` lists what it has learned and `/exo memory forget <id>` removes one (D-060).
 
+It also learns what you expect of one kind of task, including from your corrections. Tell the agent "don't refactor the code around it when you fix a bug" in two sessions and later bug-fix prompts get "For bug fixes: Do not refactor nearby code." The list shows which preferences came from corrections, and which ones you had to correct the agent on again after they were added (D-064).
+
 Why each works this way, with the research behind it, is in [`docs/DECISIONS.md`](docs/DECISIONS.md) (D-041 to D-049) and [`docs/RESEARCH.md`](docs/RESEARCH.md).
 
 ### Inspect traces

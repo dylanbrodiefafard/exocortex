@@ -1,9 +1,10 @@
 import { ungroundedReferences } from "@exocortex/core";
-import { keywords, type StoredPreference } from "./store.ts";
+import { keywords, type StoredPreference, type TaskKind } from "./store.ts";
 
 /**
  * Preference cards (D-060): how the user likes work done, learned only from the user's own
- * words and added to later prompts that leave it unsaid. Pure functions; the module wires them.
+ * words and added to later prompts that leave it unsaid. With D-064 a card may be an expectation
+ * of one kind of task, and may come from a correction. Pure functions; the module wires them.
  */
 
 /** Words that make a statement a standing rule rather than an instruction for one task. */
@@ -20,6 +21,17 @@ const MIN_QUOTE_CHARS = 8;
 const MIN_RULE_CHARS = 8;
 const MAX_RULE_CHARS = 200;
 const QUOTE_CHARS = 300;
+/** How a rule for one kind of task is introduced to the agent and the user. */
+const KIND_LABEL: Readonly<Record<TaskKind, string>> = {
+	any: "",
+	fix: "bug fixes",
+	feature: "new features",
+	refactor: "refactors",
+	test: "writing tests",
+	review: "code reviews",
+	explain: "questions and explanations",
+	docs: "documentation",
+};
 
 /** What the sidecar proposed for one preference: `same_as` and `replaces` are 1-based into the list it was shown. */
 export interface ProposedPreference {
@@ -27,6 +39,10 @@ export interface ProposedPreference {
 	readonly quote: string;
 	/** The sidecar's reading of whether the user stated it as a rule for future work. */
 	readonly standing: boolean;
+	/** The kind of task the rule is about, or `any`. */
+	readonly applies_to: TaskKind;
+	/** The sidecar's reading of whether the user said it to correct what the agent had just done. */
+	readonly correction: boolean;
 	readonly same_as: number;
 	readonly replaces: number;
 }
@@ -40,6 +56,8 @@ export interface Admitted {
 		readonly existing: number | undefined;
 		readonly rule: string;
 		readonly standing: boolean;
+		readonly kind: TaskKind;
+		readonly correction: boolean;
 		readonly quote: string;
 	};
 }
@@ -82,6 +100,8 @@ export function admitPreference(
 			existing: existing?.id,
 			rule: existing?.rule ?? rule,
 			standing: proposal.standing || isStanding(sentence),
+			kind: proposal.applies_to,
+			correction: proposal.correction,
 			quote,
 		},
 	};
@@ -91,6 +111,7 @@ export function admitPreference(
 export interface ActivePreference {
 	readonly id: number;
 	readonly rule: string;
+	readonly taskKind: TaskKind;
 	/** Distinct sessions it was stated in, across repos. */
 	readonly sessions: number;
 	readonly lastSeenAt: number;
@@ -154,6 +175,7 @@ export function activePreferences(
 		active.push({
 			id: preference.id,
 			rule: preference.rule,
+			taskKind: preference.taskKind,
 			sessions: new Set(preference.sightings.map((s) => s.session)).size,
 			lastSeenAt: Math.max(...preference.sightings.map((s) => s.seenAt)),
 		});
@@ -169,13 +191,19 @@ export function alreadySaid(prompt: string, rule: string): boolean {
 	return ruleWords.filter((w) => promptWords.has(w)).length / ruleWords.length >= ALREADY_SAID_OVERLAP;
 }
 
+/** The rule as the agent and the user read it: "For bug fixes: Add a regression test." */
+export function withKind(preference: { readonly rule: string; readonly taskKind: TaskKind }): string {
+	const label = KIND_LABEL[preference.taskKind];
+	return label ? `For ${label}: ${preference.rule}` : preference.rule;
+}
+
 export function renderPreferences(preferences: readonly ActivePreference[], maxChars: number): string {
 	const header =
 		"[exo memory: standing preferences from this user's earlier sessions. This request does not repeat them: follow them where they apply. If the request conflicts with one, the request wins.]";
 	const lines: string[] = [];
 	let length = header.length;
 	for (const p of preferences) {
-		const line = `- ${p.rule}${p.sessions > 1 ? ` (said in ${p.sessions} sessions)` : ""}`;
+		const line = `- ${withKind(p)}${p.sessions > 1 ? ` (said in ${p.sessions} sessions)` : ""}`;
 		if (length + line.length + 1 > maxChars) break;
 		lines.push(line);
 		length += line.length + 1;

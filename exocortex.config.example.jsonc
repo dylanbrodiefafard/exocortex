@@ -86,7 +86,7 @@
 			"distill": true, // a background sidecar phrases each lesson (else a summary of the edit)
 			"maxCards": 2,
 			"maxInjectChars": 1600, // ~400 tokens
-			"preferences": false, // learn how you like work done from what you type; add what a later prompt leaves unsaid (D-060)
+			"preferences": false, // learn how you like work done and what you expect of a kind of task, from what you type and your corrections; add what a later prompt leaves unsaid (D-060, D-064)
 			"maxPreferences": 5,
 			"preferenceMinSessions": 2, // sessions an instruction must recur in, unless you said it as a standing rule
 			"preferenceSelect": true, // a sidecar picks which preferences fit each prompt (else: all, minus keyword matches)

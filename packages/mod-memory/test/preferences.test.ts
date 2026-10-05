@@ -5,6 +5,7 @@ import {
 	alreadySaid,
 	quotedSentence,
 	renderPreferences,
+	withKind,
 } from "../src/preferences.ts";
 import type { Sighting, StoredPreference } from "../src/store.ts";
 
@@ -12,13 +13,16 @@ const sighting = (scope: string, session: string, standing = false, seenAt = 1):
 	scope,
 	session,
 	standing,
+	correction: false,
 	quote: "q",
 	seenAt,
 });
 const preference = (id: number, rule: string, sightings: Sighting[]): StoredPreference => ({
 	id,
 	rule,
+	taskKind: "any",
 	injected: 0,
+	repeated: 0,
 	createdAt: 0,
 	sightings,
 });
@@ -58,7 +62,13 @@ describe("alreadySaid and renderPreferences", () => {
 	});
 
 	it("stops at the character budget and renders nothing when no rule fits", () => {
-		const many = [1, 2, 3].map((id) => ({ id, rule: `Rule number ${id}.`, sessions: id, lastSeenAt: 0 }));
+		const many = [1, 2, 3].map((id) => ({
+			id,
+			rule: `Rule number ${id}.`,
+			taskKind: "any" as const,
+			sessions: id,
+			lastSeenAt: 0,
+		}));
 		const all = renderPreferences(many, 10_000).split("\n");
 		expect(all.slice(1)).toEqual([
 			"- Rule number 1.",
@@ -68,6 +78,13 @@ describe("alreadySaid and renderPreferences", () => {
 		const header = all[0]?.length ?? 0;
 		expect(renderPreferences(many, header + 60).split("\n")).toHaveLength(3);
 		expect(renderPreferences(many, header + 10)).toBe("");
+	});
+
+	it("says which kind of task an expectation is for (D-064)", () => {
+		const regression = { id: 1, rule: "Add a regression test.", taskKind: "fix" as const, sessions: 1, lastSeenAt: 0 };
+		expect(withKind(regression)).toBe("For bug fixes: Add a regression test.");
+		expect(withKind({ ...regression, taskKind: "any" })).toBe("Add a regression test.");
+		expect(renderPreferences([regression], 10_000)).toContain("\n- For bug fixes: Add a regression test.");
 	});
 });
 
@@ -82,6 +99,8 @@ describe("admitPreference", () => {
 					rule: "Run the linter before committing.",
 					quote: "run the linter before you commit",
 					standing: false,
+					applies_to: "any",
+					correction: false,
 					same_as: 0,
 					replaces: 0,
 				},
@@ -95,17 +114,45 @@ describe("admitPreference", () => {
 				existing: undefined,
 				rule: "Run the linter before committing.",
 				standing: true,
+				kind: "any",
+				correction: false,
 				quote: "run the linter before you commit",
 			},
 		});
 	});
 
 	it("retires what the user withdraws, and replaces it when a new rule comes with it", () => {
-		const withdrawal = { rule: "", quote: "stop writing tests first", standing: false, same_as: 0, replaces: 1 };
+		const withdrawal = {
+			rule: "",
+			quote: "stop writing tests first",
+			standing: false,
+			applies_to: "any" as const,
+			correction: false,
+			same_as: 0,
+			replaces: 1,
+		};
 		expect(admitPreference(withdrawal, message, known, known, "/nowhere")).toEqual({ retire: 1 });
 		expect(
 			admitPreference({ ...withdrawal, rule: "Write tests after the code.", same_as: 1 }, message, known, known, "/x"),
 		).toMatchObject({ retire: 1, stated: { existing: undefined, rule: "Write tests after the code." } });
+	});
+
+	it("carries the kind of task and whether it was a correction (D-064)", () => {
+		const said = "No, don't refactor the code around it when you fix a bug.";
+		const proposal = {
+			rule: "Do not refactor nearby code.",
+			quote: "don't refactor the code around it when you fix a bug",
+			standing: false,
+			applies_to: "fix" as const,
+			correction: true,
+			same_as: 0,
+			replaces: 0,
+		};
+		expect(admitPreference(proposal, said, [], [], "/nowhere").stated).toMatchObject({
+			kind: "fix",
+			correction: true,
+			standing: false,
+		});
 	});
 
 	it("ignores references to preferences that were not shown or are no longer live", () => {
@@ -113,6 +160,8 @@ describe("admitPreference", () => {
 			rule: "Run the linter before committing.",
 			quote: "run the linter",
 			standing: false,
+			applies_to: "any" as const,
+			correction: false,
 			same_as: 9,
 			replaces: 9,
 		};

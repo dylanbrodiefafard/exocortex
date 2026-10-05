@@ -845,6 +845,56 @@ Open check: Exocortex's injected `custom_message` reaches ninfer as a second con
 - **Unverified:** how pi's TUI renders a custom working message between a tool finishing and the next request. The status line is the dependable one.
 - **Also fixed:** applying preferences are now ordered deterministically (ties broken by id).
 
+### D-064 — Preferences also hold what the user expects of a kind of task, and learn from corrections · accepted (2026-10-05; owner's request; research §9, R9.1 and R9.5; amends D-060)
+- **Goal:** delegation goes well when expectations are shared, and most go unsaid: how good is good enough, what to leave alone, how much detail and what tone to answer in. Exocortex should learn them and say them for the user. This entry is the first of three steps; the other two are under "Not done".
+- **Evidence** (research §9): real users push back on about half of a coding agent's turns while the agent asks about 3% of the time (SWE-chat). Getting the missing information recovers most of the loss (Ambig-SWE, Dialogue-SWEBench). A model near our size cannot be trusted to notice that something is missing (Qwen 3 Coder never asked). Supplying what was learned needs no such judgement.
+- **What a preference card may now hold** (amends D-060, which took only *how* work is done): an expectation of the *result* that would hold for other tasks of the same kind. Still never the task's own content.
+- **Task kind.** Each card has one of `any`, `fix`, `feature`, `refactor`, `test`, `review`, `explain`, `docs`. The sidecar proposes it (`preferences.v3`); `any` is the default and what it is told to use when unsure.
+  - The agent and the user read it as a prefix: "For bug fixes: Do not refactor nearby code."
+  - The selection sidecar is told that such a rule fits only that kind of request (`preference-select.v2`). When selection is off or fails, the rule is added with its prefix and the agent decides.
+  - Code cannot check the kind. What it does: a card stated for a second, different kind becomes `any`.
+- **Corrections.** The sidecar says whether the user's message corrects what the agent just did; it now sees the last 1,200 characters of the agent's message, up from 400. Code counts it only if the agent had said something in this session.
+  - Admission is D-060's, unchanged: the user's words verbatim, no one-offs, nothing ungrounded. A correction that only fixes this task's content is not a preference (prompt rule).
+  - **A correction does not apply sooner.** One correction is still one task's instruction; it applies after a second session, or at once if said as a standing rule (D-060). Precision over recall (brief constraint 5).
+  - What a correction adds is a record: each sighting is marked, and `/exo memory preferences` shows how many were corrections.
+- **Repeats (R9.5).** A correction on a preference that was already added to this conversation means adding it did not work. It is counted on the card (`repeated`), traced as `preference_repeated` and shown in the list. This is the accounting D-060 listed as missing. Nothing acts on it yet.
+- **Store:** migration 4 adds `task_kind` and `repeated` to `preferences` and `correction` to `preference_sightings`. Existing cards are `any`.
+- **No new module and no new setting.** It is on with `memory.preferences`, which stays off by default (D-052). A separate module was considered: it would have needed its own reader of every user message, its own store access and a second injected message, to hold cards that differ from preferences by one column.
+- **Open risks:**
+  - The sidecar now fills seven fields per proposal. A 27B that mislabels the kind narrows a general preference; `any` when unsure limits this, and `/exo memory preferences` shows it.
+  - A correction is recognised by the sidecar. A missed one loses only the mark; a false one, on a card already in the conversation, counts a repeat that did not happen.
+  - Untested with a real model, like the rest of D-060 and D-062.
+- **Not done:**
+  - Steps 2 and 3 are deferred; D-065 has the notes for resuming.
+  - **Step 2, the brief (R9.3):** before the agent starts, one visible message with fixed slots (goal, done when, non-goals, quality bar, report), each marked stated, learned or assumed. It states assumptions; it is not a plan to approve. This is where a module of its own is warranted.
+  - **Step 3, questions (R9.2, R9.4):** only after step 2 shows which assumed slots users correct. At most three, never about what the repo can answer.
+  - The supervisor still does not check preferences (D-060).
+  - An eval with underspecified task variants (research §9(c)).
+
+### D-065 — The brief (D-064 step 2) is deferred; notes for resuming · accepted (2026-10-05; owner's call)
+- **Decision:** step 2 and step 3 of D-064 wait. Step 1 goes into daily use first, with `memory.preferences` on.
+- **What step 1 should show before resuming:**
+  - whether the sidecar labels task kinds and corrections sensibly: read `/exo memory preferences` and the `preference_learned` / `preference_seen` trace events;
+  - how often `preference_repeated` fires. If added expectations are often corrected again, a brief that restates them will not help either, and the wording or placement of the injected message is the thing to fix.
+- **The design as discussed** (not built, not final):
+  - One visible `exo.` message before the agent starts, with fixed slots: goal, done when, non-goals, quality bar, how to report back.
+  - Each slot marked *stated* (in the prompt), *learned* (a D-064 card) or *assumed* (the sidecar's guess).
+  - Non-blocking: the user interrupts if an assumption is wrong. It states the expected result, never the steps (research R9.3).
+  - Its own module (`mod-brief`), reading learned expectations from the memory store.
+- **What exists to build on:**
+  - `ExoModule.contextForUserTurn` is the hook. The host runs the modules' hooks one after another inside one 6 s budget (`USER_TURN_BUDGET_MS`, `pi-adapter/src/modules.ts`) and joins their texts into a single message, so the brief and memory's preferences already land together.
+  - Modules cannot see each other's text. The brief would have to query the store itself (`activePreferences`), or the two would repeat each other. Decide which of them renders learned expectations once the brief exists.
+  - For step 3, pi has blocking dialogs: `ctx.ui.confirm`, `select`, `input` (`docs/PI_API_NOTES.md`, `ExtensionUIContext`). They are no-ops in print mode and in the eval over RPC unless the client answers. `ModuleContext` exposes none of them yet.
+- **Open design questions:**
+  - **Cost.** A sidecar call before every task prompt, on top of memory's preference pick (up to 4 s), inside the shared 6 s. Either the budget rises or the two calls become one.
+  - **When to skip.** Questions, short follow-ups and accepted suggestions need no brief. A length or task-kind gate decided in code is safer than asking the model.
+  - **A wrong *assumed* slot steers the agent.** Options: show assumed slots to the user only, or word them as "unless you find otherwise".
+  - **Whether one correction should be enough** to make an expectation apply (D-064 says no; the owner has not ruled on it).
+  - Open question 14 still applies: the message arrives as a second consecutive `user` message.
+- **Evidence to keep in mind** (research §9): the slot schema helped Qwen3 Coder 30B (25.4% → 32.3%) but not Devstral 2 Small 24B (42.2% → 38.6%), with a simulated user. A plan the user approves does not calibrate trust (Plan-Then-Execute). Qwen 3 Coder 480B never asked a question under any prompt, so step 3 cannot rely on the main model choosing to ask.
+- **Measuring it** (research §9(c)): underspecified variants of the hard tasks with a sidecar as the user holding the full task; report hidden, hidden with the brief, and full. Not built. The current fixtures repeat one prompt per task and cannot show it.
+- **Method note for the next research pass:** arXiv's HTML pages can be downloaded and searched directly (`https://arxiv.org/html/<id>`). A fetched summary of Ambig-SWE gave per-model resolve rates that are not in the paper; §9's figures were all read from the text.
+
 ---
 
 ## Open questions (carried from brief §10, updated)

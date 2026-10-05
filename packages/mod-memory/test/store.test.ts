@@ -108,24 +108,62 @@ describe("preference store (D-060)", () => {
 		let clock = 100;
 		const store = openMemoryStore(":memory:", () => clock++);
 		const id = store.addPreference("Keep commits small.");
-		store.addSighting(id, { scope: "repo-a", session: "s1", standing: true, quote: "always keep commits small" });
-		store.addSighting(id, { scope: "repo-b", session: "s2", standing: false, quote: "small commits please" });
+		store.addSighting(id, {
+			scope: "repo-a",
+			session: "s1",
+			standing: true,
+			correction: false,
+			quote: "always keep commits small",
+		});
+		store.addSighting(id, {
+			scope: "repo-b",
+			session: "s2",
+			standing: false,
+			correction: true,
+			quote: "small commits please",
+		});
 		store.markPreferencesInjected([id, id]);
 		expect(store.preferences()).toEqual([
 			{
 				id,
 				rule: "Keep commits small.",
+				taskKind: "any",
 				injected: 2,
+				repeated: 0,
 				createdAt: 100,
 				sightings: [
-					{ scope: "repo-a", session: "s1", standing: true, quote: "always keep commits small", seenAt: 101 },
-					{ scope: "repo-b", session: "s2", standing: false, quote: "small commits please", seenAt: 102 },
+					{
+						scope: "repo-a",
+						session: "s1",
+						standing: true,
+						correction: false,
+						quote: "always keep commits small",
+						seenAt: 101,
+					},
+					{
+						scope: "repo-b",
+						session: "s2",
+						standing: false,
+						correction: true,
+						quote: "small commits please",
+						seenAt: 102,
+					},
 				],
 			},
 		]);
 		expect(store.retirePreference(id)).toBe(true);
 		expect(store.retirePreference(id)).toBe(false);
 		expect(store.preferences()).toEqual([]);
+		store.close();
+	});
+
+	it("keeps the kind of task an expectation is about until it is widened, and counts repeats (D-064)", () => {
+		const store = openMemoryStore(":memory:");
+		const id = store.addPreference("Add a regression test.", "fix");
+		expect(store.preferences()[0]).toMatchObject({ taskKind: "fix", repeated: 0 });
+		store.widenPreference(id);
+		store.markPreferenceRepeated(id);
+		expect(store.preferences()[0]).toMatchObject({ taskKind: "any", repeated: 1 });
 		store.close();
 	});
 });

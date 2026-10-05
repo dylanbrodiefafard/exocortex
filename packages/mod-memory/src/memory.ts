@@ -18,9 +18,10 @@ import {
 	admitPreference,
 	alreadySaid,
 	renderPreferences,
+	withKind,
 } from "./preferences.ts";
 import { type MemorySettings, parseSettings } from "./settings.ts";
-import { type Card, type MemoryStore, openMemoryStore, type StoredPreference } from "./store.ts";
+import { type Card, type MemoryStore, openMemoryStore, type StoredPreference, TASK_KINDS } from "./store.ts";
 
 export const MEMORY_ID = "memory";
 
@@ -31,7 +32,7 @@ const LessonSchema = Type.Object({
 	applies_when: Type.String({ maxLength: 200 }),
 });
 
-const PREFERENCES_PROMPT = loadPrompt(new URL("../prompts/preferences.v2.md", import.meta.url));
+const PREFERENCES_PROMPT = loadPrompt(new URL("../prompts/preferences.v3.md", import.meta.url));
 
 const PreferencesSchema = Type.Object({
 	preferences: Type.Array(
@@ -39,6 +40,8 @@ const PreferencesSchema = Type.Object({
 			rule: Type.String({ maxLength: 300 }),
 			quote: Type.String({ maxLength: 400 }),
 			standing: Type.Boolean(),
+			applies_to: Type.Union(TASK_KINDS.map((kind) => Type.Literal(kind))),
+			correction: Type.Boolean(),
 			same_as: Type.Integer({ minimum: 0 }),
 			replaces: Type.Integer({ minimum: 0 }),
 		}),
@@ -48,7 +51,7 @@ const PreferencesSchema = Type.Object({
 
 /** The sidecar read the fix and found nothing worth remembering: no card, not even a deterministic one. */
 const NOT_REUSABLE = "";
-const SELECT_PROMPT = loadPrompt(new URL("../prompts/preference-select.v1.md", import.meta.url));
+const SELECT_PROMPT = loadPrompt(new URL("../prompts/preference-select.v2.md", import.meta.url));
 
 const SelectionSchema = Type.Object({ apply: Type.Array(Type.Integer({ minimum: 1 }), { maxItems: 10 }) });
 
@@ -59,7 +62,8 @@ const BACKFILL_BATCH = 64;
 /** Shorter messages ("yes", "continue", "thanks") cannot state a preference worth a sidecar call. */
 const MIN_PREFERENCE_MESSAGE_CHARS = 20;
 const PREFERENCE_MESSAGE_CHARS = 4_000;
-const PREFERENCE_CONTEXT_CHARS = 400;
+/** Enough of the agent's last message to tell a correction of it from a new request (D-064). */
+const PREFERENCE_CONTEXT_CHARS = 1_200;
 /** Known preferences shown to the sidecar so it can say "same as" or "replaces". */
 const MAX_KNOWN_PREFERENCES = 30;
 /** Prompts with fewer words are not tasks ("thanks", "go on"): nothing is added to them. */
@@ -86,7 +90,8 @@ interface TaskState {
  *   does; cards that hurt more than they help retire. Cards are superseded, never deleted.
  *
  * With `preferences` on (D-060) it also learns how the user likes work done, only from the user's
- * own messages, and adds the preferences that a later prompt leaves unsaid.
+ * own messages, and adds the preferences that a later prompt leaves unsaid. That includes what
+ * they expect of one kind of task, and what they had to correct the agent on (D-064).
  */
 export function createMemory(raw: Readonly<Record<string, unknown>>, ctx: ModuleContext): ExoModule {
 	const { settings, problems } = parseSettings(raw);
@@ -146,7 +151,7 @@ export function createMemory(raw: Readonly<Record<string, unknown>>, ctx: Module
 			const text = renderPreferences(unsaid, settings.maxPreferenceChars);
 			if (text === "") return undefined;
 			// Count only the ones that fit the budget.
-			const added = unsaid.filter((p) => text.includes(`- ${p.rule}`));
+			const added = unsaid.filter((p) => text.includes(`- ${withKind(p)}`));
 			for (const p of added) shown.add(p.id);
 			store.markPreferencesInjected(added.map((p) => p.id));
 			ctx.record({ kind: "exo.memory", data: { action: "preferences_added", preferences: added.map((p) => p.id) } });
@@ -218,7 +223,8 @@ export function createMemory(raw: Readonly<Record<string, unknown>>, ctx: Module
 	 * Reads one user message for preferences (D-060). The sidecar only proposes; code admits:
 	 * - the quote must be the user's words, verbatim, and the rule may name nothing the message does not;
 	 * - whether it is a standing rule is decided by the user's wording, not by the model;
-	 * - "same as" and "replaces" must point at a preference the sidecar was shown.
+	 * - "same as" and "replaces" must point at a preference the sidecar was shown;
+	 * - it is a correction only if the agent had said something to correct (D-064).
 	 */
 	async function learnPreferences(message: string, before: string): Promise<void> {
 		const pool = ctx.pool();
@@ -259,7 +265,7 @@ export function createMemory(raw: Readonly<Record<string, unknown>>, ctx: Module
 			// Re-read each time: an earlier item of this message may have added or retired one.
 			const live = new Set(store.preferences().map((p) => p.id));
 			const admitted = admitPreference(
-				item,
+				{ ...item, correction: item.correction && before.trim() !== "" },
 				text,
 				known.filter((p) => live.has(p.id)),
 				known,
@@ -286,14 +292,33 @@ export function createMemory(raw: Readonly<Record<string, unknown>>, ctx: Module
 		}
 		const stated = admitted.stated;
 		if (!stated) return;
-		const isNew = stated.existing === undefined;
-		const id = stated.existing ?? store.addPreference(stated.rule);
+		const known = store.preferences().find((p) => p.id === stated.existing);
+		const isNew = known === undefined;
+		const id = known?.id ?? store.addPreference(stated.rule, stated.kind);
 		if (isNew && embedding?.vector) store.setVector("preference", id, embedding.model, embedding.vector);
-		store.addSighting(id, { scope: repo, session, standing: stated.standing, quote: stated.quote });
+		// Said for a second kind of task: it is not about one kind.
+		if (known && known.taskKind !== "any" && known.taskKind !== stated.kind) store.widenPreference(id);
+		store.addSighting(id, {
+			scope: repo,
+			session,
+			standing: stated.standing,
+			correction: stated.correction,
+			quote: stated.quote,
+		});
 		ctx.record({
 			kind: "exo.memory",
-			data: { action: isNew ? "preference_learned" : "preference_seen", preference: id, rule: stated.rule },
+			data: {
+				action: isNew ? "preference_learned" : "preference_seen",
+				preference: id,
+				rule: stated.rule,
+				...(stated.correction ? { correction: true } : {}),
+			},
 		});
+		// The agent had it in this conversation and the user still had to say it: adding it did not work.
+		if (known && stated.correction && shown.has(id)) {
+			store.markPreferenceRepeated(id);
+			ctx.record({ kind: "exo.memory", data: { action: "preference_repeated", preference: id } });
+		}
 	}
 
 	/** `/exo memory preferences` lists them; `/exo memory forget <id>` retires one. */
@@ -317,7 +342,15 @@ export function createMemory(raw: Readonly<Record<string, unknown>>, ctx: Module
 			.map((p) => {
 				const sessions = new Set(p.sightings.map((s) => s.session)).size;
 				const state = active.has(p.id) ? "applies here" : "not yet established";
-				return `${p.id}. ${p.rule} (said in ${sessions} session${sessions === 1 ? "" : "s"}; ${state}; added ${p.injected}×)`;
+				const corrections = p.sightings.filter((s) => s.correction).length;
+				const facts = [
+					`said in ${sessions} session${sessions === 1 ? "" : "s"}`,
+					...(corrections > 0 ? [`${corrections} as a correction`] : []),
+					state,
+					`added ${p.injected}×`,
+					...(p.repeated > 0 ? [`corrected again after being added ${p.repeated}×`] : []),
+				];
+				return `${p.id}. ${withKind(p)} (${facts.join("; ")})`;
 			})
 			.join("\n");
 	}
@@ -418,7 +451,7 @@ export function createMemory(raw: Readonly<Record<string, unknown>>, ctx: Module
 					{
 						role: "user",
 						content: SELECT_PROMPT.render({
-							preferences: candidates.map((p, i) => `${i + 1}. ${p.rule}`).join("\n"),
+							preferences: candidates.map((p, i) => `${i + 1}. ${withKind(p)}`).join("\n"),
 							request: prompt.slice(0, SELECT_REQUEST_CHARS),
 						}),
 					},

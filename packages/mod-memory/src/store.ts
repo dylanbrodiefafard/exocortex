@@ -50,7 +50,11 @@ export interface MemoryStore {
 	/** Live preferences with every sighting, oldest first (D-060). */
 	preferences(): StoredPreference[];
 	/** ADD a preference; its first sighting is recorded separately. */
-	addPreference(rule: string): number;
+	addPreference(rule: string, taskKind?: TaskKind): number;
+	/** The user stated it for a second kind of task: it now applies to any (D-064). */
+	widenPreference(id: number): void;
+	/** The user had to correct the agent on it although it was in the conversation (D-064). */
+	markPreferenceRepeated(id: number): void;
 	/** MERGE: the user stated this preference (again). */
 	addSighting(preferenceId: number, sighting: Omit<Sighting, "seenAt">): void;
 	/** RETIRE: the user withdrew it, or asked to forget it. False when it was not live. */
@@ -65,6 +69,10 @@ export interface MemoryStore {
 
 type VectorKind = "card" | "preference";
 
+/** The kind of task an expectation is about (D-064); `any` is a preference for all work. */
+export const TASK_KINDS = ["any", "fix", "feature", "refactor", "test", "review", "explain", "docs"] as const;
+export type TaskKind = (typeof TASK_KINDS)[number];
+
 /** One time the user stated a preference, in their own words. */
 export interface Sighting {
 	readonly scope: string;
@@ -72,16 +80,24 @@ export interface Sighting {
 	readonly session: string;
 	/** Said as a standing rule ("always…", "from now on…"). */
 	readonly standing: boolean;
+	/** Said to correct what the agent had just done (D-064). */
+	readonly correction: boolean;
 	/** The user's words, verbatim. */
 	readonly quote: string;
 	readonly seenAt: number;
 }
 
-/** How the user likes work done (D-060). Global; its sightings say where it applies. */
+/**
+ * How the user likes work done (D-060), or what they expect of one kind of task (D-064). Global;
+ * its sightings say where it applies.
+ */
 export interface StoredPreference {
 	readonly id: number;
 	readonly rule: string;
+	readonly taskKind: TaskKind;
 	readonly injected: number;
+	/** Times the user corrected the agent on it after it had been added to the conversation. */
+	readonly repeated: number;
 	readonly createdAt: number;
 	readonly sightings: readonly Sighting[];
 }
@@ -135,6 +151,11 @@ const MIGRATIONS: readonly string[] = [
 		PRIMARY KEY (kind, ref_id, model)
 	);
 	`,
+	`
+	ALTER TABLE preferences ADD COLUMN task_kind TEXT NOT NULL DEFAULT 'any';
+	ALTER TABLE preferences ADD COLUMN repeated INTEGER NOT NULL DEFAULT 0;
+	ALTER TABLE preference_sightings ADD COLUMN correction INTEGER NOT NULL DEFAULT 0;
+	`,
 ];
 
 const STOPWORDS = new Set([
@@ -171,7 +192,9 @@ interface Row {
 interface PreferenceRow {
 	id: number;
 	rule: string;
+	task_kind: string;
 	injected: number;
+	repeated: number;
 	created_at: number;
 }
 
@@ -180,6 +203,7 @@ interface SightingRow {
 	scope: string;
 	session: string;
 	standing: number;
+	correction: number;
 	quote: string;
 	seen_at: number;
 }
@@ -284,6 +308,7 @@ export function openMemoryStore(path: string, now: () => number = Date.now): Mem
 						scope: row.scope,
 						session: row.session,
 						standing: row.standing === 1,
+						correction: row.correction === 1,
 						quote: row.quote,
 						seenAt: row.seen_at,
 					},
@@ -293,22 +318,41 @@ export function openMemoryStore(path: string, now: () => number = Date.now): Mem
 			return (live as unknown as PreferenceRow[]).map((row) => ({
 				id: row.id,
 				rule: row.rule,
+				taskKind: TASK_KINDS.find((kind) => kind === row.task_kind) ?? "any",
 				injected: row.injected,
+				repeated: row.repeated,
 				createdAt: row.created_at,
 				sightings: sightings.get(row.id) ?? [],
 			}));
 		},
 
-		addPreference(rule) {
+		addPreference(rule, taskKind = "any") {
 			return Number(
-				db.prepare("INSERT INTO preferences (rule, created_at) VALUES (?, ?)").run(rule, now()).lastInsertRowid,
+				db.prepare("INSERT INTO preferences (rule, task_kind, created_at) VALUES (?, ?, ?)").run(rule, taskKind, now())
+					.lastInsertRowid,
 			);
+		},
+
+		widenPreference(id) {
+			db.prepare("UPDATE preferences SET task_kind = 'any' WHERE id = ?").run(id);
+		},
+
+		markPreferenceRepeated(id) {
+			db.prepare("UPDATE preferences SET repeated = repeated + 1 WHERE id = ?").run(id);
 		},
 
 		addSighting(preferenceId, sighting) {
 			db.prepare(
-				"INSERT INTO preference_sightings (preference_id, scope, session, standing, quote, seen_at) VALUES (?, ?, ?, ?, ?, ?)",
-			).run(preferenceId, sighting.scope, sighting.session, sighting.standing ? 1 : 0, sighting.quote, now());
+				"INSERT INTO preference_sightings (preference_id, scope, session, standing, correction, quote, seen_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+			).run(
+				preferenceId,
+				sighting.scope,
+				sighting.session,
+				sighting.standing ? 1 : 0,
+				sighting.correction ? 1 : 0,
+				sighting.quote,
+				now(),
+			);
 		},
 
 		retirePreference(id) {

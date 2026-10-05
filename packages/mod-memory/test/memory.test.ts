@@ -229,7 +229,18 @@ describe("preferences (D-060)", () => {
 	const TDD = "Write the failing test before the implementation.";
 	const DONE = { outcome: "completed" as const, lastAssistantText: "Done." };
 	const proposal = (extra: Record<string, unknown>) => ({
-		preferences: [{ rule: TDD, quote: "", standing: false, same_as: 0, replaces: 0, ...extra }],
+		preferences: [
+			{
+				rule: TDD,
+				quote: "",
+				standing: false,
+				applies_to: "any",
+				correction: false,
+				same_as: 0,
+				replaces: 0,
+				...extra,
+			},
+		],
 	});
 	const actions = (t: { records: { data: unknown }[] }) => t.records.map((r) => (r.data as { action: string }).action);
 
@@ -352,6 +363,91 @@ describe("preferences (D-060)", () => {
 	});
 });
 
+describe("expectations from corrections (D-064)", () => {
+	const SCOPE = "Do not refactor nearby code.";
+	const CORRECTION = "No, don't refactor the code around it when you fix a bug. Put it back.";
+	const QUOTE = "don't refactor the code around it when you fix a bug";
+	const DONE = { outcome: "completed" as const, lastAssistantText: "Fixed the off-by-one and tidied the module." };
+	const item = (extra: Record<string, unknown> = {}) => ({
+		rule: SCOPE,
+		quote: QUOTE,
+		standing: false,
+		applies_to: "fix",
+		correction: true,
+		same_as: 0,
+		replaces: 0,
+		...extra,
+	});
+	const actions = (t: { records: { data: unknown }[] }) => t.records.map((r) => (r.data as { action: string }).action);
+	const settled = async (s: ReturnType<typeof setup>, requests: number) => {
+		await s.memory.onSettle?.(DONE, signal);
+		await until(() => s.t.requests.length >= requests);
+		await new Promise((r) => setTimeout(r, 20));
+	};
+
+	/** One session: a request, the agent's answer, then the user's correction of it. */
+	async function corrected(proposed: object = item()) {
+		const s = setup({ preferences: true, preferenceSelect: false }, (prompt) => ({
+			preferences: prompt.includes(`Developer's message:\n<<<\n${CORRECTION}`) ? [proposed] : [],
+		}));
+		s.memory.onUserTurn?.({ text: "Fix the off-by-one in the date parser.", origin: "user" });
+		await settled(s, 1);
+		s.memory.onUserTurn?.({ text: CORRECTION, origin: "user" });
+		await settled(s, 2);
+		return s;
+	}
+	const ask = (memory: ReturnType<typeof createMemory>, text: string) =>
+		memory.contextForUserTurn?.({ text, origin: "user" }, signal);
+
+	it("learns what the user expects of one kind of task from a correction, and says so on later prompts", async () => {
+		const first = await corrected();
+		expect(first.t.records.map((r) => r.data)).toEqual([
+			{ action: "preference_learned", preference: 1, rule: SCOPE, correction: true },
+		]);
+		// The sidecar is shown what the agent said, to tell a correction from a new request.
+		expect(String(first.t.requests[1]?.messages[0]?.["content"])).toContain(DONE.lastAssistantText);
+		expect(first.memory.command?.("preferences")).toBe(
+			`1. For bug fixes: ${SCOPE} (said in 1 session; 1 as a correction; not yet established; added 0×)`,
+		);
+		// One correction is one task's instruction (D-060); the second session makes it an expectation.
+		expect(await ask(setup({ preferences: true }).memory, "Fix the crash on empty input")).toBeUndefined();
+		expect(actions((await corrected(item({ same_as: 1 }))).t)).toEqual(["preference_seen"]);
+		const later = setup({ preferences: true, preferenceSelect: false });
+		expect(await ask(later.memory, "Fix the crash on empty input")).toContain(
+			`- For bug fixes: ${SCOPE} (said in 2 sessions)`,
+		);
+		expect(openMemoryStore(dbPath).preferences()[0]).toMatchObject({ taskKind: "fix", injected: 1 });
+	});
+
+	it("does not count a session's first message as a correction", async () => {
+		const s = setup({ preferences: true }, () => ({ preferences: [item()] }));
+		s.memory.onUserTurn?.({ text: CORRECTION, origin: "user" });
+		await settled(s, 1);
+		expect(s.t.records.map((r) => r.data)).toEqual([{ action: "preference_learned", preference: 1, rule: SCOPE }]);
+		expect(openMemoryStore(dbPath).preferences()[0]?.sightings[0]?.correction).toBe(false);
+	});
+
+	it("widens an expectation the user states for a second kind of task", async () => {
+		await corrected();
+		await corrected(item({ same_as: 1, applies_to: "feature" }));
+		expect(openMemoryStore(dbPath).preferences()[0]).toMatchObject({ taskKind: "any" });
+	});
+
+	it("counts a correction on a preference that was already in the conversation", async () => {
+		await corrected(item({ standing: true }));
+		const s = setup({ preferences: true, preferenceSelect: false }, () => ({ preferences: [item({ same_as: 1 })] }));
+		expect(await ask(s.memory, "Fix the crash on empty input")).toContain(SCOPE);
+		s.memory.onUserTurn?.({ text: "Fix the crash on empty input", origin: "user" });
+		await settled(s, 1);
+		s.memory.onUserTurn?.({ text: CORRECTION, origin: "user" });
+		await settled(s, 2);
+		// The agent had been told, and the user still had to say it.
+		expect(actions(s.t)).toEqual(["preferences_added", "preference_seen", "preference_repeated"]);
+		expect(openMemoryStore(dbPath).preferences()[0]).toMatchObject({ repeated: 1 });
+		expect(s.memory.command?.("preferences")).toContain("corrected again after being added 1×");
+	});
+});
+
 describe("embeddings (D-062)", () => {
 	/** A toy embedding space: borrow errors point one way, everything else another. */
 	const embed: Embed = (texts) =>
@@ -397,7 +493,9 @@ describe("embeddings (D-062)", () => {
 		const prefer: Embed = (texts) => texts.map((t) => (/test|tdd/i.test(t) ? [1, 0] : [0, 1]));
 		const DONE = { outcome: "completed" as const, lastAssistantText: "" };
 		const say = async (text: string, rule: string, quote: string, embedder: Embed | undefined) => {
-			const proposal = { preferences: [{ rule, quote, standing: false, same_as: 0, replaces: 0 }] };
+			const proposal = {
+				preferences: [{ rule, quote, standing: false, applies_to: "any", correction: false, same_as: 0, replaces: 0 }],
+			};
 			const s = setup({ preferences: true }, () => proposal, embedder);
 			s.memory.onUserTurn?.({ text, origin: "user" });
 			await s.memory.onSettle?.(DONE, signal);
@@ -427,8 +525,8 @@ describe("preference selection and standing rules by sidecar (D-062)", () => {
 		const store = openMemoryStore(dbPath);
 		for (const rule of RULES) {
 			const id = store.addPreference(rule);
-			store.addSighting(id, { scope: "a", session: "s1", standing: false, quote: "q" });
-			store.addSighting(id, { scope: "b", session: "s2", standing: false, quote: "q" });
+			store.addSighting(id, { scope: "a", session: "s1", standing: false, correction: false, quote: "q" });
+			store.addSighting(id, { scope: "b", session: "s2", standing: false, correction: false, quote: "q" });
 		}
 	}
 
@@ -474,7 +572,17 @@ describe("preference selection and standing rules by sidecar (D-062)", () => {
 
 	it("lets the sidecar call a rule standing when the wording has no fixed cue", async () => {
 		const proposal = (standing: boolean) => ({
-			preferences: [{ rule: RULES[0], quote: "a TDD person", standing, same_as: 0, replaces: 0 }],
+			preferences: [
+				{
+					rule: RULES[0],
+					quote: "a TDD person",
+					standing,
+					applies_to: "any",
+					correction: false,
+					same_as: 0,
+					replaces: 0,
+				},
+			],
 		});
 		for (const [standing, applies] of [
 			[false, false],
