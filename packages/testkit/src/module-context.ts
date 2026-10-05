@@ -7,6 +7,7 @@ import {
 	InferenceError,
 	type ModuleContext,
 	runShellCommand,
+	SIDECAR_MAX_TOKENS,
 	type TraceEventInput,
 } from "@exocortex/core";
 
@@ -64,7 +65,7 @@ export function createTestModuleContext(options: {
 				sessionTokenBudget: 0,
 				backgroundWhenIdleOnly: true,
 			},
-			moduleLimits: () => ({ maxCallsPerTurn: 100, maxTokensPerCall: 2048 }),
+			moduleLimits: () => ({ maxCallsPerTurn: 100, maxTokensPerCall: SIDECAR_MAX_TOKENS }),
 		});
 	const { embed } = options;
 	const embedder: Embedder | undefined = embed && {

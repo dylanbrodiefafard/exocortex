@@ -7,26 +7,27 @@ import {
 	type ToolOutcome,
 	ungroundedReferences,
 } from "@exocortex/core";
-import { type Static, Type } from "typebox";
 import { type CompactionSettings, parseSettings } from "./settings.ts";
 
 export const COMPACTION_ID = "compaction";
 
-const SUMMARIZE_PROMPT = loadPrompt(new URL("../prompts/summarize.v1.md", import.meta.url));
+const SYSTEM_PROMPT = loadPrompt(new URL("../prompts/summarize-system.v2.md", import.meta.url));
+const SUMMARIZE_PROMPT = loadPrompt(new URL("../prompts/summarize.v2.md", import.meta.url));
+const UPDATE_PROMPT = loadPrompt(new URL("../prompts/summarize-update.v2.md", import.meta.url));
+const TEMPLATE = loadPrompt(new URL("../prompts/summary-template.v2.md", import.meta.url));
 
-const NarrativeSchema = Type.Object({
-	current_work: Type.String({ maxLength: 1_200 }),
-	next_step: Type.String({ maxLength: 600 }),
-	dead_ends: Type.Array(Type.String({ maxLength: 400 }), { maxItems: 6 }),
-	key_facts: Type.Array(Type.String({ maxLength: 400 }), { maxItems: 8 }),
-});
-
-export type Narrative = Static<typeof NarrativeSchema>;
-
+/** The template's top-level sections, in order. */
+const SECTIONS = ["## Objective", "## Important Details", "## Work State", "## Next Move", "## Relevant Files"];
+/** A reply without these cannot hand the work over: it is not used. */
+const REQUIRED_SECTIONS = ["## Objective", "## Work State", "## Next Move"];
+/** The first section rendered from tracked facts: everything before it in a summary is the sidecar's. */
+const FACTS_HEADING = "## User requests (verbatim, oldest first)";
+/** Where the sidecar's part began in summaries written before D-067. */
+const V1_NARRATIVE_HEADING = "## Current work";
+const MAX_PRIOR_CHARS = 12_000;
 const MAX_COMMANDS = 25;
 const MAX_FILES = 40;
 const GIT_TIMEOUT_MS = 5_000;
-const NARRATIVE_HEADING = "## Current work";
 
 /** The last run of one command. */
 export interface CommandRecord {
@@ -48,10 +49,11 @@ export interface Facts {
 }
 
 /**
- * Compaction summaries that keep what summarizers lose (brief D-017, research R4.1/R4.2): user
- * requests verbatim, files changed, command results and open errors come from tracked facts;
- * a sidecar writes only the narrative (current work, next step, dead ends, key facts), updating
- * the previous one on later compactions.
+ * Compaction summaries in two parts (D-067, amends D-044):
+ * - a sidecar writes the handover in opencode's structure (objective, important details, work
+ *   state, next move, relevant files), merging the previous summary into it on later compactions;
+ * - tracked facts follow verbatim, because summarizers lose them (research R4.1): the user's
+ *   requests, files changed, and which commands last failed or passed.
  */
 export function createCompaction(raw: Readonly<Record<string, unknown>>, ctx: ModuleContext): ExoModule {
 	const { settings, problems } = parseSettings(raw);
@@ -83,20 +85,21 @@ export function createCompaction(raw: Readonly<Record<string, unknown>>, ctx: Mo
 				diffStats: await diffStats(ctx),
 				commands: [...commands.values()],
 			};
-			const narrative = await writeNarrative(ctx, settings, request, signal);
-			if (!narrative && settings.fallback === "harness") return undefined;
+			const summary = await writeSummary(ctx, settings, request, signal);
+			if (!summary && settings.fallback === "harness") return undefined;
 			compactions += 1;
 			ctx.record({
 				kind: "exo.compaction",
 				data: {
 					reason: request.reason,
 					tokensBefore: request.tokensBefore,
-					narrative: narrative !== undefined,
+					narrative: summary !== undefined,
+					updated: summary !== undefined && priorOf(request.previousSummary) !== "",
 					userMessages: facts.userMessages.length,
 					commands: facts.commands.length,
 				},
 			});
-			return renderSummary(facts, narrative, settings);
+			return renderSummary(facts, summary, settings);
 		},
 
 		status() {
@@ -140,36 +143,34 @@ async function diffStats(ctx: ModuleContext): Promise<Map<string, string>> {
 	return stats;
 }
 
-async function writeNarrative(
+async function writeSummary(
 	ctx: ModuleContext,
 	settings: CompactionSettings,
 	request: CompactionRequest,
 	signal: AbortSignal,
-): Promise<Narrative | undefined> {
+): Promise<string | undefined> {
 	const pool = ctx.pool();
 	if (!pool) return undefined;
-	const previous = request.previousSummary ? narrativeOf(request.previousSummary) : "";
+	const prior = priorOf(request.previousSummary);
+	const shared = {
+		conversation: tail(request.conversation, settings.maxConversationChars),
+		template: TEMPLATE.text.trim(),
+		instructions: request.customInstructions
+			? `\n\nThe user asked this summary to focus on: ${request.customInstructions}`
+			: "",
+	};
 	ctx.progress("Writing the compaction summary…");
 	const result = await pool.run({
 		module: COMPACTION_ID,
 		priority: "critical",
 		timeoutMs: settings.timeoutMs,
 		signal,
-		schema: NarrativeSchema,
-		schemaName: "compaction_summary",
 		request: {
 			messages: [
+				{ role: "system", content: SYSTEM_PROMPT.text.trim() },
 				{
 					role: "user",
-					content: SUMMARIZE_PROMPT.render({
-						previous: previous
-							? `\nThe previous compaction wrote the notes below. Update them with the transcript: keep what still holds, drop what is resolved.\n<<<\n${previous}\n>>>\n`
-							: "",
-						instructions: request.customInstructions
-							? `\nThe user asked this summary to focus on: ${request.customInstructions}\n`
-							: "",
-						conversation: tail(request.conversation, settings.maxConversationChars),
-					}),
+					content: (prior ? UPDATE_PROMPT.render({ ...shared, prior }) : SUMMARIZE_PROMPT.render(shared)).trim(),
 				},
 			],
 			maxTokens: settings.maxSummaryTokens,
@@ -180,43 +181,85 @@ async function writeNarrative(
 		ctx.log(`summary ${result.outcome}: ${result.error}`);
 		return undefined;
 	}
-	return grounded(result.value, `${request.conversation}\n${previous}\n${request.customInstructions ?? ""}`, ctx);
+	const summary = parseSummary(result.value);
+	if (!summary) {
+		ctx.log("summary did not follow the template: not used");
+		return undefined;
+	}
+	return grounded(summary, `${request.conversation}\n${prior}\n${request.customInstructions ?? ""}`, ctx);
+}
+
+/**
+ * The sidecar's reply as a summary: from the first section on, without the template's tags or a
+ * code fence around it. Undefined when a section the agent cannot do without is missing, as when
+ * the reply was cut off or the model answered the conversation instead.
+ */
+export function parseSummary(reply: string): string | undefined {
+	const lines = reply.replace(/<\/?template>/g, "").split("\n");
+	const start = lines.findIndex((line) => line.trim() === SECTIONS[0]);
+	if (start === -1) return undefined;
+	const body = lines.slice(start).map((line) => line.trimEnd());
+	while (body.length > 0 && /^(```)?$/.test(body.at(-1) ?? "")) body.pop();
+	const headings = new Set(body);
+	return REQUIRED_SECTIONS.every((section) => headings.has(section)) ? body.join("\n") : undefined;
 }
 
 /**
  * The guidance gate for summaries (research R3.5, D-061): once the transcript is gone the agent
- * cannot check a name, so list items naming files or symbols found nowhere in the transcript or
- * the workspace are dropped, and a next step that does is left out.
+ * cannot check a name, so bullets naming files or symbols found nowhere in the transcript, the
+ * previous summary or the workspace are dropped. A section left empty says "(none)". The
+ * objective is left alone: it restates the user's request, and losing it costs more than a wrong name.
  */
-export function grounded(narrative: Narrative, evidence: string, ctx: Pick<ModuleContext, "cwd" | "log">): Narrative {
-	const ok = (text: string) => ungroundedReferences(text, evidence, ctx.cwd).length === 0;
-	const kept = {
-		current_work: narrative.current_work,
-		next_step: ok(narrative.next_step) ? narrative.next_step : "",
-		dead_ends: narrative.dead_ends.filter(ok),
-		key_facts: narrative.key_facts.filter(ok),
+export function grounded(summary: string, evidence: string, ctx: Pick<ModuleContext, "cwd" | "log">): string {
+	const kept: string[] = [];
+	/** Bullets kept and dropped under the heading now open, and where that heading is in `kept`. */
+	let open = { at: -1, items: 0, dropped: 0 };
+	let dropped = 0;
+	let gated = false;
+	const close = () => {
+		if (open.dropped > 0 && open.items === 0) kept.splice(open.at + 1, 0, "- (none)");
 	};
-	const dropped =
-		narrative.dead_ends.length - kept.dead_ends.length + narrative.key_facts.length - kept.key_facts.length;
-	if (dropped > 0 || kept.next_step !== narrative.next_step) {
-		ctx.log(`dropped ${dropped} ungrounded item(s)${kept.next_step === "" ? " and the next step" : ""}`);
+	for (const line of summary.split("\n")) {
+		if (line.startsWith("#")) {
+			close();
+			open = { at: kept.length, items: 0, dropped: 0 };
+			if (line.startsWith("## ")) gated = line !== SECTIONS[0];
+		} else if (gated && /^\s*(-|\d+\.)\s/.test(line)) {
+			if (ungroundedReferences(line, evidence, ctx.cwd).length > 0) {
+				open.dropped += 1;
+				dropped += 1;
+				continue;
+			}
+			open.items += 1;
+		}
+		kept.push(line);
 	}
-	return kept;
+	close();
+	if (dropped > 0) ctx.log(`dropped ${dropped} ungrounded item(s)`);
+	return kept.join("\n");
 }
 
-/** The narrative part of an earlier Exocortex summary (or all of a foreign one). */
-function narrativeOf(summary: string): string {
-	const start = summary.indexOf(NARRATIVE_HEADING);
-	return (start === -1 ? summary : summary.slice(start)).slice(0, 6_000);
+/**
+ * What the sidecar wrote in the previous summary: the part to merge into the new one. The facts
+ * after it are rendered again from what was tracked. A summary Exocortex did not write (the
+ * harness's own) is carried whole.
+ */
+function priorOf(summary: string | null): string {
+	if (!summary) return "";
+	const facts = summary.indexOf(FACTS_HEADING);
+	if (facts > 0) return summary.slice(0, facts).trim().slice(0, MAX_PRIOR_CHARS);
+	if (facts === -1) return summary.trim().slice(0, MAX_PRIOR_CHARS);
+	const v1 = summary.indexOf(V1_NARRATIVE_HEADING);
+	return v1 === -1 ? "" : summary.slice(v1).trim().slice(0, MAX_PRIOR_CHARS);
 }
 
 function tail(text: string, max: number): string {
 	return text.length <= max ? text : `[… earlier transcript omitted …]\n${text.slice(text.length - max)}`;
 }
 
-/** Renders the summary: tracked facts verbatim, then the sidecar's narrative. */
-export function renderSummary(facts: Facts, narrative: Narrative | undefined, settings: CompactionSettings): string {
-	const sections: string[] = [];
+/** Renders the summary: the sidecar's handover, then tracked facts verbatim. */
+export function renderSummary(facts: Facts, summary: string | undefined, settings: CompactionSettings): string {
+	const sections: string[] = summary ? [summary] : [];
 	sections.push(
 		"## User requests (verbatim, oldest first)",
 		facts.userMessages.length === 0
@@ -248,12 +291,6 @@ export function renderSummary(facts: Facts, narrative: Narrative | undefined, se
 			"## Commands that last succeeded (no need to re-run unless something changed)",
 			list(passing.slice(-MAX_COMMANDS).map((c) => `\`${c.command}\``)),
 		);
-	}
-	if (narrative) {
-		const next = narrative.next_step.trim();
-		sections.push(NARRATIVE_HEADING, `${narrative.current_work.trim()}${next ? `\nNext: ${next}` : ""}`);
-		if (narrative.dead_ends.length > 0) sections.push("## Dead ends (do not retry)", list(narrative.dead_ends));
-		if (narrative.key_facts.length > 0) sections.push("## Key facts", list(narrative.key_facts));
 	}
 	return sections.join("\n\n");
 }

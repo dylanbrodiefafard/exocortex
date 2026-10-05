@@ -920,6 +920,52 @@ Open check: Exocortex's injected `custom_message` reaches ninfer as a second con
   - Questions generated for the user or the repo (GATE's method). That needs a model to word the rule.
   - D-064's steps 2 and 3 stay deferred (D-065). The interview is asked once, not per task.
 
+### D-067 — Compaction writes opencode's structured summary; tracked facts stay · accepted (2026-10-05; owner's request; amends D-044)
+- **Goal:** the owner is happy with how opencode compacts and wants ours to use a similar prompt and approach. Read in opencode 1.18.34 (`sst/opencode` at `907b3bc5`): `packages/opencode/src/session/compaction.ts`, `packages/core/src/session/compaction.ts` and `packages/opencode/src/agent/prompt/compaction.txt`.
+- **What opencode does, and where we already matched:**
+  - It keeps recent turns verbatim and summarizes the rest. Pi does this itself (`keepRecentTokens`, 20,000 by default) and hands us only the span to summarize.
+  - It serializes the span with role labels and cuts each tool result at 2,000 characters. Pi's `serializeConversation`, which we use, does the same.
+  - It gives the previous summary back to the model to merge into the new one. D-044 did this for the narrative only.
+- **Adopted:**
+  - **System prompt:** opencode's, verbatim: a summarization agent that does not continue the conversation or answer questions in it.
+  - **Structure:** opencode's Markdown template: Objective, Important Details, Work State (Completed, Active, Blocked), Next Move, Relevant Files. It replaces D-044's JSON narrative (current work, next step, dead ends, key facts).
+  - **Merging:** opencode's update instructions. The previous summary is discarded afterwards, so directives and decisions are carried forward, and the conversation wins where they conflict.
+  - **Free Markdown, not a JSON schema.** The reply is taken from `## Objective` on, without the template's tags or a code fence.
+  - **Limits:** opencode's 4,096 output tokens (`maxSummaryTokens`), and the whole span goes to the sidecar (D-068). `maxConversationChars` (400,000) remains only as a guard for a sidecar with a smaller window than the main model's.
+- **Changed from opencode:**
+  - The "Blocked" bullet also asks for approaches that were tried and failed, with why. D-044 had a dead-ends list for this (research R4.1) and the template had no place for it.
+  - `/compact <focus>` is appended as "The user asked this summary to focus on: …". Opencode has no such input.
+- **Kept from D-044:**
+  - **Tracked facts follow the sidecar's summary, verbatim:** user requests, files modified with numstat, files read, commands that last failed or passed. The headings are unchanged. They overlap with "Relevant Files" and "Blocked"; the overlap is the exact record against the model's account of it.
+  - **Only the sidecar's part is merged.** The previous summary is cut at the first facts heading; the facts are rendered again from what was tracked (R4.2). A summary pi wrote is carried whole. From a summary written before this entry, the part from "## Current work" is carried.
+  - **The guidance gate (D-061),** now per bullet: a bullet naming a file or symbol found nowhere in the transcript, the previous summary or the workspace is dropped, and a section left empty says "(none)". The Objective is exempt, as `current_work` was.
+  - Critical priority, the 90 s deadline, and both fallbacks.
+- **A reply that ignores the template is not used.** Objective, Work State and Next Move must be present as headings; otherwise the fallback applies. A reply cut off after those is used.
+- **Fixed on the way: summaries were being cut at 1,024 tokens.** The pool caps every sidecar call at `maxTokensPerCall`, default 1,024, and D-044's 1,200-token setting was silently clamped to it. The default is now 4,096.
+- **Prompts:** `summarize-system.v2.md`, `summarize.v2.md`, `summarize-update.v2.md` and `summary-template.v2.md`; `summarize.v1.md` is removed. Opencode is MIT-licensed; its notice is in `packages/mod-compaction/THIRD_PARTY_NOTICES.md`.
+- **Trace:** `exo.compaction` keeps `narrative` (a sidecar summary was used) and adds `updated` (a previous summary was merged).
+- **Open risks:**
+  - Untested with a real model. Nothing enforces the template as a JSON schema did; a reply that misses it costs the user the wait plus pi's own compaction. The debug log says "did not follow the template".
+  - The gate now reads every bullet but the Objective, so a false positive drops more. `ungroundedReferences` treats anything shaped like `name.ext` as a path.
+  - The summary is longer than D-044's, so each request after a compaction carries more.
+- **Not done:**
+  - Opencode's pruning of old tool outputs (`compaction.prune`). It rewrites earlier messages, which the prompt-cache rule forbids; D-053 keeps retro-masking deferred.
+  - Opencode's synthetic "Continue if you have next steps…" message after an automatic compaction, and its replay of the last user message after an overflow. Both are pi's side of compaction.
+
+### D-068 — The target model is strong and fast: no output limits to save time · accepted (2026-10-05; owner's correction)
+- **Facts from the owner:** Qwen 3.8 27B is a very good local model, and ninfer decodes it at about 200 tokens per second. Earlier entries reason from a weak, slow 27B; where they set a limit to save output time, this entry replaces that reasoning.
+- **Rule:** no sidecar call gets a low output limit, or any other constraint, in order to be quicker.
+- **Changed:**
+  - Every module's sidecar call asks for `SIDECAR_MAX_TOKENS` (4,096, in core). It only stops a runaway reply. Before: memory 60, 300 and 400; triage 250 and 300; trimmer 400; supervisor 700 and 800. A low limit also cut replies off, and with `thinking` on it could do so before the answer began.
+  - The pool's default `maxTokensPerCall` is the same 4,096 (was 1,024). Config can still set it per module.
+  - Compaction: 4,096 summary tokens and the whole span (D-067).
+- **Not changed, and why:**
+  - **Hook time budgets** (D-039, D-041, brief): every hook that holds pi keeps its deadline. They exist so an Exocortex fault cannot stall a session, whatever the model's speed. At 200 tokens per second the replies these calls produce fit them many times over.
+  - **Limits on what enters the main model's context:** injected cards and preferences, hint and lesson lengths in the schemas, trimmed output sizes. They are about the main model's context, not the sidecar's speed.
+  - **Limits on sidecar input** that an earlier entry justified by prefill time (the trimmer's `sidecarAboveChars` to `sidecarMaxInputChars` window; D-024's "keep isolated prompts short"). The owner's figure is for output; prefill speed and its effect on the main model's decode were measured in D-038 and are a separate question.
+  - **Gates that check a sidecar's claims against evidence** (the verbatim-quote admission of D-060, the grounding gate of D-061, verified fixes in D-049). A strong model still states things that are not in its input; these cost no time. Loosening any of them is the owner's call, per gate.
+- **Follow-up:** the README still introduces Exocortex as help for "a weak local LLM".
+
 ---
 
 ## Open questions (carried from brief §10, updated)

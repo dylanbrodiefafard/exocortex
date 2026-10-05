@@ -66,7 +66,7 @@ Each is off by default. Enable them under `modules` in `~/.exocortex/config.json
 
 - **Trimmer:** shortens long bash outputs before the model sees them. It keeps the first and last lines and every error with its context, verbatim, and says where the full output is. With `"sidecar": true`, a sidecar picks which lines to keep; it can only select lines, never rewrite them. `read`, `edit` and `write` results are never trimmed.
 - **Triage:** on a first failure it only moves a buried first error to the top. When the same failure happens again, it says so and adds a two-sentence hint from a sidecar; a hint that names files or symbols found nowhere in the output or the repo is dropped. At three repeats it warns that the approach isn't working.
-- **Compaction:** when pi compacts the conversation, the summary lists your requests verbatim, the files changed, which commands last failed (with their first error) and which succeeded. A sidecar adds only what the agent was doing, what to do next, and the dead ends. If the sidecar fails, pi compacts as usual.
+- **Compaction:** when pi compacts the conversation, a sidecar writes a structured handover in the form opencode uses (objective, important details, work state, next move, relevant files), merging the previous summary into it on later compactions. Below it the summary lists your requests verbatim, the files changed, which commands last failed (with their first error) and which succeeded. If the sidecar fails or ignores the format, pi compacts as usual (D-067).
 
 ### Memory (Phase 5)
 

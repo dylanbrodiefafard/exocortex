@@ -31,6 +31,7 @@ export {
 	type ModuleLimits,
 	moduleLimitsFrom,
 	type PoolStats,
+	SIDECAR_MAX_TOKENS,
 	type SidecarCall,
 	type SidecarCallRecord,
 	type SidecarOutcome,

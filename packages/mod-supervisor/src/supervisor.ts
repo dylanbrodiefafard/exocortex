@@ -4,6 +4,7 @@ import {
 	type ModuleContext,
 	type SettleAction,
 	type SettleInfo,
+	SIDECAR_MAX_TOKENS,
 	type ToolOutcome,
 	type UserTurn,
 } from "@exocortex/core";
@@ -271,7 +272,7 @@ async function extractLedger(
 					}),
 				},
 			],
-			maxTokens: 700,
+			maxTokens: SIDECAR_MAX_TOKENS,
 			temperature: 0.2,
 			thinking: settings.thinking,
 		},
@@ -458,7 +459,7 @@ async function judge(
 	const common = { module: SUPERVISOR_ID, priority: "critical" as const, timeoutMs: settings.verdictTimeoutMs, signal };
 	const request = (content: string) => ({
 		messages: [{ role: "user" as const, content }],
-		maxTokens: 800,
+		maxTokens: SIDECAR_MAX_TOKENS,
 		temperature,
 		thinking: settings.thinking,
 	});

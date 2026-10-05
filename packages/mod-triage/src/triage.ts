@@ -5,6 +5,7 @@ import {
 	firstErrorLine,
 	loadPrompt,
 	type ModuleContext,
+	SIDECAR_MAX_TOKENS,
 	type ToolResultDraft,
 	ungroundedReferences,
 } from "@exocortex/core";
@@ -155,7 +156,7 @@ export function createTriage(raw: Readonly<Record<string, unknown>>, ctx: Module
 					schemaName: "hypothesis",
 					request: {
 						messages: [{ role: "user", content: HYPOTHESIS_PROMPT.render({ ...vars, frame }) }],
-						maxTokens: 250,
+						maxTokens: SIDECAR_MAX_TOKENS,
 						temperature: HYPOTHESIS_TEMPERATURE,
 						thinking: settings.thinking,
 					},
@@ -199,7 +200,7 @@ export function createTriage(raw: Readonly<Record<string, unknown>>, ctx: Module
 						}),
 					},
 				],
-				maxTokens: 300,
+				maxTokens: SIDECAR_MAX_TOKENS,
 				thinking: settings.thinking,
 			},
 		});

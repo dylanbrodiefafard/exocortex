@@ -114,7 +114,14 @@ export interface SidecarPoolOptions {
 	readonly now?: () => number;
 }
 
-export const DEFAULT_MODULE_LIMITS: ModuleLimits = { maxCallsPerTurn: 4, maxTokensPerCall: 1024 };
+/**
+ * The output limit a sidecar call asks for (D-068). It only stops a runaway reply: output is
+ * fast on the target engine, so no call is given a low limit to save time, and a low one cuts
+ * replies off (with thinking on, before the answer starts).
+ */
+export const SIDECAR_MAX_TOKENS = 4096;
+
+export const DEFAULT_MODULE_LIMITS: ModuleLimits = { maxCallsPerTurn: 4, maxTokensPerCall: SIDECAR_MAX_TOKENS };
 
 /** Per-module limits from config, with defaults for unset fields. */
 export function moduleLimitsFrom(modules: ExoConfig["modules"]): (module: string) => ModuleLimits {

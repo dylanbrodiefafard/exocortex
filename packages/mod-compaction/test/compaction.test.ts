@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { type CompactionRequest, runShellCommand } from "@exocortex/core";
 import { createTestModuleContext, type SidecarReply } from "@exocortex/testkit";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createCompaction, grounded } from "../src/compaction.ts";
+import { createCompaction, grounded, parseSummary } from "../src/compaction.ts";
 
 let dir: string;
 beforeEach(() => {
@@ -13,12 +13,30 @@ beforeEach(() => {
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
 const signal = new AbortController().signal;
-const NARRATIVE = {
-	current_work: "Fixing the borrow in Interpreter::eval.",
-	next_step: "Run cargo test after cloning the word body.",
-	dead_ends: ["tried RefCell: failed because of a double borrow at runtime"],
-	key_facts: ["user-defined words are expanded at definition time"],
-};
+const SUMMARY = [
+	"## Objective",
+	"- Implement a Forth interpreter in Rust.",
+	"",
+	"## Important Details",
+	"- user-defined words are expanded at definition time",
+	"",
+	"## Work State",
+	"### Completed",
+	"- (none)",
+	"",
+	"### Active",
+	"- Fixing the borrow in Interpreter::eval.",
+	"",
+	"### Blocked",
+	"- tried RefCell: failed because of a double borrow at runtime",
+	"",
+	"## Next Move",
+	"1. Run cargo test after cloning the word body.",
+	"2. (none)",
+	"",
+	"## Relevant Files",
+	"- src/lib.rs: the interpreter",
+].join("\n");
 
 function request(extra: Partial<CompactionRequest> = {}): CompactionRequest {
 	return {
@@ -37,17 +55,19 @@ function request(extra: Partial<CompactionRequest> = {}): CompactionRequest {
 function setup(settings: Record<string, unknown> = {}, reply?: (prompt: string) => SidecarReply) {
 	const t = createTestModuleContext({
 		cwd: dir,
-		...(reply ? { reply: (r) => reply(String(r.messages[0]?.["content"])) } : {}),
+		...(reply ? { reply: (r) => reply(String(r.messages[1]?.["content"])) } : {}),
 	});
 	return { t, module: createCompaction(settings, t.context) };
 }
 
+const FACTS = "## User requests (verbatim, oldest first)\n\n1. implement forth";
+
 describe("compaction", () => {
-	it("renders tracked facts verbatim plus the sidecar narrative", async () => {
+	it("renders the sidecar's handover, then tracked facts verbatim", async () => {
 		const prompts: string[] = [];
 		const { module, t } = setup({}, (p) => {
 			prompts.push(p);
-			return NARRATIVE;
+			return `<template>\n${SUMMARY}\n</template>\n`;
 		});
 		module.onUserTurn?.({ text: "implement forth", origin: "user" });
 		module.onUserTurn?.({ text: "(continuation)", origin: "extension" });
@@ -60,9 +80,10 @@ describe("compaction", () => {
 		bash("cargo fmt", 0);
 		module.onToolResult?.({ toolName: "read", input: { path: "x" }, isError: false, exitCode: null, output: "" });
 
-		const summary = await module.compact?.(request(), signal);
+		const summary = await module.compact?.(request({ conversation: "[User]: implement forth in src/lib.rs" }), signal);
 		expect(summary).toBe(
 			[
+				SUMMARY,
 				"## User requests (verbatim, oldest first)",
 				"1. implement forth\n2. also support `: square dup * ;`",
 				"## Files modified",
@@ -73,56 +94,92 @@ describe("compaction", () => {
 				"- `cargo test` → exit 101: error[E0502]: cannot borrow `self.stack`",
 				"## Commands that last succeeded (no need to re-run unless something changed)",
 				"- `ls -la`\n- `cargo fmt`",
-				"## Current work",
-				"Fixing the borrow in Interpreter::eval.\nNext: Run cargo test after cloning the word body.",
-				"## Dead ends (do not retry)",
-				"- tried RefCell: failed because of a double borrow at runtime",
-				"## Key facts",
-				"- user-defined words are expanded at definition time",
 			].join("\n\n"),
 		);
-		expect(prompts[0]).toContain("[User]: implement forth");
-		expect(prompts[0]).not.toContain("previous compaction");
-		expect(t.requests[0]?.thinking).toBe(false);
+		expect(String(t.requests[0]?.messages[0]?.["content"])).toMatch(/^You are a context summarization agent\./);
+		expect(t.requests[0]?.messages[0]?.["role"]).toBe("system");
+		expect(prompts[0]).toMatch(
+			/^Here is the conversation so far:\n\n<conversation>\n\[User\]: implement forth in src\/lib\.rs\n<\/conversation>\n\nCreate a new anchored summary/,
+		);
+		expect(prompts[0]).toContain("## Relevant Files\n- [file or directory path: why it matters");
+		expect(prompts[0]).toMatch(/Do not mention the summary process or that context was compacted\.$/);
+		expect(prompts[0]).not.toContain("<prior-summary>");
+		expect(t.requests[0]).toMatchObject({ thinking: false, maxTokens: 4_096 });
 		expect(t.records).toEqual([
 			{
 				kind: "exo.compaction",
-				data: { reason: "threshold", tokensBefore: 120_000, narrative: true, userMessages: 2, commands: 3 },
+				data: {
+					reason: "threshold",
+					tokensBefore: 120_000,
+					narrative: true,
+					updated: false,
+					userMessages: 2,
+					commands: 3,
+				},
 			},
 		]);
 		expect(module.status?.()).toBe("compaction (1 summaries)");
 	});
 
-	it("updates the previous narrative, keeps the latest conversation and passes user focus", async () => {
+	it("merges the previous handover, keeps the latest conversation and passes user focus", async () => {
 		const prompts: string[] = [];
-		const { module } = setup({ maxConversationChars: 2_000 }, (p) => {
+		const { module, t } = setup({ maxConversationChars: 2_000 }, (p) => {
 			prompts.push(p);
-			return { ...NARRATIVE, dead_ends: [], key_facts: [] };
+			return SUMMARY;
 		});
-		const previousSummary = "## User requests (verbatim, oldest first)\n\n1. old\n\n## Current work\n\nWas parsing.";
-		const conversation = `${"x".repeat(5_000)}THE END`;
+		const previousSummary = `${SUMMARY.replace("Fixing the borrow", "Was parsing")}\n\n${FACTS.replace("implement forth", "old")}`;
+		const conversation = `${"x".repeat(5_000)}THE END src/lib.rs`;
 		const summary = await module.compact?.(
 			request({ previousSummary, conversation, customInstructions: "the parser", userMessages: ["from the span"] }),
 			signal,
 		);
-		expect(prompts[0]).toContain("## Current work\n\nWas parsing.");
+		expect(prompts[0]).toContain("<prior-summary>\n## Objective");
+		expect(prompts[0]).toContain("- Was parsing in Interpreter::eval.");
+		expect(prompts[0]).toContain(
+			"- src/lib.rs: the interpreter\n</prior-summary>\n\nThe <prior-summary> summarizes everything",
+		);
+		// The facts are rendered again from what was tracked, not merged by the model.
 		expect(prompts[0]).not.toContain("1. old");
-		expect(prompts[0]).toContain("focus on: the parser");
+		expect(prompts[0]).toMatch(/compacted\.\n\nThe user asked this summary to focus on: the parser$/);
 		expect(prompts[0]).toContain("[… earlier transcript omitted …]");
 		expect(prompts[0]).toContain("THE END");
 		expect(summary).toContain("1. from the span");
-		expect(summary).not.toContain("Dead ends");
+		expect(t.records[0]?.data).toMatchObject({ updated: true });
 	});
 
-	it("leaves compaction to the harness when the sidecar fails, unless the fallback is deterministic", async () => {
+	it("carries a summary it did not write whole, and only the narrative of one from before D-067", async () => {
+		const prior = async (previousSummary: string) => {
+			const prompts: string[] = [];
+			const { module } = setup({}, (p) => {
+				prompts.push(p);
+				return SUMMARY;
+			});
+			await module.compact?.(request({ previousSummary, conversation: "[User]: src/lib.rs" }), signal);
+			return prompts[0] ?? "";
+		};
+		expect(await prior("The agent was adding a parser.")).toContain(
+			"<prior-summary>\nThe agent was adding a parser.\n</prior-summary>",
+		);
+		expect(await prior(`${FACTS}\n\n## Current work\n\nWas parsing.`)).toContain(
+			"<prior-summary>\n## Current work\n\nWas parsing.\n</prior-summary>",
+		);
+		// A facts-only summary holds nothing to merge.
+		expect(await prior(FACTS)).not.toContain("<prior-summary>");
+	});
+
+	it("leaves compaction to the harness when the sidecar fails or ignores the template, unless the fallback is deterministic", async () => {
 		const failing = setup({}, () => new Error("down"));
 		expect(await failing.module.compact?.(request(), signal)).toBeUndefined();
 		expect(failing.t.records).toEqual([]);
 		const noEngine = setup();
 		expect(await noEngine.module.compact?.(request(), signal)).toBeUndefined();
-		const deterministic = setup({ fallback: "deterministic" });
+		const chatty = setup({}, () => "Sure! I will keep implementing forth.");
+		expect(await chatty.module.compact?.(request(), signal)).toBeUndefined();
+		expect(chatty.t.logs).toContain("summary did not follow the template: not used");
+		const deterministic = setup({ fallback: "deterministic" }, () => "## Objective\n- cut off");
 		const summary = await deterministic.module.compact?.(request({ filesRead: [], filesModified: [] }), signal);
-		expect(summary).toBe("## User requests (verbatim, oldest first)\n\n1. implement forth");
+		expect(summary).toBe(FACTS);
+		expect(deterministic.t.records[0]?.data).toMatchObject({ narrative: false, updated: false });
 	});
 
 	it("adds git diff stats for modified files", async () => {
@@ -151,36 +208,80 @@ describe("compaction", () => {
 	});
 });
 
+describe("parseSummary", () => {
+	it("takes the reply from the first section, without tags, a code fence or chatter before it", () => {
+		expect(parseSummary(`Here is the summary:\n\`\`\`\n<template>\n${SUMMARY}  \n</template>\n\`\`\`\n`)).toBe(SUMMARY);
+	});
+
+	it("rejects a reply missing a section the agent cannot do without", () => {
+		expect(parseSummary("")).toBeUndefined();
+		expect(parseSummary(SUMMARY.slice(0, SUMMARY.indexOf("## Next Move")))).toBeUndefined();
+		expect(parseSummary(SUMMARY.replace("## Objective", "Objective"))).toBeUndefined();
+		// The last section may be lost to the token limit: the rest still hands the work over.
+		const cut = SUMMARY.slice(0, SUMMARY.indexOf("## Relevant Files")).trimEnd();
+		expect(parseSummary(cut)).toBe(cut);
+	});
+});
+
 describe("grounded", () => {
-	it("drops list items and a next step that name things found nowhere in the transcript or workspace", () => {
+	it("drops bullets that name things found nowhere in the transcript or workspace, except in the objective", () => {
 		writeFileSync(join(dir, "real.rs"), "");
 		const logs: string[] = [];
 		const kept = grounded(
-			{
-				current_work: "Fixing `eval`.",
-				next_step: "Edit src/ghost.rs to add `Phantom`.",
-				dead_ends: ["tried `RefCell`: double borrow", "tried `made_up_fn`: did not help"],
-				key_facts: ["real.rs holds the entry point", "`eval` is recursive", "see docs/none.md"],
-			},
+			[
+				"## Objective",
+				"- Port `legacy_vm` to Rust.",
+				"## Important Details",
+				"- real.rs holds the entry point",
+				"- see docs/none.md",
+				"- `eval` is recursive",
+				"## Work State",
+				"### Completed",
+				"- added `Phantom`",
+				"",
+				"### Blocked",
+				"- tried `RefCell`: double borrow",
+				"- tried `made_up_fn`: did not help",
+				"## Next Move",
+				"1. Edit src/ghost.rs",
+				"## Relevant Files",
+				"A note that is not a bullet about other/ghost.rs",
+			].join("\n"),
 			"[Assistant]: I tried `RefCell` around `eval`",
 			{ cwd: dir, log: (m) => logs.push(m) },
 		);
-		expect(kept).toEqual({
-			current_work: "Fixing `eval`.",
-			next_step: "",
-			dead_ends: ["tried `RefCell`: double borrow"],
-			key_facts: ["real.rs holds the entry point", "`eval` is recursive"],
-		});
-		expect(logs).toEqual(["dropped 2 ungrounded item(s) and the next step"]);
+		expect(kept).toBe(
+			[
+				"## Objective",
+				"- Port `legacy_vm` to Rust.",
+				"## Important Details",
+				"- real.rs holds the entry point",
+				"- `eval` is recursive",
+				"## Work State",
+				"### Completed",
+				"- (none)",
+				"",
+				"### Blocked",
+				"- tried `RefCell`: double borrow",
+				"## Next Move",
+				"- (none)",
+				"## Relevant Files",
+				"A note that is not a bullet about other/ghost.rs",
+			].join("\n"),
+		);
+		expect(logs).toEqual(["dropped 4 ungrounded item(s)"]);
+		expect(grounded(SUMMARY, "src/lib.rs", { cwd: dir, log: (m) => logs.push(m) })).toBe(SUMMARY);
+		expect(logs).toHaveLength(1);
 	});
 
-	it("keeps accepted suggestions among the requests and leaves out an empty next step", async () => {
-		const { module } = setup({}, () => ({ ...NARRATIVE, next_step: "Open `nowhere_fn`." }));
+	it("keeps accepted suggestions among the requests and gates the sidecar's summary", async () => {
+		const { module } = setup({}, () =>
+			SUMMARY.replace("1. Run cargo test", "1. Open `nowhere_fn`, then run cargo test"),
+		);
 		module.onUserTurn?.({ text: "implement forth", origin: "user" });
 		module.onUserTurn?.({ text: "Not done yet. 1. Add the README", origin: "suggestion" });
-		const summary = await module.compact?.(request(), signal);
+		const summary = await module.compact?.(request({ conversation: "[User]: src/lib.rs" }), signal);
 		expect(summary).toContain("2. Not done yet. 1. Add the README");
-		expect(summary).toContain("## Current work\n\nFixing the borrow in Interpreter::eval.\n\n## Dead ends");
-		expect(summary).not.toContain("Next:");
+		expect(summary).toContain("## Next Move\n2. (none)\n\n## Relevant Files");
 	});
 });

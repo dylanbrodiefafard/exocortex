@@ -7,6 +7,7 @@ import {
 	firstErrorLine,
 	loadPrompt,
 	type ModuleContext,
+	SIDECAR_MAX_TOKENS,
 	type ToolOutcome,
 	ungroundedReferences,
 } from "@exocortex/core";
@@ -270,7 +271,7 @@ export function createMemory(raw: Readonly<Record<string, unknown>>, ctx: Module
 						}),
 					},
 				],
-				maxTokens: 400,
+				maxTokens: SIDECAR_MAX_TOKENS,
 				thinking: settings.thinking,
 			},
 		});
@@ -554,7 +555,7 @@ export function createMemory(raw: Readonly<Record<string, unknown>>, ctx: Module
 						}),
 					},
 				],
-				maxTokens: 60,
+				maxTokens: SIDECAR_MAX_TOKENS,
 				thinking: settings.thinking,
 			},
 		});
@@ -620,7 +621,7 @@ export function createMemory(raw: Readonly<Record<string, unknown>>, ctx: Module
 						}),
 					},
 				],
-				maxTokens: 300,
+				maxTokens: SIDECAR_MAX_TOKENS,
 				thinking: settings.thinking,
 			},
 		});

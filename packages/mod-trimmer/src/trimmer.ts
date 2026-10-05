@@ -6,6 +6,7 @@ import {
 	type ExoModule,
 	loadPrompt,
 	type ModuleContext,
+	SIDECAR_MAX_TOKENS,
 	type ToolResultDraft,
 	type ToolRewrite,
 } from "@exocortex/core";
@@ -128,7 +129,7 @@ async function selectWithSidecar(
 					}),
 				},
 			],
-			maxTokens: 400,
+			maxTokens: SIDECAR_MAX_TOKENS,
 			thinking: settings.thinking,
 		},
 	});

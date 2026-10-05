@@ -5,9 +5,13 @@ const SettingsSchema = Type.Object(
 	{
 		/** The user waits on compaction, so it runs at critical priority within this deadline. */
 		timeoutMs: Type.Integer({ minimum: 1_000, default: 90_000 }),
-		/** Conversation characters sent to the sidecar (the most recent ones; ~4 chars per token). */
-		maxConversationChars: Type.Integer({ minimum: 2_000, default: 60_000 }),
-		maxSummaryTokens: Type.Integer({ minimum: 200, default: 1_200 }),
+		/**
+		 * The sidecar gets the whole span being summarized. This only guards a sidecar whose context
+		 * window is smaller than the main model's: past it, the oldest characters are left out (~4 per token).
+		 */
+		maxConversationChars: Type.Integer({ minimum: 2_000, default: 400_000 }),
+		/** The summary is cut off past this, so leave room for every section of the template. */
+		maxSummaryTokens: Type.Integer({ minimum: 200, default: 4_096 }),
 		thinking: Type.Boolean({ default: false }),
 		/**
 		 * Without a sidecar summary: `harness` leaves compaction to the harness's default; `deterministic`
