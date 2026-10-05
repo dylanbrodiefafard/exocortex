@@ -137,9 +137,9 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 	runtime.rebuildModules = build;
 	runtime.moduleStatus = () => modules.map((m) => m.status?.() ?? m.id);
 	runtime.moduleIds = () => Object.keys(factories);
-	runtime.moduleCommand = (id, args) => {
+	runtime.moduleCommand = async (id, args, dialog) => {
 		try {
-			return modules.find((m) => m.id === id)?.command?.(args);
+			return await modules.find((m) => m.id === id)?.command?.(args, dialog);
 		} catch (error) {
 			onError(`${id}.command`, error);
 			return undefined;

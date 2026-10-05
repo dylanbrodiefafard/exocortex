@@ -140,7 +140,7 @@ function isOneOff(sentence: string): boolean {
 }
 
 /** The live preference whose rule shares most of its words with `rule`, if any is close enough. */
-function sameRule(rule: string, live: readonly StoredPreference[]): StoredPreference | undefined {
+export function sameRule(rule: string, live: readonly StoredPreference[]): StoredPreference | undefined {
 	const words = new Set(keywords(rule));
 	let best: { preference: StoredPreference; similarity: number } | undefined;
 	for (const preference of live) {
@@ -157,7 +157,8 @@ function sameRule(rule: string, live: readonly StoredPreference[]): StoredPrefer
  * Preferences that apply in `scope`, most established first. One applies when the user:
  * - stated it as a standing rule in this repo ("always…", "from now on…"); or
  * - stated it in `minSessions` separate sessions in this repo; or
- * - stated it in 2+ repos (D-018's promotion: it is about the user, not the repo).
+ * - stated it in 2+ repos (D-018's promotion: it is about the user, not the repo); or
+ * - chose it in the interview (D-066): asked about their work in general, so it applies in every repo.
  */
 export function activePreferences(
 	live: readonly StoredPreference[],
@@ -170,7 +171,8 @@ export function activePreferences(
 		const applies =
 			here.some((s) => s.standing) ||
 			new Set(here.map((s) => s.session)).size >= minSessions ||
-			new Set(preference.sightings.map((s) => s.scope)).size >= 2;
+			new Set(preference.sightings.map((s) => s.scope)).size >= 2 ||
+			preference.sightings.some((s) => s.source === "interview");
 		if (!applies) continue;
 		active.push({
 			id: preference.id,

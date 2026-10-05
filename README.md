@@ -48,6 +48,7 @@ Inside pi:
 - `/exo off` and `/exo on` turn every module off or back on for the session.
 - `/exo <module> on|off` toggles one module for the session (`supervisor`, `trimmer`, `triage`, `memory`, `compaction`).
 - `/exo memory preferences` and `/exo memory forget <id>` list and remove learned preferences.
+- `/exo memory interview` asks a few questions and saves your answers as preferences.
 
 ### Supervisor
 
@@ -72,6 +73,8 @@ Each is off by default. Enable them under `modules` in `~/.exocortex/config.json
 Enable with `"memory": { "enabled": true }` or `/exo memory on`. When a build or test command fails, the agent edits files and the same command then passes, memory saves a short lesson about that fix for this repo. The next time the same error appears, even in a later session, the lesson is added to the failing output. Lessons that keep failing to help are retired automatically. Cards live in `~/.exocortex/memory.db`.
 
 With `"preferences": true` it also learns how you like work done. It reads only what you type. Say something as a standing rule ("always write the failing test first", "from now on keep commits small"), or give the same instruction in two sessions, and it becomes a preference. Later prompts that leave it unsaid get it added as a short visible note; your prompt wins on any conflict. `/exo memory preferences` lists what it has learned and `/exo memory forget <id>` removes one (D-060).
+
+On a new install, `/exo memory interview` gets you started: eight multiple-choice questions and one open one, about a minute. Each answer becomes a preference that applies in every repo from your next prompt; "No preference" saves nothing, and Escape stops the interview and keeps the answers so far. Run it again to change an answer (D-066).
 
 It also learns what you expect of one kind of task, including from your corrections. Tell the agent "don't refactor the code around it when you fix a bug" in two sessions and later bug-fix prompts get "For bug fixes: Do not refactor nearby code." The list shows which preferences came from corrections, and which ones you had to correct the agent on again after they were added (D-064).
 

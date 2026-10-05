@@ -337,7 +337,9 @@ describe("preferences (D-060)", () => {
 		expect(memory.command?.("forget x")).toBe("Usage: /exo memory forget <id>");
 		expect(memory.command?.("forget 7")).toBe("No preference 7.");
 		expect(memory.command?.("forget 1")).toContain("Forgot preference 1.");
-		expect(memory.command?.("preferences")).toBe("No preferences learned yet.");
+		expect(memory.command?.("preferences")).toBe(
+			"No preferences learned yet. /exo memory interview asks a few questions to start from.",
+		);
 		expect(memory.command?.("on")).toBeUndefined();
 		expect(setup().memory.command?.("preferences")).toBe("Preference learning is off (memory.preferences).");
 	});

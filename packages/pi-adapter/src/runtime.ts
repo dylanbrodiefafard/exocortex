@@ -1,4 +1,5 @@
 import {
+	type Dialog,
 	type Embedder,
 	type ExoConfig,
 	type LoadedConfig,
@@ -28,8 +29,11 @@ export interface Runtime {
 	moduleStatus: () => string[];
 	/** Every module id the host knows, enabled or not (set by the module host). */
 	moduleIds: () => readonly string[];
-	/** Passes `/exo <module> <args>` to an enabled module; undefined when it has no answer. */
-	moduleCommand: (id: string, args: string) => string | undefined;
+	/**
+	 * Passes `/exo <module> <args>` to an enabled module; undefined when it has no answer. `dialog`
+	 * lets the module ask the user questions.
+	 */
+	moduleCommand: (id: string, args: string, dialog?: Dialog) => Promise<string | undefined>;
 	/** Flushes and closes the store. */
 	shutdown(): void;
 }
@@ -80,7 +84,7 @@ export function createRuntime(options: RuntimeOptions): Runtime {
 		rebuildModules: () => {},
 		moduleStatus: () => [],
 		moduleIds: () => [],
-		moduleCommand: () => undefined,
+		moduleCommand: async () => undefined,
 		shutdown() {
 			try {
 				store?.close();

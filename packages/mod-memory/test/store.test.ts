@@ -138,6 +138,7 @@ describe("preference store (D-060)", () => {
 						standing: true,
 						correction: false,
 						quote: "always keep commits small",
+						source: "message",
 						seenAt: 101,
 					},
 					{
@@ -146,6 +147,7 @@ describe("preference store (D-060)", () => {
 						standing: false,
 						correction: true,
 						quote: "small commits please",
+						source: "message",
 						seenAt: 102,
 					},
 				],
@@ -154,6 +156,16 @@ describe("preference store (D-060)", () => {
 		expect(store.retirePreference(id)).toBe(true);
 		expect(store.retirePreference(id)).toBe(false);
 		expect(store.preferences()).toEqual([]);
+		store.close();
+	});
+
+	it("records where a sighting came from, a typed message unless told otherwise (D-066)", () => {
+		const store = openMemoryStore(":memory:");
+		const id = store.addPreference("Do not commit.");
+		const said = { scope: "repo-a", session: "s1", standing: true, correction: false, quote: "q" };
+		store.addSighting(id, said);
+		store.addSighting(id, { ...said, source: "interview" });
+		expect(store.preferences()[0]?.sightings.map((s) => s.source)).toEqual(["message", "interview"]);
 		store.close();
 	});
 

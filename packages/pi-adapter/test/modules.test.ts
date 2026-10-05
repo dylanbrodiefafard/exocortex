@@ -632,10 +632,10 @@ describe("user-turn context, suggestions and module commands", () => {
 			{ a: { enabled: true }, bad: { enabled: true } },
 		);
 		await h.pi.emit("session_start");
-		expect(h.runtime.moduleCommand("a", "list things")).toBe("two things");
-		expect(h.runtime.moduleCommand("a", "on")).toBeUndefined();
-		expect(h.runtime.moduleCommand("missing", "x")).toBeUndefined();
-		expect(h.runtime.moduleCommand("bad", "x")).toBeUndefined();
+		expect(await h.runtime.moduleCommand("a", "list things")).toBe("two things");
+		expect(await h.runtime.moduleCommand("a", "on")).toBeUndefined();
+		expect(await h.runtime.moduleCommand("missing", "x")).toBeUndefined();
+		expect(await h.runtime.moduleCommand("bad", "x")).toBeUndefined();
 		expect(h.errors.map((e) => e.where)).toEqual(["bad.command"]);
 		const traced: { data: unknown }[] = [];
 		h.runtime.traceSession = { append: (e: { data: unknown }) => traced.push(e) } as never;

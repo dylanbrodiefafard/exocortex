@@ -15,6 +15,7 @@ const sighting = (scope: string, session: string, standing = false, seenAt = 1):
 	standing,
 	correction: false,
 	quote: "q",
+	source: "message",
 	seenAt,
 });
 const preference = (id: number, rule: string, sightings: Sighting[]): StoredPreference => ({
@@ -51,6 +52,15 @@ describe("activePreferences", () => {
 		expect(activePreferences(live, "a", 2).map((p) => p.id)).toEqual([3, 6, 2]);
 		expect(activePreferences(live, "a", 1).map((p) => p.id)).toEqual([3, 6, 2, 1, 4]);
 		expect(activePreferences(live, "b", 2).map((p) => p.id)).toEqual([6, 5]);
+	});
+});
+
+describe("activePreferences and the interview (D-066)", () => {
+	it("applies an interview answer in every repo, from the first session", () => {
+		const answered = preference(1, "Do not commit.", [{ ...sighting("repo-a", "s1", true), source: "interview" }]);
+		const said = preference(2, "Keep commits small.", [sighting("repo-a", "s1", true)]);
+		expect(activePreferences([answered, said], "repo-b", 2).map((p) => p.id)).toEqual([1]);
+		expect(activePreferences([answered, said], "repo-a", 2).map((p) => p.id)).toEqual([1, 2]);
 	});
 });
 

@@ -4,7 +4,7 @@ type Handler = (event: unknown, ctx: unknown) => unknown;
 type CommandSpec = Parameters<ExtensionAPI["registerCommand"]>[1];
 
 export interface UiCall {
-	readonly method: "notify" | "setStatus" | "setEditorText" | "setWorkingMessage";
+	readonly method: "notify" | "setStatus" | "setEditorText" | "setWorkingMessage" | "select" | "input";
 	readonly args: readonly unknown[];
 }
 
@@ -13,6 +13,8 @@ export interface FakePi {
 	readonly api: ExtensionAPI;
 	readonly commands: ReadonlyMap<string, CommandSpec>;
 	readonly ui: UiCall[];
+	/** What the user answers to the next `select` and `input` dialogs, in order; none left means they cancel. */
+	readonly answers: string[];
 	/** Calls every handler for `name` in registration order; returns the last non-undefined result. */
 	emit(name: string, event?: Record<string, unknown>, ctx?: ExtensionContext): Promise<unknown>;
 	/** Runs `/name args`. */
@@ -24,6 +26,7 @@ export function createFakePi(options: { cwd: string; hasUI?: boolean; flags?: Re
 	const handlers = new Map<string, Handler[]>();
 	const commands = new Map<string, CommandSpec>();
 	const ui: UiCall[] = [];
+	const answers: string[] = [];
 	const flags = { ...options.flags };
 
 	const api = {
@@ -51,6 +54,14 @@ export function createFakePi(options: { cwd: string; hasUI?: boolean; flags?: Re
 				setStatus: (...args: unknown[]) => ui.push({ method: "setStatus", args }),
 				setEditorText: (...args: unknown[]) => ui.push({ method: "setEditorText", args }),
 				setWorkingMessage: (...args: unknown[]) => ui.push({ method: "setWorkingMessage", args }),
+				select: async (...args: unknown[]) => {
+					ui.push({ method: "select", args });
+					return answers.shift();
+				},
+				input: async (...args: unknown[]) => {
+					ui.push({ method: "input", args });
+					return answers.shift();
+				},
 			},
 			...overrides,
 		} as unknown as ExtensionContext & ExtensionCommandContext;
@@ -60,6 +71,7 @@ export function createFakePi(options: { cwd: string; hasUI?: boolean; flags?: Re
 		api,
 		commands,
 		ui,
+		answers,
 		ctx,
 		async emit(name, event = {}, context = ctx()) {
 			let result: unknown;

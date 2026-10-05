@@ -30,6 +30,19 @@ export interface ModuleContext {
 	readonly log: (message: string) => void;
 }
 
+/**
+ * Questions a module's own command may put to the user (D-066). Only commands get one: a dialog
+ * waits on the user for as long as they take, which no hook may do.
+ */
+export interface Dialog {
+	/** The option the user picked, or undefined when they cancelled. `title` may span lines. */
+	readonly select: (title: string, options: readonly string[]) => Promise<string | undefined>;
+	/** The text the user typed, or undefined when they cancelled. */
+	readonly input: (title: string, placeholder?: string) => Promise<string | undefined>;
+	/** Tells the user something while the command is still running. */
+	readonly notify: (message: string) => void;
+}
+
 /** A user (or harness-extension) prompt that starts or continues a task. */
 export interface UserTurn {
 	readonly text: string;
@@ -130,8 +143,11 @@ export interface ExoModule {
 	compact?(request: CompactionRequest, signal: AbortSignal): Promise<string | undefined>;
 	/** The harness compacted the conversation: text added earlier may no longer be in the context. */
 	onCompacted?(): void;
-	/** Handles `/exo <module> <args>` beyond on/off; returns the reply, or undefined for unknown args. */
-	command?(args: string): string | undefined;
+	/**
+	 * Handles `/exo <module> <args>` beyond on/off; returns the reply, or undefined for unknown args.
+	 * `dialog` is there when the harness can ask the user questions.
+	 */
+	command?(args: string, dialog?: Dialog): string | undefined | Promise<string | undefined>;
 	/** Short status for `/exo status` and the status line. */
 	status?(): string;
 }

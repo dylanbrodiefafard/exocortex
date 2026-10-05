@@ -96,7 +96,7 @@ describe("/exo", () => {
 	it("lets a module answer its own subcommands before treating the argument as a toggle", async () => {
 		const h = setup();
 		h.runtime.moduleIds = () => ["memory"];
-		h.runtime.moduleCommand = (id, args) =>
+		h.runtime.moduleCommand = async (id, args) =>
 			id === "memory" && args === "forget 3" ? "Forgot preference 3." : undefined;
 		await h.pi.command("exo", "memory forget 3");
 		expect(notices(h).at(-1)?.[0]).toBe("Forgot preference 3.");
@@ -104,6 +104,31 @@ describe("/exo", () => {
 		expect(notices(h).at(-1)?.[0]).toBe("Memory: on for this session.");
 		await h.pi.command("exo", "memory");
 		expect(notices(h).at(-1)).toEqual(["Usage: /exo memory on|off", "warning"]);
+	});
+
+	it("gives a module's command pi's dialogs, and none without a UI (D-066)", async () => {
+		const h = setup();
+		h.runtime.moduleIds = () => ["memory"];
+		h.runtime.moduleCommand = async (_id, _args, dialog) => {
+			if (!dialog) return "no dialog";
+			dialog.notify("one moment");
+			return `${await dialog.select("Pick", ["a", "b"])} ${await dialog.input("Say", "hint")}`;
+		};
+		h.pi.answers.push("b", "more");
+		await h.pi.command("exo", "memory interview");
+		expect(h.pi.ui.filter((c) => c.method === "select" || c.method === "input").map((c) => c.args)).toEqual([
+			["Pick", ["a", "b"]],
+			["Say", "hint"],
+		]);
+		expect(notices(h).map((n) => n[0])).toEqual(["one moment", "b more"]);
+
+		h.cleanup();
+		const print = setup({}, { hasUI: false });
+		print.runtime.moduleIds = () => ["memory"];
+		print.runtime.moduleCommand = async (_id, _args, dialog) => (dialog ? "dialog" : "no dialog");
+		const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+		await print.pi.command("exo", "memory interview");
+		expect(stderr).toHaveBeenCalledWith("no dialog\n");
 	});
 
 	it("warns on unknown subcommands and reports handler failures", async () => {

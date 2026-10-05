@@ -764,6 +764,12 @@ The owner's question: delegation works when expectations are shared, and most of
 - *Plan-Then-Execute: An Empirical Study of User Trust and Team Performance When Using LLM Agents As A Daily Assistant*, He et al., CHI 2025. https://arxiv.org/abs/2502.01390
   - **[V]** (abstract, §1) N=248, six everyday tasks. Letting users edit the plan fixes imperfect plans, but **does not calibrate trust**: plausible plans mislead users into trusting wrong ones. Involvement adds cognitive load and in some tasks lowers plan quality.
   - Not coding. It argues against a routine "here is my plan, OK?" step.
+- *Eliciting Human Preferences with Language Models* (GATE), Li, Tamkin, Goodman, Andreas, 2023. https://arxiv.org/abs/2310.11589 (added for D-066)
+  - **[V]** (§3.1) Three ways for a model to elicit a preference: generate cases for the user to judge, yes/no questions, open questions.
+  - **[V]** (§5) These beat user-written prompts in most settings (6/10 absolute, 7/10 by area under the curve). Yes/no questions beat user-written prompts in every setting. Open questions did best in content recommendation. In email validation only generated cases were significantly better than no elicitation.
+  - **[V]** (§5, Fig. 4) Users rated the interactive methods equally or less mentally demanding than writing a prompt, "especially ones that involve labeling samples or answering yes/no questions".
+  - **[V]** (§5.2) Stated rules can contradict choices: one participant wrote that an address "should finish with .com or co.uk" and later accepted `user@domain.edu`.
+  - Email validation, content recommendation and moral reasoning, with GPT-4 asking. Not coding, and the questions were generated per user; D-066's are fixed.
 - **[U]** The military backbrief (the subordinate restates the task before starting) and the management literature on delegation were not searched properly; what turned up was generic.
 
 ### 9(b) Recommendations for Exocortex
@@ -930,3 +936,4 @@ No recommendation conflicts with D-006 (same model for sidecars). But the correl
 - Interactive Task Alignment as a POMDP 2026, https://arxiv.org/abs/2607.16412
 - PRELUDE / CIPHER 2024, https://arxiv.org/abs/2404.15269
 - Plan-Then-Execute 2025, https://arxiv.org/abs/2502.01390
+- GATE 2023, https://arxiv.org/abs/2310.11589

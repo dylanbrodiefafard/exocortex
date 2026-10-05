@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import type { Dialog } from "@exocortex/core";
 import type { Runtime } from "./runtime.ts";
 
 const PING_TIMEOUT_MS = 30_000;
@@ -14,7 +15,8 @@ const MODULE_MODES: Readonly<Record<string, readonly string[]>> = { supervisor: 
  * - `/exo off` / `/exo on`: kill switch for every module (brief §5.3), this session only;
  * - `/exo <module> on|off`: toggle one module, e.g. `/exo trimmer on`;
  * - `/exo supervisor suggest|auto`: also switch the supervisor's mode;
- * - `/exo memory preferences` / `/exo memory forget <id>`: list or retire learned preferences.
+ * - `/exo memory preferences` / `/exo memory forget <id>`: list or retire learned preferences;
+ * - `/exo memory interview`: a few questions whose answers become preferences (D-066).
  */
 export function registerExoCommand(pi: ExtensionAPI, runtime: Runtime): void {
 	const subcommands = () => [...COMMANDS, ...runtime.moduleIds()];
@@ -33,7 +35,7 @@ export function registerExoCommand(pi: ExtensionAPI, runtime: Runtime): void {
 					runtime.overrides.allOff = sub === "off";
 					runtime.rebuildModules();
 					say(ctx, `Exocortex modules ${sub === "off" ? "off" : "back on"} for this session.`);
-				} else if (runtime.moduleIds().includes(sub)) moduleCommand(runtime, ctx, sub, arg, rest);
+				} else if (runtime.moduleIds().includes(sub)) await moduleCommand(runtime, ctx, sub, arg, rest);
 				else say(ctx, `Unknown /exo subcommand "${sub}". Try: ${subcommands().join(", ")}`, "warning");
 			} catch (error) {
 				say(ctx, `/exo failed: ${String(error)}`, "error");
@@ -43,16 +45,27 @@ export function registerExoCommand(pi: ExtensionAPI, runtime: Runtime): void {
 }
 
 /** A module answers its own subcommands (`/exo memory preferences`); anything else is a toggle. */
-function moduleCommand(
+async function moduleCommand(
 	runtime: Runtime,
 	ctx: ExtensionCommandContext,
 	id: string,
 	arg: string | undefined,
 	rest: readonly string[],
-): void {
-	const reply = arg === undefined ? undefined : runtime.moduleCommand(id, [arg, ...rest].join(" "));
+): Promise<void> {
+	const reply =
+		arg === undefined ? undefined : await runtime.moduleCommand(id, [arg, ...rest].join(" "), dialogFor(ctx));
 	if (reply === undefined) toggleModule(runtime, ctx, id, arg);
 	else say(ctx, reply);
+}
+
+/** Pi's dialogs, where there is a UI to show them (TUI and RPC; `docs/PI_API_NOTES.md` §6). */
+function dialogFor(ctx: ExtensionCommandContext): Dialog | undefined {
+	if (!ctx.hasUI) return undefined;
+	return {
+		select: (title, options) => ctx.ui.select(title, [...options]),
+		input: (title, placeholder) => ctx.ui.input(title, placeholder),
+		notify: (message) => ctx.ui.notify(message, "info"),
+	};
 }
 
 function toggleModule(runtime: Runtime, ctx: ExtensionCommandContext, id: string, arg: string | undefined): void {

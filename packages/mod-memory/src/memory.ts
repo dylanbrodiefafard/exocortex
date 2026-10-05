@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import {
 	cosineSimilarity,
+	type Dialog,
 	type ExoModule,
 	errorSignature,
 	firstErrorLine,
@@ -11,6 +12,7 @@ import {
 } from "@exocortex/core";
 import { Type } from "typebox";
 import { createEpisodeTracker, type FixEpisode } from "./episodes.ts";
+import { INTERVIEW, type InterviewOption, type InterviewQuestion, runInterview } from "./interview.ts";
 import {
 	type ActivePreference,
 	type Admitted,
@@ -18,10 +20,18 @@ import {
 	admitPreference,
 	alreadySaid,
 	renderPreferences,
+	sameRule,
 	withKind,
 } from "./preferences.ts";
 import { type MemorySettings, parseSettings } from "./settings.ts";
-import { type Card, type MemoryStore, openMemoryStore, type StoredPreference, TASK_KINDS } from "./store.ts";
+import {
+	type Card,
+	type MemoryStore,
+	openMemoryStore,
+	type SightingSource,
+	type StoredPreference,
+	TASK_KINDS,
+} from "./store.ts";
 
 export const MEMORY_ID = "memory";
 
@@ -68,6 +78,7 @@ const PREFERENCE_CONTEXT_CHARS = 1_200;
 const MAX_KNOWN_PREFERENCES = 30;
 /** Prompts with fewer words are not tasks ("thanks", "go on"): nothing is added to them. */
 const MIN_PROMPT_WORDS = 4;
+const INTERVIEW_QUOTE_CHARS = 300;
 const GIT_TIMEOUT_MS = 5_000;
 
 /** Stores stay open for the process: modules are rebuilt on `/exo` toggles. */
@@ -92,6 +103,7 @@ interface TaskState {
  * With `preferences` on (D-060) it also learns how the user likes work done, only from the user's
  * own messages, and adds the preferences that a later prompt leaves unsaid. That includes what
  * they expect of one kind of task, and what they had to correct the agent on (D-064).
+ * `/exo memory interview` asks the user a few questions to start from (D-066).
  */
 export function createMemory(raw: Readonly<Record<string, unknown>>, ctx: ModuleContext): ExoModule {
 	const { settings, problems } = parseSettings(raw);
@@ -162,7 +174,8 @@ export function createMemory(raw: Readonly<Record<string, unknown>>, ctx: Module
 			shown.clear();
 		},
 
-		command(args) {
+		command(args, dialog) {
+			if (args.trim() === "interview") return interview(dialog);
 			return preferenceCommand(args);
 		},
 
@@ -225,16 +238,24 @@ export function createMemory(raw: Readonly<Record<string, unknown>>, ctx: Module
 	 * - whether it is a standing rule is decided by the user's wording, not by the model;
 	 * - "same as" and "replaces" must point at a preference the sidecar was shown;
 	 * - it is a correction only if the agent had said something to correct (D-064).
+	 *
+	 * The interview's open answer comes through here too (D-066): the question asked for standing
+	 * rules, so each one admitted is standing, and the user is waiting on the call. Returns how
+	 * many preferences the message stated.
 	 */
-	async function learnPreferences(message: string, before: string): Promise<void> {
+	async function learnPreferences(
+		message: string,
+		before: string,
+		source: SightingSource = "message",
+	): Promise<number> {
 		const pool = ctx.pool();
-		if (!pool) return;
+		if (!pool) return 0;
 		const repo = await scope;
 		const known = store.preferences().slice(-MAX_KNOWN_PREFERENCES);
 		const text = message.slice(0, PREFERENCE_MESSAGE_CHARS);
 		const result = await pool.run({
 			module: MEMORY_ID,
-			priority: "background",
+			priority: source === "interview" ? "interactive" : "background",
 			timeoutMs: settings.preferenceTimeoutMs,
 			schema: PreferencesSchema,
 			schemaName: "preferences",
@@ -255,12 +276,13 @@ export function createMemory(raw: Readonly<Record<string, unknown>>, ctx: Module
 		});
 		if (!result.ok) {
 			ctx.log(`preferences ${result.outcome}: ${result.error}`);
-			return;
+			return 0;
 		}
 		const nearest = await nearestPreferences(
 			result.value.preferences.map((p) => p.rule),
 			known,
 		);
+		let stated = 0;
 		for (const [index, item] of result.value.preferences.entries()) {
 			// Re-read each time: an earlier item of this message may have added or retired one.
 			const live = new Set(store.preferences().map((p) => p.id));
@@ -272,12 +294,24 @@ export function createMemory(raw: Readonly<Record<string, unknown>>, ctx: Module
 				ctx.cwd,
 				nearest.similar[index],
 			);
+			const fromInterview = admitted.stated && source === "interview";
 			applyAdmitted(
-				admitted,
+				fromInterview ? { ...admitted, stated: { ...admitted.stated, standing: true } } : admitted,
 				repo,
 				nearest.vectors && { model: nearest.vectors.model, vector: nearest.vectors.byRule[index] },
+				source,
 			);
+			if (admitted.stated) stated += 1;
 		}
+		return stated;
+	}
+
+	/** RETIRE, traced with who asked for it when it was not the user's message. False when it was not live. */
+	function retire(id: number, by?: "user" | "interview"): boolean {
+		if (!store.retirePreference(id)) return false;
+		shown.delete(id);
+		ctx.record({ kind: "exo.memory", data: { action: "preference_retired", preference: id, ...(by ? { by } : {}) } });
+		return true;
 	}
 
 	/** Applies an admitted proposal to the store as delta ops (RETIRE, ADD, MERGE) and traces each. */
@@ -285,11 +319,9 @@ export function createMemory(raw: Readonly<Record<string, unknown>>, ctx: Module
 		admitted: Admitted,
 		repo: string,
 		embedding: { readonly model: string; readonly vector: Float32Array | undefined } | undefined,
+		source: SightingSource = "message",
 	): void {
-		if (admitted.retire !== undefined && store.retirePreference(admitted.retire)) {
-			shown.delete(admitted.retire);
-			ctx.record({ kind: "exo.memory", data: { action: "preference_retired", preference: admitted.retire } });
-		}
+		if (admitted.retire !== undefined) retire(admitted.retire);
 		const stated = admitted.stated;
 		if (!stated) return;
 		const known = store.preferences().find((p) => p.id === stated.existing);
@@ -304,6 +336,7 @@ export function createMemory(raw: Readonly<Record<string, unknown>>, ctx: Module
 			standing: stated.standing,
 			correction: stated.correction,
 			quote: stated.quote,
+			source,
 		});
 		ctx.record({
 			kind: "exo.memory",
@@ -312,6 +345,7 @@ export function createMemory(raw: Readonly<Record<string, unknown>>, ctx: Module
 				preference: id,
 				rule: stated.rule,
 				...(stated.correction ? { correction: true } : {}),
+				...(source === "interview" ? { source } : {}),
 			},
 		});
 		// The agent had it in this conversation and the user still had to say it: adding it did not work.
@@ -321,21 +355,84 @@ export function createMemory(raw: Readonly<Record<string, unknown>>, ctx: Module
 		}
 	}
 
+	/**
+	 * `/exo memory interview` (D-066): asks the questions, then stores each answer as a preference
+	 * that applies in every repo. Only ever started by the user.
+	 */
+	async function interview(dialog: Dialog | undefined): Promise<string> {
+		if (!settings.preferences) return "Preference learning is off (memory.preferences): turn it on first.";
+		if (!dialog) return "The interview needs an interactive session.";
+		const result = await runInterview(dialog, INTERVIEW);
+		const repo = await scope;
+		const before = new Set(store.preferences().map((p) => p.id));
+		for (const { question, option } of result.answers) applyAnswer(question, option, repo);
+		let unread = false;
+		if (result.more !== "") {
+			if (ctx.pool()) {
+				dialog.notify("Reading your last answer…");
+				await learnPreferences(result.more, "", "interview");
+			} else unread = true;
+		}
+		const after = store.preferences();
+		const added = after.filter((p) => !before.has(p.id)).length;
+		const retired = [...before].filter((id) => !after.some((p) => p.id === id)).length;
+		ctx.record({
+			kind: "exo.memory",
+			data: { action: "interview", answered: result.answers.length, added, retired, cancelled: result.cancelled },
+		});
+		const saved = after.filter((p) => p.sightings.some((s) => s.source === "interview" && s.session === session));
+		return [
+			result.cancelled ? "Interview stopped early; the answers so far are kept." : "Interview finished.",
+			saved.length === 0
+				? "No preferences were saved."
+				: `Preferences saved: ${saved.length} (${added} new). They apply in every repo, starting with your next prompt.`,
+			...(unread ? ["Your last answer was not read: that needs a sidecar engine."] : []),
+			"/exo memory preferences lists them; /exo memory forget <id> removes one.",
+		].join(" ");
+	}
+
+	/**
+	 * Stores one interview answer. The latest answer to a question is the answer: whatever another
+	 * option of the same question stored earlier is retired, also when the user now has no preference.
+	 */
+	function applyAnswer(question: InterviewQuestion, option: InterviewOption, repo: string): void {
+		const others = new Set(question.options.filter((o) => o !== option).map((o) => o.rule));
+		for (const earlier of store.preferences().filter((p) => others.has(p.rule))) retire(earlier.id, "interview");
+		if (option.rule === undefined) return;
+		const live = store.preferences();
+		const existing = live.find((p) => p.rule === option.rule) ?? sameRule(option.rule, live);
+		applyAdmitted(
+			{
+				stated: {
+					existing: existing?.id,
+					rule: existing?.rule ?? option.rule,
+					standing: true,
+					kind: option.kind ?? "any",
+					correction: false,
+					quote: `${question.ask} → ${option.label}`.slice(0, INTERVIEW_QUOTE_CHARS),
+				},
+			},
+			repo,
+			undefined,
+			"interview",
+		);
+	}
+
 	/** `/exo memory preferences` lists them; `/exo memory forget <id>` retires one. */
 	function preferenceCommand(args: string): string | undefined {
 		const [sub, arg] = args.trim().split(/\s+/);
 		if (sub === "forget") {
 			const id = Number.parseInt(arg ?? "", 10);
 			if (!Number.isInteger(id)) return "Usage: /exo memory forget <id>";
-			if (!store.retirePreference(id)) return `No preference ${id}.`;
-			shown.delete(id);
-			ctx.record({ kind: "exo.memory", data: { action: "preference_retired", preference: id, by: "user" } });
+			if (!retire(id, "user")) return `No preference ${id}.`;
 			return `Forgot preference ${id}. It stays in this conversation if it was already added.`;
 		}
 		if (sub !== "preferences") return undefined;
 		const all = store.preferences();
 		if (all.length === 0) {
-			return settings.preferences ? "No preferences learned yet." : "Preference learning is off (memory.preferences).";
+			return settings.preferences
+				? "No preferences learned yet. /exo memory interview asks a few questions to start from."
+				: "Preference learning is off (memory.preferences).";
 		}
 		const active = new Set(activePreferences(all, knownScope ?? "", settings.preferenceMinSessions).map((p) => p.id));
 		return all
@@ -346,6 +443,7 @@ export function createMemory(raw: Readonly<Record<string, unknown>>, ctx: Module
 				const facts = [
 					`said in ${sessions} session${sessions === 1 ? "" : "s"}`,
 					...(corrections > 0 ? [`${corrections} as a correction`] : []),
+					...(p.sightings.some((s) => s.source === "interview") ? ["from the interview"] : []),
 					state,
 					`added ${p.injected}×`,
 					...(p.repeated > 0 ? [`corrected again after being added ${p.repeated}×`] : []),

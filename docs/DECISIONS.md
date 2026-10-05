@@ -895,6 +895,31 @@ Open check: Exocortex's injected `custom_message` reaches ninfer as a second con
 - **Measuring it** (research §9(c)): underspecified variants of the hard tasks with a sidecar as the user holding the full task; report hidden, hidden with the brief, and full. Not built. The current fixtures repeat one prompt per task and cannot show it.
 - **Method note for the next research pass:** arXiv's HTML pages can be downloaded and searched directly (`https://arxiv.org/html/<id>`). A fetched summary of Ambig-SWE gave per-model resolve rates that are not in the paper; §9's figures were all read from the text.
 
+### D-066 — An interview seeds preferences on a new install · accepted (2026-10-05; owner's request; builds on D-060 and D-064)
+- **Goal:** a new install has no preferences, and D-060 makes each one wait for a second session unless it was said as a standing rule. `/exo memory interview` asks the user nine short questions so the common ones apply from the first prompt.
+- **Evidence** (research §9, GATE): one study, not about coding. Having a model elicit preferences beat user-written prompts in most settings, with no clear winner between judging generated cases, yes/no questions and open questions. A participant stated a rule and then contradicted it on a concrete case. Judging cases and answering yes/no were rated less effort than writing.
+- **Form, following that:**
+  - Eight multiple-choice questions, then one open question.
+  - Expectations that are hard to state in the abstract are asked as a situation to decide: scope of a bug fix, tests for a fix, an open choice in a request, when work counts as done, a new dependency. Habits people state readily are asked directly: commits, how to report back, how to answer questions.
+  - "No preference" is the last option of every question and stores nothing.
+- **No model reads a multiple-choice answer.** Each option carries a rule and task kind written in `mod-memory/src/interview.ts`. Picking the option is the user's own statement of that rule, which is D-060's admission signal. The sighting's quote is the question and the chosen label. A free-form answer to a scenario was rejected: a sidecar would have to generalise it into a rule, the judgement D-060 keeps from the model.
+- **The open question** ("Anything else the agent should always or never do?") goes through D-060's gate unchanged: the sidecar proposes, the quote must be verbatim. Two differences: each admitted rule is standing, because the question asked for standing rules, and the call is `interactive`, because the user is waiting. Without a sidecar engine the answer is not read and the reply says so.
+- **Interview answers apply in every repo, at once** (amends `activePreferences`, D-060). The questions are about the user's work in general, so D-018's "said in 2+ repos" test would only delay them.
+- **The latest answer to a question is the answer.** Running the interview again retires what another option of the same question stored, also when the user now picks "No preference". A rule close to a known preference merges into it (exact text, then D-060's word overlap).
+- **Cancelling** a question ends the interview and keeps the answers given so far.
+- **Only the user starts it.** Nothing launches it on install: a dialog waits for as long as the user takes, and no hook may do that. The one prompt is in the reply of `/exo memory preferences` when the list is empty.
+- **Marked.** Migration 5 adds `source` (`message` or `interview`) to `preference_sightings`. The list says "from the interview"; `preference_learned` and `preference_seen` carry `source: "interview"`; one `interview` trace event counts answered, added, retired and cancelled. D-065 wants to see how well the sidecar labels what it learns, and seeded cards would hide that if they could not be told apart. `preference_repeated` works on them as on any card, so the question D-065 gates on (does adding an expectation work?) gets evidence from day one.
+- **Host change** (harness-agnostic): `ExoModule.command(args, dialog?)` may now return a promise, and gets a `Dialog` (`select`, `input`, `notify`) when the harness has a UI. Only commands get one. The pi adapter builds it from `ctx.ui` in TUI and RPC modes; in print and json modes there is none and the command says the interview needs an interactive session.
+- **Needs `memory.preferences` on** (still off by default, D-052); otherwise the command says so and stores nothing.
+- **Open risks:**
+  - An offered option can suggest a preference the user does not hold, and each card takes one of the 5 places in a prompt. "No preference" and `/exo memory forget` are the only guards.
+  - One answer to one scenario may be read more widely than the user meant. The task kind limits it for the two bug-fix questions and the question about explanations; the rest are `any`.
+  - The questions and rules are the author's judgement of what matters, not measured. `preference_repeated` per card is the evidence to revise them by.
+  - Untested with a real model and a real pi TUI: the dialogs are exercised only through fakes.
+- **Not done:**
+  - Questions generated for the user or the repo (GATE's method). That needs a model to word the rule.
+  - D-064's steps 2 and 3 stay deferred (D-065). The interview is asked once, not per task.
+
 ---
 
 ## Open questions (carried from brief §10, updated)

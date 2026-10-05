@@ -291,6 +291,9 @@ onTerminalInput(handler: (data: string) => { consume?: boolean; data?: string } 
 custom<T>(factory, { overlay?, overlayOptions?, onHandle? }): Promise<T>;
 ```
 
+- **`select` titles may span lines.** The TUI renders the title as one `Text` (`modes/interactive/components/extension-selector.js:29`), and pi's own `confirm` passes `` `${title}\n${message}` `` to the selector (`modes/interactive/interactive-mode.js:2119`). Line numbers are in the installed `dist/`.
+- **Cancel:** the selector's cancel callback resolves `select` with `undefined` (`interactive-mode.js:2092-2095`). In RPC a `cancelled` response resolves `select` and `input` with `undefined` (`modes/rpc/rpc-mode.js:84-86`). **UNVERIFIED:** the TUI's `input` on Escape; its declared type allows `undefined` (`core/extensions/types.d.ts:78`).
+
 ### Shortcuts
 ```ts
 // types.ts:1642-1648

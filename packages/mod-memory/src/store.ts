@@ -56,7 +56,10 @@ export interface MemoryStore {
 	/** The user had to correct the agent on it although it was in the conversation (D-064). */
 	markPreferenceRepeated(id: number): void;
 	/** MERGE: the user stated this preference (again). */
-	addSighting(preferenceId: number, sighting: Omit<Sighting, "seenAt">): void;
+	addSighting(
+		preferenceId: number,
+		sighting: Omit<Sighting, "seenAt" | "source"> & { readonly source?: SightingSource },
+	): void;
 	/** RETIRE: the user withdrew it, or asked to forget it. False when it was not live. */
 	retirePreference(id: number): boolean;
 	markPreferencesInjected(ids: readonly number[]): void;
@@ -73,6 +76,9 @@ type VectorKind = "card" | "preference";
 export const TASK_KINDS = ["any", "fix", "feature", "refactor", "test", "review", "explain", "docs"] as const;
 export type TaskKind = (typeof TASK_KINDS)[number];
 
+/** Where a sighting came from: a message the user typed, or an answer in the interview (D-066). */
+export type SightingSource = "message" | "interview";
+
 /** One time the user stated a preference, in their own words. */
 export interface Sighting {
 	readonly scope: string;
@@ -82,8 +88,9 @@ export interface Sighting {
 	readonly standing: boolean;
 	/** Said to correct what the agent had just done (D-064). */
 	readonly correction: boolean;
-	/** The user's words, verbatim. */
+	/** The user's words, verbatim. For an interview answer: the question and the option they picked. */
 	readonly quote: string;
+	readonly source: SightingSource;
 	readonly seenAt: number;
 }
 
@@ -156,6 +163,9 @@ const MIGRATIONS: readonly string[] = [
 	ALTER TABLE preferences ADD COLUMN repeated INTEGER NOT NULL DEFAULT 0;
 	ALTER TABLE preference_sightings ADD COLUMN correction INTEGER NOT NULL DEFAULT 0;
 	`,
+	`
+	ALTER TABLE preference_sightings ADD COLUMN source TEXT NOT NULL DEFAULT 'message';
+	`,
 ];
 
 const STOPWORDS = new Set([
@@ -205,6 +215,7 @@ interface SightingRow {
 	standing: number;
 	correction: number;
 	quote: string;
+	source: string;
 	seen_at: number;
 }
 
@@ -310,6 +321,7 @@ export function openMemoryStore(path: string, now: () => number = Date.now): Mem
 						standing: row.standing === 1,
 						correction: row.correction === 1,
 						quote: row.quote,
+						source: row.source === "interview" ? "interview" : "message",
 						seenAt: row.seen_at,
 					},
 				]);
@@ -343,7 +355,7 @@ export function openMemoryStore(path: string, now: () => number = Date.now): Mem
 
 		addSighting(preferenceId, sighting) {
 			db.prepare(
-				"INSERT INTO preference_sightings (preference_id, scope, session, standing, correction, quote, seen_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+				"INSERT INTO preference_sightings (preference_id, scope, session, standing, correction, quote, source, seen_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
 			).run(
 				preferenceId,
 				sighting.scope,
@@ -351,6 +363,7 @@ export function openMemoryStore(path: string, now: () => number = Date.now): Mem
 				sighting.standing ? 1 : 0,
 				sighting.correction ? 1 : 0,
 				sighting.quote,
+				sighting.source ?? "message",
 				now(),
 			);
 		},
