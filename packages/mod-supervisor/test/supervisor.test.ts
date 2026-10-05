@@ -253,6 +253,89 @@ describe("supervisor", () => {
 	});
 });
 
+describe("what the judge is given (D-071)", () => {
+	const verdictPrompt = () =>
+		String(
+			requests.findLast((r) => String(r.messages[0]?.["content"]).includes("acceptance checklist and evidence"))
+				?.messages[0]?.["content"],
+		);
+	it("reads the request itself, with later messages of the same task, beside the checklist", async () => {
+		const sup = createSupervisor({}, context({ ledger: LEDGER, verdicts: [COMPLETE] }));
+		sup.onUserTurn?.({ text: "Make app.py print v2. Round 1.005 to 100, ties to even.", origin: "user" });
+		await sup.onSettle?.(DONE, signal);
+		expect(verdictPrompt()).toContain(
+			"Developer's request:\n<<<\nMake app.py print v2. Round 1.005 to 100, ties to even.\n>>>",
+		);
+
+		const followed = createSupervisor(
+			{},
+			context({ ledger: { ...LEDGER, follows_previous: true }, verdicts: [COMPLETE] }),
+		);
+		followed.onUserTurn?.({ text: "Make app.py print v2.", origin: "user" });
+		await followed.onSettle?.(DONE, signal);
+		followed.onUserTurn?.({ text: "Also keep the trailing newline.", origin: "user" });
+		await followed.onSettle?.(DONE, signal);
+		expect(verdictPrompt()).toContain(
+			"Make app.py print v2.\n\n(The developer then added:)\nAlso keep the trailing newline.",
+		);
+	});
+
+	it("keeps one criterion per requirement of a twelve-point request", async () => {
+		const criteria = Array.from({ length: 14 }, (_, i) => `Rule ${i + 1}`);
+		const sup = createSupervisor({}, context({ ledger: { ...LEDGER, criteria }, verdicts: [COMPLETE] }));
+		sup.onUserTurn?.({ text: "Implement rules 1 to 14.", origin: "user" });
+		await sup.onSettle?.(DONE, signal);
+		expect(verdictPrompt()).toContain("12. Rule 12");
+		expect(verdictPrompt()).not.toContain("13. Rule 13");
+	});
+
+	it("tells the judge when the agent's test run proves nothing, without running anything", async () => {
+		const sup = createSupervisor({}, context({ ledger: { ...LEDGER, check_commands: [] }, verdicts: [COMPLETE] }));
+		sup.onUserTurn?.({ text: "Make app.py print v2.", origin: "user" });
+		const command = "python3 -m unittest discover -q -s tests -t . 2>&1 | tail -5";
+		sup.onToolResult?.({ toolName: "bash", input: { command }, isError: false, exitCode: 0, output: "OK" });
+		await snapshotTaken();
+		// Changed from the shell: no file tool was used.
+		writeFileSync(join(repo, "app.py"), "print('v2')\n");
+		sup.onToolResult?.({
+			toolName: "bash",
+			input: { command: "sed -i s/v1/v2/ app.py" },
+			isError: false,
+			exitCode: 0,
+			output: "",
+		});
+		await sup.onSettle?.(DONE, signal);
+		expect(verdictPrompt()).toContain(
+			`Note: files changed after the agent's last full test run (\`${command}\`), so that result does not cover the finished work.`,
+		);
+		expect(verdictPrompt()).toContain("is the last command of the pipe's, not the test run's");
+		expect(verdictPrompt()).not.toContain("## Check commands");
+		expect(records.find((r) => r.kind === "exo.verdict")?.data).toMatchObject({ checks: [] });
+	});
+
+	it("does not call a test run stale when the files are as they were when it ran", async () => {
+		const sup = createSupervisor({}, context({ ledger: { ...LEDGER, check_commands: [] }, verdicts: [COMPLETE] }));
+		sup.onUserTurn?.({ text: "Make app.py print v2.", origin: "user" });
+		writeFileSync(join(repo, "app.py"), "print('v2')\n");
+		sup.onToolResult?.({
+			toolName: "bash",
+			input: { command: "cargo test" },
+			isError: false,
+			exitCode: 0,
+			output: "ok",
+		});
+		await snapshotTaken();
+		// An edit that was undone: the file tools were used, the content is what was tested.
+		sup.onToolResult?.({ toolName: "edit", input: { path: "app.py" }, isError: false, exitCode: null, output: "ok" });
+		await sup.onSettle?.(DONE, signal);
+		expect(verdictPrompt()).toContain("$ cargo test  → exit 0");
+		expect(verdictPrompt()).not.toContain("files changed after");
+	});
+});
+
+/** The supervisor fingerprints the workspace when a test run ends; the agent's next call comes later. */
+const snapshotTaken = () => new Promise((resolve) => setTimeout(resolve, 300));
+
 describe("supervisor research options (all off by default)", () => {
 	const editApp = (sup: ReturnType<typeof createSupervisor>) => {
 		writeFileSync(join(repo, "app.py"), "print('v2')\n");
@@ -365,5 +448,40 @@ describe("supervisor research options (all off by default)", () => {
 		agreed.onUserTurn?.({ text: "Make app.py print v2.", origin: "user" });
 		editApp(agreed);
 		expect(await agreed.onSettle?.(DONE, signal)).toMatchObject({ summary: "supervisor: complete" });
+	});
+
+	it("verifyUncertain: asks the agent once to check what the evidence does not show", async () => {
+		const UNCERTAIN = {
+			verdict: "uncertain",
+			missing: [],
+			unverified: ["Check that 1.005 rounds to 100"],
+			asked_user: false,
+			reason: "no test covers rounding",
+		};
+		// An agent that changed nothing has nothing to verify.
+		const idle = createSupervisor({ verifyUncertain: true }, context({ ledger: LEDGER, verdicts: [UNCERTAIN] }));
+		idle.onUserTurn?.({ text: "Make app.py print v2.", origin: "user" });
+		expect(await idle.onSettle?.(DONE, signal)).toMatchObject({ kind: "notify" });
+
+		const sup = createSupervisor({ verifyUncertain: true }, context({ ledger: LEDGER, verdicts: [UNCERTAIN] }));
+		sup.onUserTurn?.({ text: "Make app.py print v2.", origin: "user" });
+		editApp(sup);
+		const action = await sup.onSettle?.(DONE, signal);
+		expect(action).toEqual({
+			kind: "suggest",
+			text: "Before you stop: I could not confirm these parts of my request from your changes and test runs:\n1. Check that 1.005 rounds to 100\nCheck each one against my request and show what proves it (a command you run, or the code). Fix whatever turns out not to be done.",
+			summary: "supervisor: 1 item(s) to verify",
+		});
+		expect(records.at(-1)?.data).toEqual({ action: "suggested", unverified: ["Check that 1.005 rounds to 100"] });
+
+		// Accepted, and still uncertain afterwards: it is not asked a second time.
+		sup.onUserTurn?.({ text: (action as { text: string }).text, origin: "suggestion" });
+		expect(await sup.onSettle?.(DONE, signal)).toMatchObject({ kind: "notify", summary: "supervisor: uncertain" });
+
+		// Off by default.
+		const quiet = createSupervisor({}, context({ ledger: LEDGER, verdicts: [UNCERTAIN] }));
+		quiet.onUserTurn?.({ text: "Make app.py print v2.", origin: "user" });
+		editApp(quiet);
+		expect(await quiet.onSettle?.(DONE, signal)).toMatchObject({ kind: "notify" });
 	});
 });

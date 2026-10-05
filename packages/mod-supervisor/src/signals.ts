@@ -122,15 +122,81 @@ export function unsupportedClaims(claims: readonly Claim[], tools: readonly Tool
 	});
 }
 
-/** The last test command ran only a subset of the tests (`-k`, `-run`, a single test id). */
+/** Whether a test command selects some of the tests (`-k`, `-run`, a single test id). */
+export function isNarrowTest(command: string): boolean {
+	// `unittest discover -s dir -t dir` names directories, not tests.
+	const flags = /\bunittest discover\b/.test(command) ? command.replace(/\s-[st]\s+\S+/g, "") : command;
+	return NARROW_TEST.test(` ${flags}`);
+}
+
+/** The last test command ran only a subset of the tests. */
 export function narrowTestSignal(tools: readonly ToolOutcome[]): string | undefined {
 	const tests = tools.filter((t) => TEST_COMMAND.test(String(t.input["command"] ?? "")));
 	const last = tests.at(-1);
 	if (!last) return undefined;
-	const command = ` ${String(last.input["command"])}`;
-	return NARROW_TEST.test(command)
-		? `the last test run covered only a subset: ${command.trim().slice(0, 160)}`
-		: undefined;
+	const command = String(last.input["command"]);
+	return isNarrowTest(command) ? `the last test run covered only a subset: ${command.trim().slice(0, 160)}` : undefined;
+}
+
+const TEST_RUNNER =
+	/^(python3? -m (pytest|unittest)|pytest|cargo test|go test|ctest|make( -\S+)* (test|tests|check)|npm (run )?test|npx (vitest|jest)|tox)(\s|$)/;
+const BUILD_RUNNER =
+	/^(cargo (build|check|clippy)|go (build|vet)|make( -\S+)*( all)?$|cmake --build|npm run build|npx tsc|tsc)(\s|$)?/;
+const RUN_PREFIX = /^((\w+=\S*|timeout\s+\d+[smh]?)\s+)+/;
+
+export interface TestRun {
+	readonly kind: "test" | "build";
+	/** Position in the task's tool calls. */
+	readonly index: number;
+	/** Piped into another command without `pipefail`: the exit code was that command's. */
+	readonly hidden: boolean;
+	readonly line: string;
+}
+
+/** The agent's last run of all the tests, or its last build when it ran no tests. */
+export function lastFullRun(tools: readonly ToolOutcome[]): TestRun | undefined {
+	const runs = tools.flatMap((tool, index) => {
+		const line = typeof tool.input["command"] === "string" ? tool.input["command"].trim() : "";
+		// The run is the last `&&` step (after any `cd`), up to its first pipe.
+		const [run = "", ...piped] = (line.split("&&").at(-1) ?? "").split("|").map((s) => s.trim());
+		const bare = run.replace(/\s*2>&1/g, "").replace(RUN_PREFIX, "");
+		const kind = TEST_RUNNER.test(bare) ? ("test" as const) : BUILD_RUNNER.test(bare) ? ("build" as const) : undefined;
+		const hidden = piped.length > 0 && !line.includes("pipefail");
+		return kind ? [{ kind, index, hidden, line: line.slice(0, 160), narrow: isNarrowTest(bare) }] : [];
+	});
+	// A run of some of the tests proves less than the last full one; narrowTestSignal reports those.
+	return runs.findLast((r) => r.kind === "test" && !r.narrow) ?? runs.findLast((r) => r.kind === "build");
+}
+
+/**
+ * Why the agent's own last test run (or build) does not show the finished work passes (D-071):
+ * the workspace changed afterwards, or the run was piped into another command, so the exit code
+ * it saw was that command's. Nothing is run here; the judge is told, and the agent is the one
+ * asked to run it again.
+ *
+ * `changedSince` says whether the files differ from what they were when that run ended, however
+ * they were changed. Without it (no git repository, or the snapshot failed), only edits made
+ * with the file tools are seen.
+ */
+export function testRunNotes(tools: readonly ToolOutcome[], changedSince?: boolean): string[] {
+	const last = lastFullRun(tools);
+	if (!last) return [];
+	const what = last.kind === "test" ? "test run" : "build";
+	const notes: string[] = [];
+	const editedAfter = tools
+		.slice(last.index + 1)
+		.some((t) => /edit|write|create|patch/i.test(t.toolName) && !t.isError);
+	if (changedSince ?? editedAfter) {
+		notes.push(
+			`files changed after the agent's last full ${what} (\`${last.line}\`), so that result does not cover the finished work`,
+		);
+	}
+	if (last.hidden) {
+		notes.push(
+			`the exit code shown for \`${last.line}\` is the last command of the pipe's, not the ${what}'s: only its output could show a failure`,
+		);
+	}
+	return notes;
 }
 
 /** Whether the agent changed nothing it could be judged on: no diff, no untracked files, no writes. */

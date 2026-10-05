@@ -16,8 +16,11 @@ const SettingsSchema = Type.Object(
 		verdictTimeoutMs: Type.Integer({ minimum: 1000, default: 60_000 }),
 		/** Sidecar thinking (Qwen `enable_thinking`). Off by default: short JSON tasks (D-008). */
 		thinking: Type.Boolean({ default: false }),
-		/** Evidence budget for the verdict prompt, in characters (~4 per token; D-024 keeps it small). */
-		maxEvidenceChars: Type.Integer({ minimum: 1000, default: 8_000 }),
+		/**
+		 * Evidence budget for the verdict prompt, in characters (~4 per token). The verdict runs while
+		 * the main agent is idle, so its prefill delays nothing but the verdict (D-071).
+		 */
+		maxEvidenceChars: Type.Integer({ minimum: 1000, default: 40_000 }),
 		// Research options (docs/RESEARCH.md §1), all off by default so each can be A/B'd (D-046).
 		/** R1.1: a failing check means `incomplete` with no LLM call; no change at all means `uncertain`. */
 		preVerdict: Type.Boolean({ default: false }),
@@ -29,6 +32,11 @@ const SettingsSchema = Type.Object(
 		finalMessage: Type.Union([Type.Literal("tail"), Type.Literal("claims")], { default: "tail" }),
 		/** R1.5: re-ask this many times in total when the verdict is `complete`; any dissent → `uncertain`. */
 		completeVotes: Type.Integer({ minimum: 1, maximum: 5, default: 1 }),
+		/**
+		 * D-071: when the verdict is `uncertain`, ask the agent once per task to check the items the
+		 * evidence does not show, instead of staying quiet.
+		 */
+		verifyUncertain: Type.Boolean({ default: false }),
 	},
 	{ additionalProperties: true },
 );

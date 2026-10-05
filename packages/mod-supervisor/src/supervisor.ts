@@ -13,6 +13,7 @@ import { asksUserQuestion, type CheckResult, diffFingerprint, formatEvidence } f
 import { parseSettings, type SupervisorSettings } from "./settings.ts";
 import {
 	extractClaims,
+	lastFullRun,
 	madeNoChanges,
 	narrowTestSignal,
 	parseDiff,
@@ -23,14 +24,14 @@ import {
 
 export const SUPERVISOR_ID = "supervisor";
 
-const LEDGER_PROMPT = loadPrompt(new URL("../prompts/ledger.v1.md", import.meta.url));
-const VERDICT_PROMPT = loadPrompt(new URL("../prompts/verdict.v3.md", import.meta.url));
-const ITEM_VERDICT_PROMPT = loadPrompt(new URL("../prompts/verdict.v4.md", import.meta.url));
+const LEDGER_PROMPT = loadPrompt(new URL("../prompts/ledger.v2.md", import.meta.url));
+const VERDICT_PROMPT = loadPrompt(new URL("../prompts/verdict.v5.md", import.meta.url));
+const ITEM_VERDICT_PROMPT = loadPrompt(new URL("../prompts/verdict-items.v5.md", import.meta.url));
 
 const LedgerSchema = Type.Object({
 	is_task: Type.Boolean(),
 	follows_previous: Type.Boolean(),
-	criteria: Type.Array(Type.String(), { maxItems: 10 }),
+	criteria: Type.Array(Type.String(), { maxItems: 16 }),
 	check_commands: Type.Array(Type.String(), { maxItems: 10 }),
 });
 
@@ -41,7 +42,9 @@ const VerdictSchema = Type.Object({
 		Type.Literal("failed"),
 		Type.Literal("uncertain"),
 	]),
-	missing: Type.Array(Type.String(), { maxItems: 10 }),
+	missing: Type.Array(Type.String(), { maxItems: 16 }),
+	/** Items the evidence shows neither way, as instructions to check them. */
+	unverified: Type.Optional(Type.Array(Type.String(), { maxItems: 16 })),
 	asked_user: Type.Boolean(),
 	reason: Type.String(),
 });
@@ -56,7 +59,7 @@ const ItemVerdictSchema = Type.Object({
 			evidence: Type.String(),
 			fix: Type.String(),
 		}),
-		{ maxItems: 10 },
+		{ maxItems: 16 },
 	),
 	failed: Type.Boolean(),
 	asked_user: Type.Boolean(),
@@ -73,6 +76,11 @@ export interface Judgement extends Verdict {
 
 /** The goal ledger (brief §6.1 step 1): stored and used for verdicts, never injected. */
 export interface Ledger {
+	/**
+	 * The user's own messages that make up the task, oldest first. The verdict reads them: the
+	 * criteria are a sidecar's summary and lose the request's detail (D-071).
+	 */
+	readonly requests: readonly string[];
 	readonly criteria: readonly string[];
 	/** Check commands quoted verbatim in the request (only these, plus configured ones, are ever run). */
 	readonly checkCommands: readonly string[];
@@ -88,9 +96,20 @@ interface Task {
 	pending: { readonly text: string; readonly diffHash: string } | undefined;
 	lastContinuationDiff: string | undefined;
 	noProgressStreak: number;
+	/**
+	 * What the workspace held when each of the agent's test or build runs ended, by position in
+	 * `tools`. Compared with its state at settle, it shows whether anything changed since, whatever
+	 * changed it: a file tool, `sed -i`, a code generator.
+	 */
+	readonly snapshots: Map<number, Promise<string | undefined>>;
+	/** The agent was already asked to check what the verdict could not see (once per task). */
+	verifyAsked: boolean;
 }
 
-const MAX_CRITERIA = 7;
+/** Enough for one criterion per requirement of a long specification (D-071; the brief had 7). */
+const MAX_CRITERIA = 12;
+/** How much of the user's request the verdict reads; longer ones keep their start and end. */
+const REQUEST_CHARS = 16_000;
 const FINAL_MESSAGE_CHARS = 1_500;
 /** In `claims` mode the verdict still sees this much of the ending, to spot a question to the user. */
 const CLAIMS_TAIL_CHARS = 300;
@@ -141,11 +160,15 @@ export function createSupervisor(raw: Readonly<Record<string, unknown>>, ctx: Mo
 				pending: undefined,
 				lastContinuationDiff: undefined,
 				noProgressStreak: 0,
+				verifyAsked: false,
+				snapshots: new Map(),
 			};
 		},
 
 		onToolResult(tool: ToolOutcome) {
-			task?.tools.push(tool);
+			if (!task) return;
+			task.tools.push(tool);
+			if (lastFullRun([tool])) task.snapshots.set(task.tools.length - 1, workspaceState(ctx));
 		},
 
 		async onSettle(info: SettleInfo, signal: AbortSignal): Promise<SettleAction | undefined> {
@@ -169,9 +192,19 @@ export function createSupervisor(raw: Readonly<Record<string, unknown>>, ctx: Mo
 			lastVerdict = verdict.verdict;
 			ctx.record({
 				kind: "exo.verdict",
-				data: { ...verdict, criteria: [...ledger.criteria], continuations: current.continuations },
+				data: {
+					...verdict,
+					criteria: [...ledger.criteria],
+					continuations: current.continuations,
+					checks: evidence.checks.map((c) => ({
+						command: c.command,
+						source: c.source,
+						exitCode: c.output.exitCode,
+						timedOut: c.output.timedOut,
+					})),
+				},
 			});
-			return act(ctx, settings, current, verdict, evidence.diffHash);
+			return act(ctx, settings, current, verdict, evidence);
 		},
 
 		status() {
@@ -208,12 +241,27 @@ function act(
 	settings: SupervisorSettings,
 	task: Task,
 	verdict: Verdict,
-	diffHash: string,
+	evidence: { readonly diffHash: string; readonly noChanges: boolean },
 ): SettleAction | undefined {
-	const missing = verdict.missing
-		.map((m) => m.trim())
-		.filter(Boolean)
-		.slice(0, MAX_CRITERIA);
+	const { diffHash } = evidence;
+	const items = (list: readonly string[] | undefined) =>
+		(list ?? [])
+			.map((m) => m.trim())
+			.filter(Boolean)
+			.slice(0, MAX_CRITERIA);
+	const missing = items(verdict.missing);
+	const unverified = items(verdict.unverified);
+	const follow = (text: string, summary: string, data: { readonly [key: string]: string[] }): SettleAction => {
+		if (settings.mode === "auto") {
+			task.continuations += 1;
+			task.lastContinuationDiff = diffHash;
+			ctx.record({ kind: "exo.action", data: { action: "continued", continuation: task.continuations, ...data } });
+			return { kind: "continue", text, summary };
+		}
+		task.pending = { text, diffHash };
+		ctx.record({ kind: "exo.action", data: { action: "suggested", ...data } });
+		return { kind: "suggest", text, summary };
+	};
 	// Whether the agent is waiting on the user is the verdict's call (D-062): it can tell a blocking
 	// question from an offer of more work, which a pattern on the last line cannot.
 	if (verdict.verdict === "incomplete" && verdict.asked_user) {
@@ -221,17 +269,16 @@ function act(
 		return { kind: "notify", summary: "supervisor: the agent is waiting for your answer", level: "info" };
 	}
 	if (verdict.verdict === "incomplete" && missing.length > 0) {
-		const text = continuationMessage(missing);
-		const summary = `supervisor: ${missing.length} item(s) look unfinished`;
-		if (settings.mode === "auto") {
-			task.continuations += 1;
-			task.lastContinuationDiff = diffHash;
-			ctx.record({ kind: "exo.action", data: { action: "continued", continuation: task.continuations, missing } });
-			return { kind: "continue", text, summary };
-		}
-		task.pending = { text, diffHash };
-		ctx.record({ kind: "exo.action", data: { action: "suggested", missing } });
-		return { kind: "suggest", text, summary };
+		return follow(continuationMessage(missing), `supervisor: ${missing.length} item(s) look unfinished`, { missing });
+	}
+	// The judge could not tell from the diff and the test runs. The agent can: it has the whole
+	// conversation and the tools. Asked once per task, and never when it is waiting on the user.
+	const canVerify = settings.verifyUncertain && !task.verifyAsked && !verdict.asked_user && !evidence.noChanges;
+	if (verdict.verdict === "uncertain" && unverified.length > 0 && canVerify) {
+		task.verifyAsked = true;
+		return follow(verificationMessage(unverified), `supervisor: ${unverified.length} item(s) to verify`, {
+			unverified,
+		});
 	}
 	if (verdict.verdict === "failed") {
 		return { kind: "notify", summary: `supervisor: looks failed: ${verdict.reason}`.slice(0, 200), level: "warning" };
@@ -245,6 +292,18 @@ export function continuationMessage(missing: readonly string[]): string {
 		"Not done yet. These parts of my request still look unfinished:",
 		...missing.map((m, i) => `${i + 1}. ${m}`),
 		"Please finish them and verify your work before stopping.",
+	].join("\n");
+}
+
+/**
+ * The user-role request to check what the verdict could not see (D-071). The agent reviews its
+ * own work, as SWE-agent's submit review and OpenHands' critic follow-up have it do.
+ */
+export function verificationMessage(unverified: readonly string[]): string {
+	return [
+		"Before you stop: I could not confirm these parts of my request from your changes and test runs:",
+		...unverified.map((m, i) => `${i + 1}. ${m}`),
+		"Check each one against my request and show what proves it (a command you run, or the code). Fix whatever turns out not to be done.",
 	].join("\n");
 }
 
@@ -287,6 +346,7 @@ async function extractLedger(
 		return value.follows_previous ? previous : undefined;
 	}
 	const ledger: Ledger = {
+		requests: value.follows_previous && previous ? [...previous.requests, prompt] : [prompt],
 		criteria: value.criteria
 			.map((c) => c.trim())
 			.filter(Boolean)
@@ -331,18 +391,17 @@ async function gatherEvidence(
 	const diffWithNew =
 		tracked === undefined ? undefined : [tracked, ...(await newFileDiffs(ctx, untrackedFiles))].join("\n");
 
-	const commands = [...new Set([...settings.checks, ...(settings.runPromptChecks ? ledger.checkCommands : [])])];
-	const checks: CheckResult[] = [];
-	for (const command of commands) {
-		if (signal.aborted) break;
-		checks.push({ command, output: await ctx.runCommand(command, { timeoutMs: settings.checkTimeoutMs, signal }) });
-	}
+	const checks = await runChecks(ctx, settings, ledger, signal);
+	const tested = lastFullRun(task.tools);
+	const [before, now] = tested ? await Promise.all([task.snapshots.get(tested.index), workspaceState(ctx)]) : [];
+	const changedSinceTests = before !== undefined && now !== undefined ? before !== now : undefined;
 	return {
 		text: formatEvidence({
 			diffStat: stat,
 			diff: diffWithNew,
 			untracked: untrackedFiles,
 			tools: task.tools,
+			...(changedSinceTests === undefined ? {} : { changedSinceTests }),
 			checks,
 			...(settings.warningSignals ? { warnings: warningsFor(diffWithNew, task.tools, finalMessage) } : {}),
 			maxChars: settings.maxEvidenceChars,
@@ -351,6 +410,28 @@ async function gatherEvidence(
 		checks,
 		noChanges: madeNoChanges(tracked, untrackedFiles, task.tools),
 	};
+}
+
+/** The user's check commands (config, and those quoted in the request), run now that the agent has stopped. */
+async function runChecks(
+	ctx: ModuleContext,
+	settings: SupervisorSettings,
+	ledger: Ledger,
+	signal: AbortSignal,
+): Promise<CheckResult[]> {
+	const named = new Map<string, CheckResult["source"]>();
+	for (const command of settings.runPromptChecks ? ledger.checkCommands : []) named.set(command, "request");
+	for (const command of settings.checks) named.set(command, "config");
+	const checks: CheckResult[] = [];
+	for (const [command, source] of named) {
+		if (signal.aborted) break;
+		checks.push({
+			command,
+			output: await ctx.runCommand(command, { timeoutMs: settings.checkTimeoutMs, signal }),
+			source,
+		});
+	}
+	return checks;
 }
 
 /**
@@ -455,6 +536,7 @@ async function judge(
 	const pool = ctx.pool();
 	if (!pool) return undefined;
 	const criteria = ledger.criteria.map((c, i) => `${i + 1}. ${c}`).join("\n");
+	const userRequest = requestView(ledger.requests);
 	const final = finalMessageView(finalMessage, settings.finalMessage);
 	const common = { module: SUPERVISOR_ID, priority: "critical" as const, timeoutMs: settings.verdictTimeoutMs, signal };
 	const request = (content: string) => ({
@@ -469,7 +551,13 @@ async function judge(
 			schema: ItemVerdictSchema,
 			schemaName: "item_verdict",
 			request: request(
-				ITEM_VERDICT_PROMPT.render({ criteria, evidence, final_label: final.label, final_message: final.text }),
+				ITEM_VERDICT_PROMPT.render({
+					request: userRequest,
+					criteria,
+					evidence,
+					final_label: final.label,
+					final_message: final.text,
+				}),
 			),
 		});
 		if (!result.ok) {
@@ -482,13 +570,21 @@ async function judge(
 		...common,
 		schema: VerdictSchema,
 		schemaName: "verdict",
-		request: request(VERDICT_PROMPT.render({ criteria, evidence, final_message: final.text })),
+		request: request(VERDICT_PROMPT.render({ request: userRequest, criteria, evidence, final_message: final.text })),
 	});
 	if (!result.ok) {
 		ctx.log(`verdict ${result.outcome}: ${result.error}`);
 		return undefined;
 	}
 	return result.value;
+}
+
+/** The user's messages for this task as the verdict reads them: verbatim, later ones marked as additions. */
+function requestView(requests: readonly string[]): string {
+	const text = requests.map((r, i) => (i === 0 ? r.trim() : `(The developer then added:)\n${r.trim()}`)).join("\n\n");
+	if (text.length <= REQUEST_CHARS) return text;
+	const head = Math.floor(REQUEST_CHARS * 0.75);
+	return `${text.slice(0, head)}\n… (middle of a long request left out) …\n${text.slice(head - REQUEST_CHARS)}`;
 }
 
 /** Research R1.3: in `claims` mode the judge sees the agent's success claims, labelled unverified. */
@@ -511,21 +607,34 @@ export function aggregateItems(value: ItemVerdict, criteria: readonly string[], 
 	const haystack = normalize(evidence);
 	const statuses = criteria.map((criterion, index) => {
 		const item = value.items.find((i) => i.criterion === index + 1);
-		if (!item) return { status: "unknown", fix: "" };
+		if (!item) return { status: "unknown", fix: criterion };
 		const quoted = item.evidence.trim() !== "" && haystack.includes(normalize(item.evidence));
-		if (item.status === "met" && !quoted) return { status: "unknown", fix: "" };
-		return { status: item.status, fix: item.fix.trim() || criterion };
+		if (item.status === "met" && !quoted) return { status: "unknown", fix: criterion };
+		return { status: item.status, fix: item.status === "unmet" ? item.fix.trim() || criterion : criterion };
 	});
 	const base = { asked_user: value.asked_user, reason: value.reason };
 	if (value.failed) return { ...base, verdict: "failed", missing: [] };
 	const unmet = statuses.filter((s) => s.status === "unmet").map((s) => s.fix);
 	if (unmet.length > 0) return { ...base, verdict: "incomplete", missing: unmet };
 	if (statuses.every((s) => s.status === "met")) return { ...base, verdict: "complete", missing: [] };
-	return { ...base, verdict: "uncertain", missing: [] };
+	const unverified = statuses.filter((s) => s.status === "unknown").map((s) => s.fix);
+	return { ...base, verdict: "uncertain", missing: [], unverified };
 }
 
 function normalize(text: string): string {
 	return text.replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+/**
+ * A fingerprint of the workspace's content: tracked changes plus the content of files git does
+ * not track or ignore. Undefined outside a git repository or when git is slow. Never rejects.
+ */
+async function workspaceState(ctx: ModuleContext): Promise<string | undefined> {
+	const command =
+		"git rev-parse --is-inside-work-tree >/dev/null 2>&1 && " +
+		"{ git diff HEAD; git ls-files --others --exclude-standard -z | xargs -0 -r cat; } 2>/dev/null | git hash-object --stdin";
+	const out = await ctx.runCommand(command, { timeoutMs: GIT_TIMEOUT_MS }).catch(() => undefined);
+	return out && out.exitCode === 0 && !out.timedOut ? out.outputTail.trim() || undefined : undefined;
 }
 
 /** stdout of a git command, or undefined when it fails (e.g. not a repository). */

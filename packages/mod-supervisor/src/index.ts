@@ -1,15 +1,19 @@
-export { asksUserQuestion, diffFingerprint, formatEvidence, touchedFiles } from "./evidence.ts";
+export { asksUserQuestion, diffFingerprint, fitDiff, formatEvidence, touchedFiles } from "./evidence.ts";
 export { parseSettings, type SupervisorSettings } from "./settings.ts";
 export {
 	type Claim,
 	type ClaimKind,
 	type DiffFile,
 	extractClaims,
+	isNarrowTest,
+	lastFullRun,
 	madeNoChanges,
 	narrowTestSignal,
 	parseDiff,
 	stubSignals,
+	type TestRun,
 	tamperSignals,
+	testRunNotes,
 	unsupportedClaims,
 } from "./signals.ts";
 export {
@@ -22,5 +26,6 @@ export {
 	preVerdict,
 	SUPERVISOR_ID,
 	type Verdict,
+	verificationMessage,
 	warningsFor,
 } from "./supervisor.ts";

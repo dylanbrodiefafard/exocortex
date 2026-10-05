@@ -39,6 +39,7 @@ describe("eval configs", () => {
 		expect(options("supervisor-claims")).toEqual({ finalMessage: "claims" });
 		expect(options("supervisor-votes")).toEqual({ completeVotes: 3 });
 		expect(options("supervisor-think")).toEqual({ thinking: true });
+		expect(options("supervisor-verify")).toEqual({ verifyUncertain: true });
 		// preVerdict and warningSignals are one option group (R1.1/R1.2).
 		expect(options("supervisor-pre")).toEqual({ preVerdict: true, warningSignals: true });
 		expect(options("supervisor-research")).toEqual({
@@ -46,6 +47,7 @@ describe("eval configs", () => {
 			...options("supervisor-items"),
 			...options("supervisor-claims"),
 			...options("supervisor-votes"),
+			...options("supervisor-verify"),
 		});
 	});
 

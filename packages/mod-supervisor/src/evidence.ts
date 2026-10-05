@@ -1,18 +1,23 @@
 import { createHash } from "node:crypto";
-import type { CommandOutput, ToolOutcome } from "@exocortex/core";
+import { type CommandOutput, isTestPath, type ToolOutcome } from "@exocortex/core";
+import { testRunNotes } from "./signals.ts";
 
 export interface CheckResult {
 	readonly command: string;
 	readonly output: CommandOutput;
+	/** Who named the command: the user's config or the user's request (D-011). */
+	readonly source: "config" | "request";
 }
 
 export interface EvidenceInput {
 	/** `git diff --stat <start>` plus untracked files, or undefined outside a git repo. */
 	readonly diffStat: string | undefined;
-	/** `git diff <start>` (may be long; truncated here). */
+	/** `git diff <start>` plus new files as diffs (may be long; cut per file here). */
 	readonly diff: string | undefined;
 	readonly untracked: readonly string[];
 	readonly tools: readonly ToolOutcome[];
+	/** Whether the workspace differs from what it was after the agent's last full test run, when known. */
+	readonly changedSinceTests?: boolean;
 	readonly checks: readonly CheckResult[];
 	/** Deterministic warning signs (research R1.2), shown first. */
 	readonly warnings?: readonly string[];
@@ -20,8 +25,10 @@ export interface EvidenceInput {
 }
 
 const RECENT_COMMANDS = 10;
-const FAILED_OUTPUT_CHARS = 600;
-const CHECK_OUTPUT_CHARS = 1_200;
+const FAILED_OUTPUT_CHARS = 2_000;
+const CHECK_OUTPUT_CHARS = 4_000;
+/** Room kept for the "more lines not shown" note under a file's cut diff. */
+const DIFF_CUT_NOTE_CHARS = 60;
 
 /**
  * Compact, deterministic evidence for the verdict sidecar (brief §6.1 step 2): what changed,
@@ -80,6 +87,7 @@ export function formatEvidence(input: EvidenceInput): string {
 			[
 				"## Commands the agent ran (most recent last)",
 				...lines,
+				...testRunNotes(input.tools, input.changedSinceTests).map((n) => `Note: ${n}.`),
 				lastFailure
 					? `Output of the last failing command (it did not pass again):\n${tail(lastFailure.output, FAILED_OUTPUT_CHARS)}`
 					: "",
@@ -92,10 +100,41 @@ export function formatEvidence(input: EvidenceInput): string {
 	const head = sections.join("\n\n");
 	if (input.diff && input.diff.trim() !== "" && head.length < input.maxChars - 200) {
 		const room = input.maxChars - head.length - 40;
-		sections.push(`## Diff (truncated)\n${input.diff.length > room ? `${input.diff.slice(0, room)}\n…` : input.diff}`);
+		sections.push(`## Diff${input.diff.length > room ? " (long files cut short)" : ""}\n${fitDiff(input.diff, room)}`);
 	}
 	const text = sections.join("\n\n");
 	return text.length > input.maxChars ? `${text.slice(0, input.maxChars)}\n…` : text;
+}
+
+/**
+ * A diff cut to `room` characters with every file represented. Cutting the text at `room` showed
+ * the judge the first files whole and the rest not at all, so items done in a later file looked
+ * undone. Each file gets an equal share, and what a short file leaves over goes to the longer
+ * ones. Code comes before tests: the request is usually about the code.
+ */
+export function fitDiff(diff: string, room: number): string {
+	if (diff.length <= room) return diff;
+	const files = diff
+		.split(/^(?=diff --git )/m)
+		.filter((f) => f.trim() !== "")
+		.map((text) => ({ text: text.trimEnd(), test: isTestPath(/^diff --git a\/(\S+)/.exec(text)?.[1] ?? "") }));
+	const bySize = [...files].sort((x, y) => x.text.length - y.text.length);
+	const share = new Map<string, number>();
+	let left = room;
+	bySize.forEach((file, i) => {
+		const allowed = Math.min(file.text.length, Math.floor(left / (bySize.length - i)));
+		share.set(file.text, allowed);
+		left -= allowed;
+	});
+	return [...files.filter((f) => !f.test), ...files.filter((f) => f.test)]
+		.map(({ text }) => {
+			const allowed = share.get(text) ?? 0;
+			if (text.length <= allowed) return text;
+			const kept = text.slice(0, Math.max(0, allowed - DIFF_CUT_NOTE_CHARS));
+			const cut = text.slice(kept.length).split("\n").length;
+			return `${kept}\n… (${cut} more lines of this file's diff not shown)`;
+		})
+		.join("\n");
 }
 
 /** Fingerprint of the working tree's changes, to detect continuations that change nothing. */

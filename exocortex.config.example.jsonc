@@ -51,13 +51,15 @@
 			"checks": [], // commands to run as evidence when the agent stops, e.g. ["npm test"]
 			"runPromptChecks": true, // also run commands quoted verbatim in your request
 			"checkTimeoutMs": 120000,
+			"maxEvidenceChars": 40000, // what the verdict reads of the diff and command output (~4 chars per token)
 			"thinking": false, // sidecar reasoning for the ledger/verdict calls
 			// Research options (docs/RESEARCH.md §1), off until A/B'd: see packages/eval/configs/supervisor-*.jsonc
 			"preVerdict": false, // a failing check = incomplete with no LLM call
 			"warningSignals": false, // flag skipped/deleted tests, stubs, unsupported "tests pass" claims
 			"verdictStyle": "holistic", // or "per-criterion": each item judged with a quoted evidence line
 			"finalMessage": "tail", // or "claims": show only the agent's success claims, marked unverified
-			"completeVotes": 1 // >1: re-ask on "complete"; any dissent = uncertain
+			"completeVotes": 1, // >1: re-ask on "complete"; any dissent = uncertain
+			"verifyUncertain": false // on "uncertain": ask the agent once to check what the evidence does not show
 		},
 		"trimmer": {
 			"enabled": false,

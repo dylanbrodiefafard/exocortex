@@ -1,0 +1,9 @@
+// Supervisor (suggest) + D-071: on an `uncertain` verdict, ask the agent once per task to check
+// the items the evidence does not show, as SWE-agent's submit review and OpenHands' critic
+// follow-up do. It costs a continuation, so read turns and wall-clock beside success. Compare
+// against `supervisor`.
+{
+	"modules": {
+		"supervisor": { "enabled": true, "mode": "suggest", "verifyUncertain": true }
+	}
+}

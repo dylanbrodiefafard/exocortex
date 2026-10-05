@@ -7,6 +7,7 @@ import {
 	parseDiff,
 	stubSignals,
 	tamperSignals,
+	testRunNotes,
 	unsupportedClaims,
 } from "../src/signals.ts";
 
@@ -144,5 +145,41 @@ describe("madeNoChanges", () => {
 		expect(madeNoChanges("", [], [edit])).toBe(false);
 		expect(madeNoChanges("diff", [], [])).toBe(false);
 		expect(madeNoChanges(undefined, [], [])).toBe(false);
+	});
+});
+
+describe("testRunNotes", () => {
+	const bash = (command: string): ToolOutcome => ({
+		toolName: "bash",
+		input: { command },
+		isError: false,
+		exitCode: 0,
+		output: "",
+	});
+	const edit: ToolOutcome = { toolName: "edit", input: { path: "a.rs" }, isError: false, exitCode: null, output: "" };
+
+	it("is silent when the last full test run came after the last edit, with its own exit code", () => {
+		expect(testRunNotes([edit, bash("cargo test --offline -q"), bash("git status")])).toEqual([]);
+		expect(testRunNotes([edit, bash("set -o pipefail && go test ./... | tail -20")])).toEqual([]);
+		expect(testRunNotes([edit, bash("grep -rn pytest .")])).toEqual([]);
+	});
+
+	it("notes edits made after the last full test run", () => {
+		const notes = testRunNotes([bash("cd core && make -s test"), edit, edit]);
+		expect(notes).toEqual([
+			"files changed after the agent's last full test run (`cd core && make -s test`), so that result does not cover the finished work",
+		]);
+		// When the workspace was compared, that decides: a shell edit counts, a reverted edit does not.
+		expect(testRunNotes([bash("go test ./..."), bash("sed -i s/a/b/ a.go")], true)).toHaveLength(1);
+		expect(testRunNotes([bash("go test ./..."), edit], false)).toEqual([]);
+		// A later run of one test does not stand in for the full run.
+		expect(testRunNotes([bash("go test ./..."), edit, bash("go test -run TestParse ./...")])).toHaveLength(1);
+	});
+
+	it("notes a run whose exit code was a pipe's, and falls back to the build when no tests ran", () => {
+		expect(testRunNotes([edit, bash("python3 -m unittest discover -q -s tests -t . 2>&1 | tail -5")])[0]).toContain(
+			"is the last command of the pipe's, not the test run's",
+		);
+		expect(testRunNotes([bash("cargo build"), edit])[0]).toContain("last full build (`cargo build`)");
 	});
 });

@@ -1,4 +1,4 @@
-// Supervisor (suggest) with every research option on at once (R1.1–R1.5), to see the combined
+// Supervisor (suggest) with every research option on at once (R1.1–R1.5, and D-071's verification request), to see the combined
 // effect before ablating with the single-option configs.
 {
 	"modules": {
@@ -9,7 +9,8 @@
 			"warningSignals": true,
 			"verdictStyle": "per-criterion",
 			"finalMessage": "claims",
-			"completeVotes": 3
+			"completeVotes": 3,
+			"verifyUncertain": true
 		}
 	}
 }

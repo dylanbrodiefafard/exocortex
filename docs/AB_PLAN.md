@@ -28,13 +28,14 @@ npm run eval -- --model ninfer/coding --tags hard --config all-off,supervisor --
 - **Primary:** Δ success on `hard`, paired by task.
 - **Gate:** no runaway loops. Every run stays within `maxContinuations`, with no extra `max_turns` or timeout outcomes.
 - **Also read:** precision of `complete` and failures caught (the "Supervisor verdicts vs hidden checks" section).
+- **What `supervisor` now does (D-071):** the judge reads the request itself, sees every changed file, and is told when the agent's last test run came before its last edit or was piped. Verdict calls are larger (up to about 15k prompt tokens); nothing extra is run.
 - **On a pass:** merge Phase 3 and tag `phase-3`.
 
 ## 2. Supervisor research options (D-046)
 
 ```sh
 npm run eval -- --model ninfer/coding --tags hard --repeat 5 \
-  --config supervisor,supervisor-think,supervisor-pre,supervisor-items,supervisor-claims,supervisor-votes
+  --config supervisor,supervisor-think,supervisor-pre,supervisor-items,supervisor-claims,supervisor-votes,supervisor-verify
 ```
 
 Each config turns on one option (D-056), so every row of the report is one option against `supervisor`.
@@ -44,6 +45,7 @@ Each config turns on one option (D-056), so every row of the report is one optio
 - **After research verification (D-054):**
   - `supervisor-think` has the strongest prior: non-thinking judges were near chance on pairwise code judging. If GPU time is short, run `supervisor,supervisor-think` first.
   - `supervisor-claims` (`finalMessage: "claims"`) is a real test, not a confirmation. CodeJudgeBench found judges do better *with* the judged response's full text, so stripping the narrative could lower precision. `supervisor-items` no longer sets it (D-056), so per-criterion verdicts are judged on their own.
+  - `supervisor-verify` (D-071) turns an `uncertain` verdict into one request to the agent to check the unshown items. **Primary for this row:** Δ success. It costs a continuation, so it changes a default only if success rises without turns and wall-clock rising beyond what that one continuation explains. If `uncertain` is rare in the `supervisor` row, it has nothing to act on. It is also the only config that acts on a stale or piped test run (the agent is asked to run its tests again), so compare its "lucky passes" with `supervisor`'s.
   - `completeVotes` stays the logprob-free confidence route: logprobs are anti-calibrated on Qwen 3.5 27B (VERDI, verified).
 
 ## 3. Phase 4 modules (D-042 to D-045)

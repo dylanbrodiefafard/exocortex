@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { asksUserQuestion, diffFingerprint, formatEvidence, touchedFiles } from "../src/evidence.ts";
+import { asksUserQuestion, diffFingerprint, fitDiff, formatEvidence, touchedFiles } from "../src/evidence.ts";
 
 const ok = { exitCode: 0, timedOut: false, durationMs: 5, outputTail: "all good" };
 
@@ -27,7 +27,7 @@ describe("formatEvidence", () => {
 				{ toolName: "bash", input: { command: "pytest" }, isError: true, exitCode: 1, output: "1 failed" },
 				{ toolName: "write", input: { path: "README.md" }, isError: false, exitCode: null, output: "" },
 			],
-			checks: [{ command: "pytest", output: ok }],
+			checks: [{ command: "pytest", output: ok, source: "config" }],
 			maxChars: 10_000,
 		});
 		const order = ["## Check commands", "## Changes since", "## Commands the agent ran", "## Diff"].map((h) =>
@@ -98,5 +98,27 @@ describe("helpers", () => {
 		).toEqual(["a.ts"]);
 		expect(diffFingerprint("d", ["x"])).toBe(diffFingerprint("d", ["x"]));
 		expect(diffFingerprint("d", ["x"])).not.toBe(diffFingerprint("d", ["y"]));
+	});
+});
+
+describe("fitDiff", () => {
+	const file = (path: string, lines: number) =>
+		`diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n${Array.from({ length: lines }, (_, i) => `+${path} line ${i}`).join("\n")}`;
+
+	it("leaves a diff that fits alone", () => {
+		const diff = [file("a.rs", 3), file("b.rs", 3)].join("\n");
+		expect(fitDiff(diff, 10_000)).toBe(diff);
+	});
+
+	it("shows every file when the diff is too long, cutting only the long ones, code before tests", () => {
+		const diff = [file("tests/test_big.py", 400), file("src/big.rs", 400), file("src/small.rs", 5)].join("\n");
+		const fitted = fitDiff(diff, 3_000);
+		expect(fitted.length).toBeLessThanOrEqual(3_000);
+		// The small file is whole; a plain cut at 3,000 characters would never have reached it.
+		expect(fitted).toContain("+src/small.rs line 4");
+		expect(fitted).toContain("+src/big.rs line 0");
+		expect(fitted).toContain("+tests/test_big.py line 0");
+		expect(fitted).toMatch(/… \(\d+ more lines of this file's diff not shown\)/);
+		expect(fitted.indexOf("a/src/big.rs")).toBeLessThan(fitted.indexOf("a/tests/test_big.py"));
 	});
 });
