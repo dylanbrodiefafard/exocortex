@@ -682,6 +682,32 @@ Open check: Exocortex's injected `custom_message` reaches ninfer as a second con
     - **turning any module or option on by default.**
 - **Applied:** Phase 3 (#5) and the Phase 4/5/6 branch merge on this basis. Neither is tagged until its A/B passes.
 
+### D-053 — Verified: masking evidence is weak for a 32B and ignores local caching; retro-masking stays deferred · accepted (2026-10-05; research verification, reaffirms D-042 "Not done")
+- **Claim checked:** *The Complexity Trap* (RESEARCH.md §2a, exec #7, R2.3). The survey cited masking ≈ summary at half the cost, "with Qwen3-32B among the models", but had not seen the Qwen3-32B row or the cost model.
+- **What the paper says (Table 1, §4.4, App. A):**
+  - Qwen3-32B non-thinking: raw 17.0%, masking 15.0%, summary 16.0%; summary was the cheaper strategy. Thinking: 23.0 / 24.6 / 24.8%. Neither difference is significant.
+  - For Qwen3-32B it was **masking** that lengthened trajectories (+13%), the opposite of the larger models.
+  - Qwen costs use Alibaba list prices with no cache-hit discount; no configuration models a local prefix cache. The window M is scaffold-specific (§5.1).
+- **New evidence:** EfficientAgent (2609.33762, Table 13) measured a local Qwen3-Coder-30B-A3B with prefix caching: observation masking dropped the prefix-hit rate from 96.5% to 50.8% and lengthened inference.
+- **Implication:** the case for R2.3 on our model class is weaker than the survey said. R2.3 stays deferred (as in D-042). It is reconsidered only if Phase 4 runs show context-overflow or compaction-driven failures, and then as an A/B with prefix-hit rate, turns and wall-clock as co-primary metrics and K tuned for pi. No setting or eval config changes. Exec #7 and R2.3 in RESEARCH.md carry the caveat.
+
+### D-054 — Verified: CodeJudgeBench's "retained reasoning" is about the judged response, not the judge · accepted (2026-10-05; research verification, touches D-046, R1.3, R1.6)
+- **Claim checked:** RESEARCH.md §1a and R1.6 said keeping the judge's full reasoning improved accuracy, and that pairwise code judging was often below 60%.
+- **What the paper says (abstract, RQ3, §5.1):**
+  - Judges did better when given the *candidate's* full, unprocessed response (comments and reasoning) than code only. Nothing about the judge's own reasoning.
+  - The <60% figure is for **non-thinking** judges, near the 50% random baseline; thinking judges, down to Qwen3-8B, did clearly better.
+- **Implications:**
+  - `supervisor-think` (R1.6): its evidence changes source but gets stronger. It is now the supervisor option with the highest prior. JEV-as-a-Judge (2609.26550) points the same way: judges without reasoning fall furthest behind on code.
+  - `finalMessage: "claims"` (R1.3): the corrected finding is mild counter-evidence. Stripping the agent's narrative may remove signal the judge uses. Its A/B must be read as a real test, not a confirmation.
+- **No default changes.** `thinking` stays off (D-008) and `finalMessage` stays as in D-039 until AB_PLAN step 2 runs. `supervisor-items` bundles `finalMessage: "claims"` with per-criterion verdicts, so AB_PLAN step 2 now notes that a flat or negative `supervisor-items` result needs a rerun with `finalMessage` at its default before per-criterion is judged. The eval configs are unchanged.
+
+### D-055 — Verified: memory evidence holds; D-049's rationale reworded; expect small effects · accepted (2026-10-05; research verification, refines D-049's context only)
+- **Claims checked:** 2606.15017 (Qwen 3.6-27B budget-matched), Dynamic Cheatsheet on small models, ACE's collapse example, SWE-Exp, Memento.
+- **Confirmed:** with Qwen 3.6-27B a budget-matched vanilla actor scored 50.73% on WebArena against 46.15–49.08% for AWM, ASI and ReasoningBank, using fewer tokens (Table 1). ACE's 18,282 → 122-token collapse fell to 57.1%, below the 63.7% of no context (Fig. 2).
+- **Corrected wording:** D-049's context says Dynamic Cheatsheet helped small models little "because they self-judge poorly". The paper (§5) attributes it to *generative competence*: small models produce correct solutions too rarely to seed memory and fail to apply what is stored. D-049 is not edited; this entry records the correction. The conclusion is the same: admit cards only from externally verified fixes.
+- **New evidence:** VibeMemBench (2609.23570) found execution-verified experience helped held-out solvers by 1.1–4.5 points, but 11 of 12 pairings of existing memory systems with solvers failed to beat memory-off. That supports D-049's narrow design and predicts a small effect.
+- **Implication:** AB_PLAN step 4 (`--repeat 3`) cannot detect a 1–4 point effect. Read it as a learning-curve and harm check: no drop in success, no budget-matched token loss. Do not read it as proof of benefit. No setting changes.
+
 ---
 
 ## Open questions (carried from brief §10, updated)

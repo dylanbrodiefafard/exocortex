@@ -4,7 +4,7 @@
 
 ## How to read this document
 
-> **Verification pending.** Claims tagged [S] or [U] have not been checked against the papers (the network blocked them). `docs/RESEARCH_VERIFY.md` is the prioritized work list for doing that.
+> **Verified 2026-10-05.** Every claim on the `docs/RESEARCH_VERIFY.md` work list was checked against the paper (or, for blogs, the page) and is now tagged [V] with its table or section, or corrected in place with a note on what the snippet had said. One source (the AI21 blog) does not contain the numbers attributed to it; those stay [U]. Corrections that change a recommendation are recorded in D-053 to D-055. Claims tagged [A] that were not on the work list were not re-read. §8 adds post-June-2026 work.
 
 **Method and its limits.** The network proxy blocked arxiv.org, huggingface.co, openreview.net, alphaxiv.org, factory.ai and blog.jetbrains.com, so I could not open full papers. Every claim below comes from web-search result text: abstracts, publisher pages, author READMEs (GitHub was reachable) and secondary summaries. Each claim carries a tag:
 
@@ -14,6 +14,7 @@
 | **[S]** | A specific number or detail that reached me only through a secondary summary (search-engine digest, review site, blog). Plausible but **not checked against the paper**. Confirm before citing it in a decision. |
 | **[X]** | My extrapolation to Exocortex. It is not a finding of the cited work. |
 | **[U]** | Could not verify at all. |
+| **[V]** | Verified against the paper itself (table, figure or section cited). Where the snippet was wrong, the corrected figure is given with a note. Strength is what the paper supports, not more. |
 
 **Transfer warning.** Most agent results below were measured with frontier or very large models (GPT-4-class, Claude, DeepSeek-V3, Qwen3-Coder-480B). A few studies include ~27–32B models, and I flag those, because they are the most transferable. Results on 0.5–4B models are flagged too; they may not transfer **upward** to 27B either.
 
@@ -58,12 +59,13 @@ Ranking weighs (i) evidence strength, (ii) how likely the effect is to transfer 
 
 6. **Restructure the verdict call as per-criterion decomposition, get confidence from structure rather than logprobs, and A/B thinking-on for the verdict only.**
    - Checklist decomposition improves judge–human agreement [TICK 2024].
-   - On Qwen 3.5 4B/9B/27B, answer-token logprobs were *anti-calibrated* (AUROC 0.32–0.49), and 99%+ of logprobs saturate above 0.999 under JSON output [VERDI 2026, S].
+   - On Qwen 3.5 4B/9B/27B, answer-token logprobs were *anti-calibrated* (AUROC 0.32–0.49), and 99%+ of logprobs saturate above 0.999 under JSON output [VERDI 2026, V: Tables 2 and 5, App. G]. The saturation figure was measured on GPT-4.1-mini; the anti-calibration figure on Qwen. Benchmarks are SummEval, FEVER and SciFact, not code.
    - Thinking judges were ~10 points more accurate in small Qwen3 models [2025].
    - The thinking part **touches D-008** (sidecar thinking off by default). (§1)
 
 7. **Do observation masking in batches through pi's `context_edit`, as a cheap "mini-compaction". Do not use a per-turn rolling window.**
    - Masking matched or beat LLM summarization at about half the cost, and **Qwen3-32B was among the models tested** [Lindenbauer et al. 2025].
+   - **Verified caveat (D-053):** on Qwen3-32B, the closest model to ours, neither strategy beat the raw agent's solve rate (non-thinking: raw 17.0%, masking 15.0%, summary 16.0%; Table 1), summary was the cheaper one, and masking lengthened trajectories by 13%. A 2026 measurement on a local 30B with prefix caching found masking cut the prefix-hit rate from 96.5% to 50.8% (§8). Treat #7 as an experiment with weak priors for a 27B, not an expected win.
    - A per-turn rolling window breaks the prefix every turn [X]. Batching makes it one cache reset per batch, like compaction.
    - Needs a new D-entry because it edits earlier context (constraint 3; D-029 allows `context_edit` only for "deliberate compaction-like operations"). (§2, §4)
 
@@ -126,13 +128,13 @@ Ranking weighs (i) evidence strength, (ii) how likely the effect is to transfer 
   - **[A]** Larger, more accurate models have highly correlated errors.
   - Same model as judge (D-006) is the extreme case of this.
 - *CodeJudgeBench*, 2025. https://arxiv.org/abs/2507.10535
-  - **[S]** Pairwise code judging often scored <60% accuracy, and swapping response order changed decisions by up to 14%.
-  - **[S]** Keeping the judge's full reasoning output improved accuracy.
+  - **[V]** (§5.1, Table 3) *Non-thinking* judges scored below 60% on pairwise code judging, near the 50% random baseline; thinking models (even Qwen3-8B) did clearly better. Swapping response order changed accuracy by up to 14% (§5.2, Fig. 4). *Correction:* the snippet said "pairwise code judging often <60%" without the non-thinking qualifier.
+  - **[V]** (abstract, RQ3) *Correction:* the finding is that giving the judge the **candidate's** full, unprocessed response (with its comments and reasoning) beats stripping it to code. It says nothing about keeping the *judge's own* reasoning, which is what the snippet claimed. Judges tested go up to frontier models; Qwen3-8B/14B/32B and QwQ-32B are the transferable rows.
 
 **Coding agents claim success prematurely, and the problem is getting relatively worse.**
 - *How Coding Agents Fail Their Users*, 2026, 20,574 real sessions from 1,639 repos. https://arxiv.org/abs/2605.29442
   - **[A]** Seven misalignment forms. Constraint violations and **inaccurate self-reporting are growing in share** even as overall rates fall.
-  - **[S]** Inaccurate self-reporting was 22.58% of episodes; 91.49% of resolutions still needed explicit user correction.
+  - **[V]** (§4, Table 3) Inaccurate self-reporting (S7) was 22.58% of misalignment episodes (multi-label, so shares overlap). *Clarified:* the 91.49% is of the 9.33% of episodes with a visible resolution (n=1,504), across all symptoms, not only self-reporting; only 2.99% were self-corrected. Agents are frontier IDE/CLI products.
 - *The Unreliable Progress Bar*, Wang, Wang, Wu, 2026. https://arxiv.org/abs/2609.08589
   - **[A]** Models report progress accurately before acting and after completion, but mid-task reliability drops to near zero.
   - **[A]** Newer models become over-conservative at the finish line.
@@ -145,7 +147,7 @@ Ranking weighs (i) evidence strength, (ii) how likely the effect is to transfer 
 - *Preventing Premature Commitment in Coding Agents (ECLoop)*, 2026. https://arxiv.org/abs/2607.28815
   - **[A]** Compiles evidence conditions from the issue and holds actions until they are met.
   - **[A]** +4.8 to +11.8 points Pass@1 on all of SWE-bench Verified with two models and two scaffolds, at up to 12.1% fewer tokens.
-  - It intervenes *during* the run, not at the end. Model sizes unknown [U].
+  - It intervenes *during* the run, not at the end. **[V]** (Table 1) Models: GPT-5-mini and MiniMax-M2.5 under mini-swe-agent v2, both large; transfer to a 27B is untested.
 
 **Requirement extraction and checklists.**
 - *TICKing All the Boxes*, Cook, Rocktäschel, Foerster, Aumiller, Wang, 2024. https://arxiv.org/abs/2410.03608
@@ -161,13 +163,13 @@ Ranking weighs (i) evidence strength, (ii) how likely the effect is to transfer 
 
 **Calibrating the verdict.**
 - *VERDI*, Qi, Dantsev, Sun (Indeed), 2026. https://arxiv.org/abs/2605.11334
-  - **[S]** With structured JSON output, 99.4–100% of answer logprobs saturate above 0.999.
-  - **[S]** On **Qwen 3.5 4B/9B/27B**, answer-token logprobs were *anti-calibrated* (AUROC 0.32–0.49).
-  - **[A]** VERDI decomposes each criterion into claim → verify → aggregate within one call and derives confidence from structural agreement. **[S]** AUROC 0.56–0.70.
+  - **[V]** (Table 2, §4) With structured JSON output, 99.4–100% of answer logprobs saturate above 0.999. Measured on GPT-4.1-mini.
+  - **[V]** (Table 5, App. G) On **Qwen 3.5 4B/9B/27B**, answer-token logprobs were *anti-calibrated* (AUROC 0.32–0.49: higher confidence on errors).
+  - **[A]** VERDI decomposes each criterion into claim → verify → aggregate within one call and derives confidence from structural agreement. **[V]** (Table 5) AUROC 0.56–0.70 on the Qwen models, versus 0.72–0.91 on GPT-4.1-mini: weaker on our model class, but above chance where logprobs are below it. Tasks are summarization and fact-checking rubrics, not code.
   - Directly relevant: same model family and size.
 - *Rethinking Verbalized Confidence for LLM-as-a-Judge*, 2026. https://arxiv.org/abs/2609.10996
   - **[A]** A well-designed verbalized-confidence recipe now beats logprob G-Eval on post-2025 *frontier* judges, while pre-2025 models lose accuracy with it.
-  - Whether a 27B local model behaves like a "post-2025 flagship" here is unknown [U].
+  - Whether a 27B local model behaves like a "post-2025 flagship" here is unknown [U]. The paper tested proprietary models only, so it cannot settle this; it is an A/B question (AB_PLAN step 2).
 - *Trust or Escalate*, Jung, Brahman, Choi (UW/AI2), ICLR 2025. https://arxiv.org/abs/2407.18370
   - **[A]** Selective evaluation: trust the judge only above a calibrated confidence and otherwise escalate, with a provable human-agreement guarantee.
   - **[A]** "Simulated annotators" (several in-context personas, confidence = agreement ratio) improved calibration.
@@ -176,7 +178,7 @@ Ranking weighs (i) evidence strength, (ii) how likely the effect is to transfer 
   - **[A]** Thinking-mode Qwen3 judges (0.6B–4B) were ~10 points more accurate at <2× cost, and more robust to positional and other biases.
   - Small models only. Transfer to 27B plausible but unmeasured [X].
 - *Reflexion*, Shinn et al., NeurIPS 2023. https://arxiv.org/abs/2303.11366
-  - **[S]** Self-generated tests had a 16.3% false-positive rate on MBPP, and there Reflexion underperformed plain GPT-4.
+  - **[V]** (§4.3 analysis, Table 1) Self-generated tests had a 16.3% false-positive rate on MBPP Python (1.4% on HumanEval), and there Reflexion scored 77.1% against plain GPT-4's 80.1%.
   - Model-written checks are a weak oracle.
 
 ### 1(b) Recommendations for Exocortex
@@ -198,7 +200,7 @@ Current design (D-039): an isolated verdict call sees checklist + evidence + the
 | 2 | Per-criterion mapping to touched files or diff hunks | Agent-as-a-Judge's gains came from locating evidence per requirement [Zhuge 2025] | Partial (files touched) |
 | 3 | Last command failed and was not rerun | Premature completion after the first green signal [2026 studies] | Partly (last 10 commands) |
 | 4 | **Test tampering**: test files deleted or modified, `skip`/`xfail`/`#[ignore]`/`t.Skip` added, assertions removed, expected values edited | ImpossibleBench shows agents do this; over-mocked tests in agent commits [Hora 2026, https://arxiv.org/abs/2602.00409] | New |
-| 5 | **Claim–evidence mismatch**: final message says "tests pass", "builds" or "fixed", but no matching successful command appears in the trace | Inaccurate self-reporting is 22.6% of misalignment episodes [S]; self-reports unreliable [Progress Bar 2026] | New (regex over the final message + trace) |
+| 5 | **Claim–evidence mismatch**: final message says "tests pass", "builds" or "fixed", but no matching successful command appears in the trace | Inaccurate self-reporting is 22.6% of misalignment episodes [V]; self-reports unreliable [Progress Bar 2026] | New (regex over the final message + trace) |
 | 6 | Stub markers added in the diff (`TODO`, `unimplemented!()`, `NotImplementedError`, `panic("not implemented")`) | [X] cheap, deterministic, precise | New |
 | 7 | Narrow-vs-full check: only a subset of tests was run (`-k`, `--run`, `-run`, single file) | 7.8% of narrow-test passes are wrong [Wang & Pradel 2026] | New |
 
@@ -206,6 +208,7 @@ Current design (D-039): an isolated verdict call sees checklist + evidence + the
 - Today the verdict prompt says "you must not trust the agent's own claims of success without evidence", yet it still shows 1.5k characters of the final message.
 - Proposal: run a deterministic claim extractor (R1.2 #5) and pass the verdict call only (a) the extracted claims, labelled "UNVERIFIED CLAIMS", and (b) the last ~300 characters for `asked_user` detection.
 - A/B this against the current prompt. [X] Showing a confident success narrative to a same-model judge is exactly the setting where harmful self-preference appears [Chen et al. 2025; Panickssery 2024].
+- **Counter-evidence (2026-10-05, D-054).** CodeJudgeBench found judges were *more* accurate when given the candidate's full, unprocessed response (comments and reasoning) than when it was stripped to code [V: RQ3]. That is a different setting (pairwise code correctness, not completion claims), but it is a real reason R1.3 could lose: the narrative may carry information the judge uses. The A/B decides; do not assume `claims` wins.
 
 **R1.4 — Per-criterion decomposed output** (exec #6).
 - Change the schema to `items: [{criterion, status: met|unmet|unknown, evidence_ref}]`, and compute the verdict deterministically:
@@ -215,7 +218,7 @@ Current design (D-039): an isolated verdict call sees checklist + evidence + the
 - Require `evidence_ref` to quote an evidence line ID. Reject items whose reference doesn't exist (schema-validate, then repair once, as D-036 already does).
 - Basis: TICK, VERDI, Agent-as-a-Judge [A]. [X] This also yields per-criterion labels the memory module can learn from.
 
-**R1.5 — Confidence without logprobs.** Do not build calibration on answer-token logprobs (F6 in INFERENCE_ENGINES.md). VERDI reports they are saturated or anti-calibrated on Qwen 3.5 27B under JSON [S]. Use:
+**R1.5 — Confidence without logprobs.** Do not build calibration on answer-token logprobs (F6 in INFERENCE_ENGINES.md). VERDI reports they are saturated (GPT-4.1-mini) or anti-calibrated (Qwen 3.5 27B) under JSON [V: Tables 2, 5]. Use:
 - structural agreement: items marked `met` with valid evidence references divided by total items;
 - **k-way voting only when the first verdict is `complete`**, with k=3 isolated calls at temperature ~0.7. The asymmetry is deliberate: a false `complete` is the costly error, because the user walks away.
 - Action only on unanimity; otherwise downgrade to `uncertain`. This is "Trust or Escalate" with the user as the escalation target [A/X].
@@ -223,8 +226,9 @@ Current design (D-039): an isolated verdict call sees checklist + evidence + the
 
 **R1.6 — Thinking on for the verdict only: A/B it.**
 - D-008 sets sidecar thinking off by default. The verdict is the one sidecar where latency barely matters: main is idle at settle, and the settle budget is 5 minutes.
-- Evidence from small Qwen3 judges shows ~+10 points [A]; CodeJudgeBench found retained reasoning helps [S].
+- Evidence from small Qwen3 judges shows ~+10 points [A]; CodeJudgeBench found non-thinking judges near chance (<60%) on pairwise code judging while thinking judges, including Qwen3-8B, did clearly better [V: §5.1]. *Corrected (D-054):* the earlier "retained reasoning helps" citation was about the judged response's reasoning, not the judge's; it is no evidence for R1.6, but the thinking-vs-non-thinking gap is, and it is stronger.
 - **Conflict with D-008's default.** Recommend a new D-entry: `supervisor.thinking` defaults to `true` if the A/B (R1.8) shows better verdict precision at acceptable latency.
+- After verification (D-054) this is the supervisor option with the strongest prior: non-thinking judges were near chance on pairwise code judging in CodeJudgeBench, and JEV-as-a-Judge (§8) found a decision-only judge (no reasoning) falls furthest behind a reasoning judge where the verdict must be derived (code −12.9 points).
 
 **R1.7 — Ledger quality.**
 - Add a `source: explicit|implied` field per criterion. The prompt already forbids invented requirements, so `implied` items should be rare.
@@ -232,7 +236,7 @@ Current design (D-039): an isolated verdict call sees checklist + evidence + the
 - Ambig-SWE shows models are poor at detecting underspecification [A], so do **not** ask the sidecar to flag ambiguity for the user at this stage [X].
 
 **R1.8 — Consider an ECLoop-style mid-run check as a later supervisor feature**, not now.
-- ECLoop's in-loop holding of edits gained 4.8–11.8 points [A], but it blocks actions, which brief constraint 2 discourages, and models are unknown.
+- ECLoop's in-loop holding of edits gained 4.8–11.8 points [A], but it blocks actions, which brief constraint 2 discourages, and it was measured on GPT-5-mini and MiniMax-M2.5 [V].
 - Park it as a candidate D-entry.
 
 ### 1(c) What to measure
@@ -257,18 +261,18 @@ Current design (D-039): an isolated verdict call sees checklist + evidence + the
   - **[A]** In SWE-agent on SWE-bench Verified, across five model configurations, masking old observations halves cost relative to the raw agent and matches or slightly beats the solve rate of LLM summarization.
   - **[A]** LLM summarization can cause "trajectory elongation" (agents persist on unproductive paths), especially with stronger models.
   - **[A]** A hybrid of the two cut a further 7% (vs masking) and 11% (vs summary).
-  - **[S]** Models included Qwen3-32B, Qwen3-Coder-480B and Gemini 2.5 Flash, thinking and non-thinking.
-  - **[S]** Masking window M=10 turns; older observations become placeholders such as "(n lines omitted)".
-  - **[S]** Qwen3-Coder-480B: masking 54.8% vs summary 53.8% solve, $0.61 vs $0.64 vs $1.29 raw. Summarization elongated trajectories 13–15%.
-  - I could not see the Qwen3-32B row [U].
-  - Caveat [X]: their cost model is API pricing. A per-turn rolling mask breaks the prefix cache every turn, and I could not verify whether they modelled cache pricing [U].
+  - **[V]** (§3.2) Models: Qwen3-32B (thinking and non-thinking, 122K window via YaRN), Qwen3-Coder-480B-A35B and Gemini 2.5 Flash (thinking and non-thinking). Turn limit 250.
+  - **[V]** (§3.2, §3.1) Masking window M=10 turns, chosen as best for SWE-agent; older observations become placeholders such as "Previous 8 lines omitted". §5.1: M must be re-tuned per scaffold; reusing M=10 on OpenHands "degrades drastically".
+  - **[V]** (Table 1, §4.4) Qwen3-Coder-480B: masking 54.8% vs summary 53.8% vs raw 53.4% solve; $0.61 vs $0.64 vs $1.29. Summarization elongated trajectories 15% over raw and 13% over masking for that model (Gemini 2.5 Flash: 15% over masking).
+  - **[V]** (Table 1, §4.4) **The Qwen3-32B rows.** Non-thinking: raw 17.0%, masking 15.0%, summary 16.0% (both drops within CI); cost $1.12 → $0.55 masking, **$0.50 summary**. Thinking: raw 23.0%, masking 24.6%, summary 24.8%; cost $0.51 → $0.46 masking, $0.51 summary. Qwen3-32B is the one configuration where summary was cheaper, because **masking** elongated its trajectories by 13% over raw. So for the model nearest ours, masking neither helped solve rate nor clearly won on cost.
+  - **[V]** (App. A, §5.2) Cost model: Gemini costs are Vertex API bills (which include cache discounts); Qwen costs are recomputed from Alibaba list prices, which for Qwen3-32B do **not** distinguish cache hits from misses. No configuration models a local engine's prefix cache, so the per-turn cache-reset cost of a rolling mask is unmeasured here. *Resolved:* the earlier [U] notes on both points.
 - *Masking Stale Observations Helps Search Agents — Until It Doesn't*, Zhang et al., EMNLP 2026 (preprint 2606.00408). https://arxiv.org/abs/2606.00408
   - **[A]** The gain from masking follows an inverted U against the model's no-management accuracy: little help when evidence is scarce, most help for mid-capacity models, collapse when the model is saturated.
   - **[A]** Masking trades tokens for turns. Models 4B–284B, search agents (not coding).
-  - [X] A 27B on our hard tier is plausibly "mid-capacity", the regime where masking helps.
+  - [X] A 27B on our hard tier is plausibly "mid-capacity", the regime where masking helps. But the Complexity Trap's own Qwen3-32B rows (above) did not show that help, so this stays a hypothesis for the A/B.
 - *SWE-agent*, Yang et al., NeurIPS 2024. https://arxiv.org/abs/2405.15793
-  - **[S]** Keeping only the last 5 observations (older ones collapsed to one line) scored 18.0% vs 15.0% with full history.
-  - **[S]** Linting guardrails, summarized search and a 100-line file viewer each beat alternatives in ablations.
+  - **[V]** (Table 3, §3) Keeping only the last 5 observations (older ones collapsed to one line) scored 18.0% vs 15.0% with full history, on a 300-instance SWE-bench Lite subset with GPT-4 Turbo.
+  - **[V]** (Table 3) Ablations: editing with linting 18.0 vs 15.0 without; summarized search 18.0 vs 12.0 iterative / 15.7 none; 100-line viewer 18.0 vs 14.3 (30 lines) / 12.7 (full file).
   - GPT-4-era models.
 
 **Systematic harness and compression studies from 2026 (larger N, more models).**
@@ -279,12 +283,12 @@ Current design (D-039): an isolated verdict call sees checklist + evidence + the
   - **[A]** **Making elided content recoverable "adds machinery models rarely use and yields no accuracy gain."**
   - Model identities include Claude 4.5-class models. A 27B may use a recall path even less [X].
 - *Beyond Token Savings: A Systematic Study of Context Compression in LLM Agents*, Satish, Sinha, Kawada, Yadwadkar (UT Austin), 2026. https://arxiv.org/abs/2609.32961
-  - **[A]** ~35,000 runs, three open-weight models.
+  - **[A]** ~35,000 runs, three open-weight models. **[V]** (§4, App.) They are Qwen3.5-35B-A3B, Devstral-Small-2-24B and GLM-4.7-Flash, on SWE-bench Verified (100 issues) and Terminal-Bench 1.0 in mini-swe-agent: all small, so this is among the most transferable studies here. It also reports that conclusions for one model did not carry over to another.
   - **[A]** On Terminal-Bench with Qwen, policies using ~1/3 of the tokens could take **20–80% longer** end to end.
   - **[A]** Compression changes the information available to later decisions.
 - *What Does Context Compression Cost an Agent?*, Liu, COLM 2026 workshop. https://arxiv.org/abs/2608.16370
   - **[A]** Compression can sharply raise the *reacquisition* cost (retrieval calls) while leaving completion statistically unchanged.
-  - **[S]** For GPT-5.5, retrieval calls went 21 → 64 with no significant completion change.
+  - **[V]** (abstract, §3.3) For GPT-5.5 at 5× compression, retrieval calls went 21.0 → 63.9 (p = .002) while completion went 80% → 85% (p = 1.0, n.s.). The other models are deepseek-v4-flash and qwen3.7-plus (hosted, large). Retrieval rose in all six model–regime cells; completion fell significantly only for DeepSeek at 10×.
 - *Toward Reliable Context Compression for Long-Horizon Agents*, Min et al., 2026. https://arxiv.org/abs/2608.06503
   - **[A]** Even when entities and progress labels are kept, agents lose their *local position*: they replay completed actions or overrun the terminal point.
 
@@ -337,6 +341,7 @@ Key architectural fact [X, from PI_API_NOTES §4/§9 and D-029]:
 - [X] Cost: one prefix reset per batch, comparable to a compaction, rather than one per turn. Thinking and tool-call structure stay intact.
 - This competes with or precedes LLM compaction (§4); the hybrid result suggests masking first and then summarizing [A].
 - **Conflict:** brief constraint 3 and D-029 permit `context_edit` only for "deliberate compaction-like operations". Record this explicitly as such an operation, with its own toggle, and measure the cache hit-rate dip.
+- **Evidence update (2026-10-05, D-053).** Verification weakened the case for R2.3 on our model class. The Complexity Trap's Qwen3-32B rows showed no solve-rate gain from masking (15.0% vs raw 17.0% non-thinking; 24.6% vs 23.0% thinking), summary was cheaper there, and masking lengthened trajectories by 13%. Their costs ignore local prefix caching. A local Qwen3-Coder-30B-A3B measurement (§8) found masking cut the prefix-hit rate from 96.5% to 50.8% and lengthened inference. Keep R2.3 deferred. Build it only if Phase 4 runs show context overflow or compaction-driven failures; then A/B it with prefix-hit rate, turns and wall-clock as co-primary metrics, and tune K (the paper found the window scaffold-specific).
 
 **R2.4 — Don't trust token savings alone.** Phase 4 acceptance (brief §8: "token reduction with no drop in success") should add **non-inferiority on turns and wall-clock**. Compression can raise latency 20–80% [Beyond Token Savings 2026] and multiply re-reads [Liu 2026] while completion looks unchanged.
 
@@ -358,11 +363,11 @@ Key architectural fact [X, from PI_API_NOTES §4/§9 and D-029]:
 **Same-model diagnosis has a low ceiling. Feedback quality is the bottleneck.**
 - *Is Self-Repair a Silver Bullet for Code Generation?*, Olausson, Inala, Wang, Gao, Solar-Lezama (MIT/Microsoft), ICLR 2024. https://arxiv.org/abs/2306.09896
   - **[A]** Self-repair is bottlenecked by the model's ability to give feedback on its own code; gains are modest once cost is counted.
-  - **[S]** Human feedback raised repair success 1.58× (33.3% → 52.6%).
+  - **[V]** (§1 contributions, §4.3) Replacing GPT-4's own feedback with a human programmer's raised repair success 1.58× (33.3% → 52.6%), on a subset of APPS with GPT-4.
   - Code Llama, GPT-3.5 and GPT-4 on HumanEval/APPS. Single-function tasks, not agents.
 - *Teaching LLMs to Self-Debug*, Chen, Lin, Schärli, Zhou, ICLR 2024. https://arxiv.org/abs/2304.05128
   - **[A]** Execution feedback plus explanation improves sample efficiency.
-  - **[S]** Gains plateau after about 2 iterations.
+  - **[V]** (§5.2.1, Fig. 6; App. on TransCoder) *Correction:* the gain comes almost entirely from the **first** debugging turn ("the accuracy improvement after one turn is within 0.1%"); successful debugging mostly ends within 3 turns. The snippet said "about 2 iterations". Models are Codex, GPT-3.5, GPT-4 and StarCoder on single-program tasks. Consistent with D-043's cap of 2 hints per signature; the second hint is the speculative one.
 - *Not the Silver Bullet: LLM-enhanced Programming Error Messages are Ineffective in Practice*, 2024. https://dl.acm.org/doi/10.1145/3689535.3689554
   - **[A]** With 106 humans fixing C bugs, GPT-4-enhanced messages beat compiler messages on time-to-fix in only 1 of 6 tasks.
   - **[A]** Expert-written messages beat both.
@@ -377,7 +382,7 @@ Key architectural fact [X, from PI_API_NOTES §4/§9 and D-029]:
   - **[A]** Failures are mostly epistemic, usually start within the first few steps, and stay hidden until recovery is impossible.
 - *Understanding Code Agent Behaviour*, ICSE 2026. https://arxiv.org/abs/2511.00197
   - **[A]** Failed trajectories are consistently longer and more variable.
-  - **[S]** 12–82% more steps; 72–81% of failures still found the right files.
+  - **[V]** (Finding 4, abstract) Failed trajectories were 12.6–82.5% longer depending on agent and benchmark (SWE-agent 12.6%/18.5%, Prometheus 56.6%/50.7%, OpenHands 31.0%/82.5% on Lite/Verified), and 72–81% of failures still localized the right files.
 - *Feedback That Backfires: Why Small Language Model Agents Repeat the Call They Just Watched Fail*, Gumaan, 2026. https://arxiv.org/abs/2608.23651
   - **[A]** Showing a verbatim failed call *raises* the chance of repeating it; the probability rose from 0.06 to 0.54.
   - **[A]** 83% of the effect comes from the call's surface form.
@@ -391,7 +396,7 @@ Key architectural fact [X, from PI_API_NOTES §4/§9 and D-029]:
 - *Online Monitoring and Corrective Steering of Programming Agents (LivePlan)*, Liu, Dehghan et al., 2026. https://arxiv.org/abs/2608.06701
   - **[A]** A rule-based monitor over trajectory graphs detects drift **without an LLM** and consults an advisor LLM only when it fires.
   - **[A]** Up to +15.2% (mean +9.9%) issue resolution over vanilla SWE-agent at $0.08 per instance.
-  - Models unknown [U].
+  - **[V]** (§5) Executors: DeepSeek-V3 and Gemini-2.5-Flash (+12.33 and +15.24 points). Large models.
 - *OpenHands StuckDetector*. https://docs.openhands.dev/sdk/guides/agent-stuck-detector
   - **[A]** Detects the same action–observation 4×, the same action–error 3×, monologue 3×, ping-pong alternation over 6 cycles, and context-window errors.
 - *pi-anti-doom-loop* (pi package). https://pi.dev/packages/pi-anti-doom-loop
@@ -444,9 +449,9 @@ Key architectural fact [X, from PI_API_NOTES §4/§9 and D-029]:
 ### 4(a) Key findings
 
 - *Factory: Evaluating Context Compression for AI Agents* (industry blog), 2025. https://factory.ai/news/evaluating-compression
-  - **[S]** Probe-based evaluation (factual recall, file tracking, task planning, reasoning chains) on long real sessions.
-  - **[S]** Factory's "anchored iterative summarization" (persistent sections for intent, file modifications, decisions and next steps, merged incrementally) scored 3.70 vs 3.44 (Anthropic) and 3.35 (OpenAI).
-  - **[S]** **Artifact tracking was the weakest dimension for all methods (~2.2–2.5/5).**
+  - **[V]** (read from the page, 2026-10-05) Four probe types on long real sessions: recall, artifact (file tracking), continuation (task planning), decision (reasoning). Graded by an LLM judge (GPT-5.2) on six dimensions.
+  - **[V]** (results table) Factory's anchored iterative summarization scored 3.70 overall vs 3.44 (Anthropic) and 3.35 (OpenAI).
+  - **[V]** (results table) **Artifact trail was the weakest dimension for all methods: 2.45 / 2.33 / 2.19 out of 5.** The page concludes that artifact preservation "needs specialized handling beyond general summarization", which is what D-044's facts-from-the-trace design does.
   - Vendor self-evaluation: treat it as a design hint, not a result.
 - *Claude Code compaction prompt* (practitioner-extracted, not an official source). https://gist.github.com/tassa-yoniso-manasi-karoto/1e6a1328cb75f4729d5ff4e9ec457134
   - **[S/U]** Nine sections: primary request and intent; key technical concepts; files and code sections; errors and fixes; problem solving; **all user messages**; pending tasks; current work; optional next step.
@@ -455,7 +460,7 @@ Key architectural fact [X, from PI_API_NOTES §4/§9 and D-029]:
 - *OpenHands condenser*. https://docs.openhands.dev/sdk/guides/context-condenser
   - **[A]** An LLM-summarizing condenser keeps recent events verbatim.
   - **[A]** Claims up to 2× per-turn cost reduction with no performance loss. Self-reported.
-- *The Complexity Trap* (above): summarization elongated trajectories by 13–15% **[S]**, and a hybrid of masking + summary is cheapest **[A]**.
+- *The Complexity Trap* (above): summarization elongated trajectories by 13–15% for Qwen3-Coder-480B and Gemini **[V]**, while for Qwen3-32B it was masking that elongated them (13%) **[V]**, and a hybrid of masking + summary is cheapest **[A]**.
 - *Toward Reliable Context Compression*, 2026 (above): agents lose their local position after compaction and replay completed actions **[A]**. Their TRACE method compares paired continuations to tune the compression prompt **[A]**.
 - *Slipstream*, Chen, Pan, Dai, Netravali, 2026. https://arxiv.org/abs/2605.08580
   - **[A]** Run compaction asynchronously while the agent keeps going on the uncompacted context, then validate the summary against the agent's actual next steps.
@@ -465,7 +470,7 @@ Key architectural fact [X, from PI_API_NOTES §4/§9 and D-029]:
   - **[A]** −26–54% peak tokens, and distillation to smaller compressors keeps >95% of performance.
 - *HiAgent*, Hu et al., ACL 2025. https://arxiv.org/abs/2408.09559
   - **[A]** Subgoal-chunked working memory: summarize a chunk once its subgoal completes.
-  - **[S]** 2× success, −35% context.
+  - **[V]** (§1, Table) 2× the success rate of the standard strategy on five AgentBoard tasks, context length −35.02%, steps −3.8, run time −19.42%. GPT-4 Turbo backbone.
   - Requires the main model to emit subgoals, which **violates the core thesis** (don't burden main).
 - *ReSum*, Wu et al. (Alibaba Tongyi), 2025. https://arxiv.org/abs/2509.13313
   - **[A]** Periodic summaries let web agents continue indefinitely, +4.5% average, training-free.
@@ -489,7 +494,7 @@ The LLM, with a fork-prefix or compact context, writes only:
 
 [X] Rationale: whatever is deterministic can't be dropped or invented, and keeping the LLM part small limits the summarizer-induced elongation the Complexity Trap reports.
 
-**R4.2 — Anchored, incremental summaries.** On a second or later compaction, `preparation.previousSummary` exists (PI_API_NOTES §9). Regenerate the deterministic sections from the trace, and have the LLM *update* sections 7–8 rather than rewrite from scratch. This is Factory's anchored approach [S] and ACE's anti-collapse principle (§5) [A].
+**R4.2 — Anchored, incremental summaries.** On a second or later compaction, `preparation.previousSummary` exists (PI_API_NOTES §9). Regenerate the deterministic sections from the trace, and have the LLM *update* sections 7–8 rather than rewrite from scratch. This is Factory's anchored approach [V] and ACE's anti-collapse principle (§5) [A].
 
 **R4.3 — Masking first, LLM compaction second.** If R2.3's retro-masking is on, pi's threshold compaction should fire less often, so measure that. The hybrid result says combining both is cheapest [A].
 
@@ -521,12 +526,12 @@ The LLM, with a fork-prefix or compact context, writes only:
   - **[A]** Induces reusable workflows: +24.6% and +51.1% relative success on Mind2Web and WebArena. GPT-4-class models.
 - *Dynamic Cheatsheet*, Suzgun et al., EACL 2026. https://aclanthology.org/2026.eacl-long.333/
   - **[A]** Large gains for strong models (e.g. GPT-4o Game of 24: 10% → 99%).
-  - **[A/S]** **Smaller models (GPT-4o-mini) gained little or declined**: they produce too few correct solutions to seed the memory and struggle to refine it.
+  - **[V]** (§4, Table 3; §5) **Smaller models (GPT-4o-mini, Claude 3.5 Haiku) gained little or declined**: GPT-4o-mini lost accuracy under some variants on AIME 2024 and stagnated or declined on GPQA-Diamond. The paper's reason is *generative competence*: small models produce correct solutions too rarely to seed the memory, and fail to retrieve and apply stored heuristics. *Nuance:* D-049 paraphrased this as "they self-judge poorly"; the paper blames solution quality, not judgment. Either way it supports admitting cards only from externally verified fixes. Tasks are math and puzzles, not code.
 - *ACE: Agentic Context Engineering*, Zhang et al. (Stanford, SambaNova, UC Berkeley), 2025. https://arxiv.org/abs/2510.04618 · https://github.com/ace-agent/ace
   - **[A]** Generator / Reflector / Curator with incremental delta updates and "grow-and-refine".
   - **[A]** Avoids "brevity bias" and "context collapse". +10.6% on agents (AppWorld), +8.6% finance.
-  - **[S]** Collapse example: an 18,282-token context at 66.7% accuracy was rewritten to 122 tokens and fell to 57.1%.
-  - **[S]** Uses DeepSeek-V3.1, so very large.
+  - **[V]** (§2.2, Fig. 2) Collapse example on AppWorld: at step 60 an 18,282-token context at 66.7% accuracy was rewritten in one step to 122 tokens and fell to 57.1%, *below* the 63.7% of no context at all. The case study is of Dynamic Cheatsheet-style monolithic rewriting.
+  - **[V]** (§4, Table 1) Main experiments use DeepSeek-V3.1 (671B) for generator, reflector and curator, so very large.
 - *ReasoningBank*, Ouyang et al. (Google), 2025. https://arxiv.org/abs/2509.25140
   - **[A]** Strategy-level memories from *both* successes and failures (counterfactual pitfalls); failures add value over success-only memory.
   - **[A]** Up to +34.2% success, −16% steps (with memory-aware test-time scaling).
@@ -537,12 +542,13 @@ The LLM, with a fork-prefix or compact context, writes only:
   - **[A]** Tested on four WebArena domains with Gemini 3 Flash, GPT-5.4-mini and **Qwen 3.6-27B**.
   - **[A]** **The vanilla actor matched or beat all three augmentation methods (memory, workflow, skills) in aggregate success, often with fewer tokens.**
   - **[A]** Gains vanish against budget-matched baselines. Web, not coding, but the same model class as ours.
+  - **[V]** (Table 1, §4) With Qwen 3.6-27B, average WebArena success: budget-matched vanilla actor 50.73%, AWM 46.15%, ASI 49.08%, ReasoningBank 47.62%; vanilla was also the most token-efficient. "Budget-matched" means a 15-step vanilla horizon vs 10 for the augmented methods. Three runs per domain. The augmented methods induce memory from the agent's own trajectories, judged by the model; none admits only externally verified lessons, so the result does not test D-049's design, but it sets the bar it must clear.
 - *SWE-Exp*, Chen et al., 2025. https://arxiv.org/abs/2507.23361
   - **[A]** An experience bank from successful and failed repair attempts.
-  - **[S]** SWE-bench Verified 42.0% (DeepSeek-V3) to 73.0% (Claude 4 Sonnet). Cross-repo transfer works when experience is abstracted.
+  - **[V]** (Table 1, §4.1) SWE-bench Verified Pass@1 42.0% with DeepSeek-V3-0324 and 73.0% with Claude 4 Sonnet. *Clarified:* these are absolute scores on two backbones, not a 42 → 73 gain. (Table 2) Disabling cross-repository experience abstraction costs 6.0 points (42.0 → 36.0, DeepSeek-V3), the largest ablation.
 - *Memento*, Zhou et al. (UCL, Huawei), 2025. https://arxiv.org/abs/2508.16153
   - **[A]** Case bank plus a *learned* case-selection policy (memory-based online RL).
-  - **[S]** +4.7–9.6 points out of distribution.
+  - **[V]** (abstract, Table) Case-based memory adds 4.7–9.6 absolute points on out-of-distribution deep-research tasks. GPT-4.1-class planner; not coding.
 - *MemQ*, 2026. https://arxiv.org/abs/2605.08374
   - **[A]** Q-values for memories with TD(λ) credit through a provenance graph.
   - Over-engineered for us now, but it confirms utility-weighted retrieval as the direction.
@@ -569,7 +575,7 @@ Brief §6.4 and D-018 already match the literature on several points: delta ops 
 
 **R5.4 — Budget the injection and count it.** The Qwen 3.6-27B result [A] says memory must beat a budget-matched baseline. Report memory tokens and the curator's background tokens in the eval's cost columns (D-033). The ~400-token cap in brief §6.4 is sensible.
 
-**R5.5 — No wholesale rewrites, ever** (already in the brief). The ACE collapse example [S] is the concrete failure. Make the curator's API accept only ADD / MERGE / SUPERSEDE / RETIRE ops, validated by schema.
+**R5.5 — No wholesale rewrites, ever** (already in the brief). The ACE collapse example [V] is the concrete failure. Make the curator's API accept only ADD / MERGE / SUPERSEDE / RETIRE ops, validated by schema.
 
 ### 5(c) What to measure
 
@@ -594,7 +600,7 @@ Brief §6.4 and D-018 already match the literature on several points: delta ops 
   - **[A]** When false positives cost more than abstaining, the optimal number of samples can be **below 10**.
 - *Scaling LLM Test-Time Compute Optimally…*, Snell et al. (Google DeepMind / Berkeley), ICLR 2025. https://arxiv.org/abs/2408.03314
   - **[A]** Compute-optimal allocation depends on problem difficulty.
-  - **[S]** Test-time compute substitutes for parameters mainly on easy and medium problems; on the hardest, scale wins.
+  - **[V]** (Fig. 1 right, §7) Against a ~14× larger pretrained model, compute-optimal test-time scaling of PaLM 2-S* wins on easy and intermediate MATH questions; on the hardest, and as inference load grows relative to pretraining, the larger model wins.
 - *Can 1B LLM Surpass 405B?*, Liu et al., 2025. https://arxiv.org/abs/2502.06703
   - **[A]** Yes on MATH and AIME **with a good PRM**; the optimal strategy depends on the policy, the PRM and difficulty.
   - Math with process reward models. Little bearing on agentic coding without a PRM [X].
@@ -604,7 +610,7 @@ Brief §6.4 and D-018 already match the literature on several points: delta ops 
   - **[A]** Sampling diverse natural-language *plans* beats sampling code (LiveCodeBench pass@200 77.0% vs 60.6%), because repeated samples are near-duplicates.
 - *R2E-Gym*, Jain et al., 2025. https://arxiv.org/abs/2504.07164
   - **[A]** On SWE-bench Verified with a **32B** open model: 34.4% Pass@1 → 51.0% Best@26 using a *hybrid* verifier (execution-based tests + execution-free judge).
-  - **[S]** Either verifier alone plateaued at ~43%.
+  - **[V]** (§4, Fig. 5) Execution-based and execution-free verifiers each saturate at ~42–43% (43.7% / 42.8%).
   - The most transferable result here, but it needs candidate patches *executed*.
 - *CodeMonkeys*, Ehrlich et al. (Stanford), 2025. https://arxiv.org/abs/2501.14723
   - **[A]** Selection by voting on model-generated tests plus a dedicated selection trajectory: 57.4% SWE-bench Verified with Claude 3.5 Sonnet + Qwen2.5-Coder-32B, ~$4.60 per issue.
@@ -643,8 +649,7 @@ D-015 restricts Phase 6 to K parallel *diagnoses or plans* (no file writes), jud
   - **[A]** 584 runs, open-weight models. **Identical runs of one agent–model pairing varied more than pairings differed from each other.**
   - **[A]** Separating them took tens to more than a hundred runs each.
 - *How to scale agentic evaluation: lessons from 200,000 SWE-bench runs*, AI21 (blog). https://www.ai21.com/blog/scaling-agentic-evaluation-swe-bench/
-  - **[S]** Single-run pass@1 varied 2.2–6.0 points. At temperature 0 the SD still exceeded 1.5 points because of infrastructure nondeterminism.
-  - **[S]** Detecting a 1-point gain took about 36 runs (attribution uncertain [U]).
+  - **[U]** Single-run pass@1 varied 2.2–6.0 points; at temperature 0 the SD still exceeded 1.5 points; detecting a 1-point gain took about 36 runs. (not accessible: the AI21 page, read in full on 2026-10-05, is about evaluation infrastructure and contains none of these numbers; their real source is unknown. Nothing in DECISIONS.md cites them. Use *Identical Runs, Different Results* [A] and our own paired MDE instead.)
 - *AgentLens: The Lucky Pass Problem*, Microsoft Research, 2026. https://arxiv.org/abs/2605.12925
   - **[A]** 0.5–23.2% of passing trajectories are "lucky passes" (blind retries, missing verification, brute force), depending on the model.
 - *Establishing Best Practices for Building Rigorous Agentic Benchmarks (ABC)*, Zhu et al., NeurIPS 2025. https://arxiv.org/abs/2507.02825
@@ -702,6 +707,24 @@ D-015 restricts Phase 6 to K parallel *diagnoses or plans* (no file writes), jud
 - Cost columns: main tokens, sidecar tokens, memory tokens, wall-clock, plus the Pareto plot.
 - Tamper detection in the check runner, and lucky-pass counts.
 
+## 8. Newer work (post-June 2026), verified
+
+A fresh search on 2026-10-05 for same-model verification, observation masking under prompt caching, memory for ≤32B coding agents and judge calibration on Qwen models. Only material results are listed, each read in the paper.
+
+- *EfficientAgent: What Makes KV Cache Offloading Work for Concurrent Agents?*, Shao et al. (HKUST, Huawei), 2026. https://arxiv.org/abs/2609.33762
+  - **[V]** (App., Table 13) Qwen3-Coder-30B-A3B on 8×RTX 3090 with GPU prefix caching, OpenHands condensers on SWE-bench Verified: observation masking cut mean KV utilization 52.85% → 29.15% but **dropped the prefix-hit rate from 96.5% to 50.80%**; recent-event truncation 60.85%; LLM summarization kept 92.15%. All three condensers lengthened per-instance inference.
+  - Local engine, a model near our size, a coding agent: the most transferable measurement of masking's cache cost we have. Masking there is per-turn (rolling), not batched, so it bounds the cost of the design R2.3 already rejects; a batched mask would reset less often.
+  - **Challenges** the Complexity Trap's cost conclusion for local inference, and **supports** keeping R2.3 deferred (D-042, D-053). Supports D-029's cache-stability rule.
+- *VibeMemBench: Evaluating Memory Systems for Coding Agents on Real Repository Coding Tasks*, Fan et al. (SIAT, Alibaba), 2026. https://arxiv.org/abs/2609.23570
+  - **[V]** (abstract, §5) 111 targets from 90 SWE-rebench V2 repos. Injecting experience already *verified by execution* raised resolution on four of five held-out solvers by 1.1–4.5 points and cut steps on all five. But when four existing memory systems had to build and retrieve experience from the same history, **11 of 12 solver–system pairings failed to beat memory-off**.
+  - Solvers are large hosted models (glm-5, deepseek-v4-pro, qwen3.8-max and others), so gains for a 27B are not shown.
+  - **Supports** D-049: useful experience exists, but self-built memory rarely delivers it; admission from verified fixes is the defensible narrow path. Expect a small effect; the AB_PLAN step 4 run is underpowered for 1–4 points (D-055).
+- *JEV-as-a-Judge: Accept When Confident, Escalate When Unsure*, Li et al. (CMU), 2026. https://arxiv.org/abs/2609.26550
+  - **[V]** (abstract, §4) A decision-only judge with label probabilities comes within 3 points of a frontier reasoning judge where the verdict "can be read off the text", but falls behind where it must be derived: code −12.9, math −14.3 points. Confidence-gated escalation recovers most of the gap.
+  - **[V]** (Table 3 control) Local Qwen3.5-27B, served without thinking, was among the first-stage judges; the authors note open-weight local judges' confidence "supports less acceptance".
+  - **Supports** R1.6 (thinking for the verdict) and R1.5 (don't gate on one call's confidence; escalate). Its escalation target is a stronger model, which Exocortex does not have (D-006); ours is the user.
+- Searched but not added: DreamBench-SWE (2608.20664), memory hygiene with deliberately non-inferable evidence, mostly null primary contrasts; self-verified distillation work (2605.26132), which needs training.
+
 ---
 
 ## Conflicts and amendments to existing decisions (for new D-entries)
@@ -723,12 +746,10 @@ No recommendation conflicts with D-006 (same model for sidecars). But the correl
 
 ## Things I could not verify
 
-- The Complexity Trap's Qwen3-32B row (solve rates and costs), and whether its cost model accounts for prompt-cache pricing.
-- Model identities in ECLoop, LivePlan and Beyond Token Savings (beyond "Qwen" in the latter).
-- The Factory numbers and the Claude Code compaction section list (secondary or extracted sources only).
-- The VERDI Qwen 3.5 27B logprob AUROC figure (from a search digest of the paper).
-- The AI21 run-count figures: which study the "36 runs for a 1-point gain" number belongs to.
-- Whether "post-2025 flagship" verbalized-confidence behaviour (2609.10996) applies to a 27B local model.
+*Updated 2026-10-05 after verification.* Resolved: the Complexity Trap's Qwen3-32B row and cost model (§2a), the Factory numbers (§4a), the VERDI figures (§1a), and model identities: **ECLoop** used GPT-5-mini and MiniMax-M2.5 under mini-swe-agent v2 [V: Table 1]; **LivePlan** used DeepSeek-V3 and Gemini-2.5-Flash executors (+12.33 and +15.24 points) [V: §5]; **Beyond Token Savings** used Qwen3.5-35B-A3B, Devstral-Small-2-24B and GLM-4.7-Flash [V]. Still open:
+- The AI21 run-count figures: not on the cited page; source unknown.
+- The Claude Code compaction section list (practitioner-extracted gist; not on the work list).
+- Whether verbalized confidence works for a 27B local judge. *2609.10996* tested proprietary models only [V: abstract, §3], so the paper cannot settle it; it is an A/B question (AB_PLAN step 2).
 
 ## Reference list (by section)
 
