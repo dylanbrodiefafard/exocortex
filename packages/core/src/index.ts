@@ -44,6 +44,7 @@ export {
 export { completeStructured, extractJson, StructuredOutputError } from "./inference/structured.ts";
 export { type ToJsonOptions, toJsonValue } from "./json.ts";
 export { type CommandOutput, killGroup, runProcess, runShellCommand } from "./modules/command.ts";
+export { callKey, type Loop, loopHistoryLength, MAX_LOOP_PERIOD, trailingLoop } from "./modules/loops.ts";
 export {
 	classifyErrorLine,
 	cleanTerminalOutput,

@@ -93,6 +93,8 @@ describe("computeTraceMetrics", () => {
 			compactionReplays: 0,
 			trimmedOutputs: 0,
 			trimmedRereads: 0,
+			stuckLoops: 0,
+			stuckLoopCalls: 0,
 			// The same failure twice with nothing after it: it never had the chance to recur.
 			recurringErrors: [{ occurrences: 2, hints: 0, after: "ended", fixed: false }],
 			sidecarTokensByModule: {},
@@ -105,6 +107,45 @@ describe("computeTraceMetrics", () => {
 			verifiedAfterLastEdit: null,
 			maxRepeatedFailures: 0, // the fixture's tool results carry no matching tool.call commands
 		});
+	});
+
+	it("counts stuck loops and the calls made inside them, per task (D-069)", () => {
+		let id = 0;
+		const call = (command: string, text: string) => {
+			id += 1;
+			return [
+				event("tool.call", { toolCallId: `c${id}`, toolName: "bash", input: { command } }),
+				event("tool.result", {
+					toolCallId: `c${id}`,
+					toolName: "bash",
+					isError: false,
+					exitCode: 0,
+					content: [{ type: "text", text }],
+				}),
+			];
+		};
+		const status = () => call("git status", "clean in 0.1s");
+		const events = [
+			event("user.input", { source: "interactive" }),
+			...status(),
+			...status(),
+			...status(), // loop 1 established
+			...status(), // +1 call inside it
+			...call("ls", "a b"),
+			...call("cat a", "1"),
+			...call("ls", "a b"),
+			...call("cat a", "1"),
+			...call("ls", "a b"),
+			...call("cat a", "1"), // loop 2 established
+			...call("ls", "a b"), // +1
+			event("user.input", { source: "extension" }),
+			...call("cat a", "1"), // +1: a continuation is the same task
+			event("user.input", { source: "interactive" }),
+			...call("ls", "a b"), // a new request starts over
+			...call("cat a", "2"),
+		];
+		expect(computeTraceMetrics(events)).toMatchObject({ stuckLoops: 2, stuckLoopCalls: 3 });
+		expect(computeTraceMetrics([...status(), ...status()])).toMatchObject({ stuckLoops: 0, stuckLoopCalls: 0 });
 	});
 
 	it("counts sidecar cost and failures, excluding cap and budget rejections", () => {

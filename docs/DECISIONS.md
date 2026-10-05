@@ -966,6 +966,34 @@ Open check: Exocortex's injected `custom_message` reaches ninfer as a second con
   - **Gates that check a sidecar's claims against evidence** (the verbatim-quote admission of D-060, the grounding gate of D-061, verified fixes in D-049). A strong model still states things that are not in its input; these cost no time. Loosening any of them is the owner's call, per gate.
 - **Follow-up:** the README still introduces Exocortex as help for "a weak local LLM".
 
+### D-069 — Triage also notices loops without an error, and asks for a hand-over when a loop goes on · accepted (2026-10-05; owner's request: patch the weakest module before the A/B runs; amends D-043)
+- **Why triage:** D-043 sees one kind of stuck agent, a failing result whose normalized error repeats. Every comparable project reads in source treats that as one case of several, and all of them also do something when their warning is ignored. Triage did neither.
+- **What the other projects do** (read in source, 2026-10-05):
+  - **OpenHands** (`software-agent-sdk` at `39d34ec`, `openhands/sdk/conversation/stuck_detector.py`): compares actions *and* observations. Stuck is the same action with the same observation 4 times, the same action erroring 3 times, an A-B-A-B-A-B alternation with matching observations, or 3 agent messages in a row. For the erroring action it nudges once per streak at the threshold and declares the agent stuck one repeat later.
+  - **Gemini CLI** (`fb972b2`, `packages/core/src/services/loopDetectionService.ts`): hashes tool name and arguments; a cycle of 1 to 5 calls repeated 5 times is a loop. It also looks for repeated text while streaming, and after 30 turns asks a model every 5 to 15 turns whether the agent is making progress, acting only at confidence 0.9. On the first detection it tells the model to step back (`core/client.ts`, `_recoverFromLoop`); on the second it stops the turn.
+  - **opencode** (`907b3bc5`, `packages/opencode/src/session/processor.ts`): the same tool with the same input 3 times running asks the user for permission (`doom_loop`).
+  - **Goose** (`5bd5e54`, `crates/goose/src/tool_monitor.rs`): counts consecutive identical calls against a configured maximum; the call past it fails the check.
+  - **Cline** (`afabc82`, `apps/cli/src/runtime/interactive/mistakes.ts`): at a limit of consecutive mistakes it asks the user to choose between "try a different approach" and "stop this run".
+- **Adopted:**
+  - **A loop is a call and its result repeating, error or not** (OpenHands' comparison; Gemini's cycles). Core's `callKey` hashes the tool, its exact input and its output; `trailingLoop` finds the last 1 to 5 calls repeated in a row. Comparing results is what makes it safe at 3 repeats: a batch of similar calls or a test run whose counts change is not a loop.
+  - **Run-to-run noise is ignored in the result:** durations, clock times, dates and addresses. Other numbers are kept, so "3 failed" then "2 failed" is progress.
+  - **One notice per loop, at `loopThreshold` (3) rounds** (OpenHands nudges once per streak). It goes on the next result that is not a failure; failures in the loop already get D-043's notices.
+  - **A hand-over at twice the threshold** (Gemini's second detection, Cline's question, opencode's permission). The notice then says to stop repeating and, failing a different approach, to stop and tell the user what was tried and what blocks it. D-043's repeated-error notice does the same from the 6th failure.
+- **Fitted to this project:**
+  - **Advisory only.** No call is blocked and no run is stopped (D-010): the others can stop the agent because they own its loop; a module here can only add text to a result. Asking the agent to hand over is the strongest step available without a host change.
+  - **Deterministic, no sidecar.** Nothing is added to a result until a loop exists, and then one line.
+  - **The same definition in the eval.** `stuckLoops` and `stuckLoopCalls` are computed from the original tool results with core's functions, so they mean the same with triage on or off. The report's "Stuck loops" section shows runs with a loop, their success, and calls made inside a loop.
+  - `loops: false` turns it off; counts reset on a new user request, as D-043's do.
+- **Open risks:**
+  - A loop that is legitimate waiting (polling a job with an unchanged status) gets the notice. It is one line and says to do something else or use the result.
+  - Exact comparison misses a loop whose output carries a changing counter or id that is not a time or address.
+  - The hand-over is a request. An agent that ignores it carries on.
+- **Not done:**
+  - **Stopping the run or asking the user from the host** (what Gemini, Goose and Cline do). It needs a new module action and a ruling on D-010. `stuckLoopCalls` per loop in the A/B is the evidence for whether the request is enough.
+  - **A sidecar that judges progress** (Gemini's periodic check). It could catch loops that never repeat exactly. Deferred until the deterministic count shows how many loops there are to find.
+  - **Repeated text in the model's own output** (Gemini's chanting check, OpenHands' monologue). Modules see results, not the stream.
+  - **Counting consecutive failures of any kind** (Cline). A build that fails differently each time is usually progress.
+
 ---
 
 ## Open questions (carried from brief §10, updated)

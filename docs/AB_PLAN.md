@@ -63,6 +63,7 @@ npm run eval -- --model ninfer/coding --tags error-recovery --config all-off,tri
   - **Primary:** repeated-error rate.
   - Self-Debug's gain came almost entirely from the first feedback turn (verified). Read the report's "Repeated errors" section (D-057): cap hints at 1 unless *stopped after hint 2* is a real share of *got hint 2* and beats `all-off`'s *gone after the 3rd time*.
   - **Secondary:** success, and turns from first failure to success.
+  - **Loops without an error (D-069):** read the report's "Stuck loops" section. *Calls made inside a loop*, per loop, should fall against `all-off`. If loops are common in `all-off` and triage does not shorten them, the notice is not enough and stopping the run from the host is the next step. If no run loops, the tasks do not exercise this.
   - `triage-hypotheses` also measures Phase 6 (D-050).
 - **Retro-masking (R2.3) is not in this plan** (D-053): for Qwen3-32B the source study showed no masking gain, and a local 30B lost half its prefix hits under masking. Revisit only if the compaction run below shows context-driven failures.
 - **Compaction:** the hard tasks rarely reach pi's compaction threshold. Force it with a small-context copy of the model:

@@ -1,9 +1,11 @@
 import {
 	type ChatRequestFingerprint,
+	callKey,
 	errorSignature as coreErrorSignature,
 	type SidecarCallRecord,
 	type StoredTraceEvent,
 	sharedPrefix,
+	trailingLoop,
 } from "@exocortex/core";
 
 /** Per-run metrics derived purely from the harness-agnostic trace (brief §7). */
@@ -60,6 +62,12 @@ export interface TraceMetrics {
 	/** Tool outputs the trimmer shortened, and how many of their saved full outputs the agent read back (R2.1). */
 	readonly trimmedOutputs?: number;
 	readonly trimmedRereads?: number;
+	/**
+	 * Stuck loops (D-069): times the agent's tool calls ended in the same call or short cycle with
+	 * the same results 3 times running, and the calls it went on to make inside such a loop.
+	 */
+	readonly stuckLoops?: number;
+	readonly stuckLoopCalls?: number;
 	/** One entry per error signature that occurred 2+ times: how the repeats and triage's hints went (D-057). */
 	readonly recurringErrors?: readonly RecurringError[];
 	/** Sidecar prompt + completion tokens by module (D-058). */
@@ -159,6 +167,7 @@ export function computeTraceMetrics(
 		lengthStops: stops(events, "length"),
 		compactionReplays: compactionReplays(events),
 		...trimmerRereads(events),
+		...stuckLoops(events),
 		recurringErrors: recurringErrors(events),
 		sidecarTokensByModule: tokensByModule(sidecarCalls),
 		sidecarCalls: sidecarCalls.length,
@@ -206,6 +215,40 @@ function compactionReplays(events: readonly StoredTraceEvent[]): number {
 		passedLast.set(command, ok);
 	}
 	return replays;
+}
+
+/** Repeats that make a loop: triage's default threshold, so the metric counts what triage would flag. */
+const STUCK_LOOP_REPEATS = 3;
+
+/**
+ * Loops by the definition triage uses (core's `trailingLoop`), from the original tool results, so
+ * the count is the same with triage on or off. `stuckLoopCalls` is what a notice can save: the
+ * calls made after a loop was established and before it broke.
+ */
+function stuckLoops(events: readonly StoredTraceEvent[]): { stuckLoops: number; stuckLoopCalls: number } {
+	const inputs = new Map<string, unknown>();
+	let keys: string[] = [];
+	let inLoop = false;
+	let loops = 0;
+	let calls = 0;
+	for (const e of events) {
+		const data = record(e.data);
+		if (e.kind === "tool.call") inputs.set(String(data["toolCallId"]), data["input"]);
+		// A new request from the user starts a new task, as in triage.
+		if (e.kind === "user.input" && data["source"] !== "extension") {
+			keys = [];
+			inLoop = false;
+		}
+		if (e.kind !== "tool.result") continue;
+		keys.push(callKey(String(data["toolName"]), inputs.get(String(data["toolCallId"])), contentText(data["content"])));
+		if (!trailingLoop(keys, STUCK_LOOP_REPEATS)) inLoop = false;
+		else if (inLoop) calls += 1;
+		else {
+			inLoop = true;
+			loops += 1;
+		}
+	}
+	return { stuckLoops: loops, stuckLoopCalls: calls };
 }
 
 /** Research R2.1: the agent reading a saved full output back means the trimmer cut something it needed. */

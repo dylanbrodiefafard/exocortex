@@ -149,6 +149,7 @@ export function renderMarkdown(records: readonly RunRecord[], title: string): st
 	lines.push(
 		...verdictSection(summaries),
 		...recurringSection(records, configs),
+		...loopSection(records, configs),
 		...trimmerSection(records, configs),
 		...contextSection(records, configs),
 		...repeatSection(records, summaries),
@@ -246,6 +247,35 @@ function trimmerSection(records: readonly RunRecord[], configs: readonly string[
 			.map((r) => `| ${r.config} | ${r.trimmed} | ${r.reread} (${pct(r.reread / r.trimmed)}) |`),
 		"",
 		"*Read back* counts trimmed outputs whose saved full copy the agent later opened (its path appears in a later tool call). Each one is a sign the trimmer cut something the agent needed: token savings that come with many read-backs are not savings (research R2.1, R2.4).",
+	];
+}
+
+/** Loops without progress per config (D-069): what triage's loop notices are there to cut short. */
+function loopSection(records: readonly RunRecord[], configs: readonly string[]): string[] {
+	const looped = (r: RunRecord) => (r.metrics?.stuckLoops ?? 0) > 0;
+	const heading = ["", "## Stuck loops", ""];
+	if (!records.some(looped))
+		return [...heading, "No run repeated a call or a short cycle of calls with the same results 3 times running."];
+	return [
+		...heading,
+		"| config | runs with a loop | success with a loop | loops | calls made inside a loop | per loop |",
+		"|---|---|---|---|---|---|",
+		...configs.map((config) => {
+			const runs = records.filter((r) => r.config === config && r.metrics);
+			const stuck = runs.filter(looped);
+			const loops = sum(stuck.map((r) => r.metrics?.stuckLoops ?? 0));
+			const calls = sum(stuck.map((r) => r.metrics?.stuckLoopCalls ?? 0));
+			return `| ${[
+				config,
+				`${stuck.length}/${runs.length}`,
+				stuck.length === 0 ? "—" : `${stuck.filter((r) => r.success).length}/${stuck.length}`,
+				loops,
+				calls,
+				loops === 0 ? "—" : (calls / loops).toFixed(1),
+			].join(" | ")} |`;
+		}),
+		"",
+		"A *loop* is the same tool call, or the same cycle of up to 5 calls, returning the same results 3 times in a row, counted from the original outputs so the definition is the same with triage on or off. *Calls made inside a loop* are the ones after that point and before the agent did something else: the turns a notice can save. Triage speaks at the 3rd round and again at the 6th, so compare *per loop* against the baseline row; a loop that ends in a failing command also shows under *Repeated errors*.",
 	];
 }
 

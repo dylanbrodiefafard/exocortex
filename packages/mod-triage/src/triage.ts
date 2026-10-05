@@ -1,12 +1,15 @@
 import {
+	callKey,
 	cleanTerminalOutput,
 	type ExoModule,
 	errorSignature,
 	firstErrorLine,
 	loadPrompt,
+	loopHistoryLength,
 	type ModuleContext,
 	SIDECAR_MAX_TOKENS,
 	type ToolResultDraft,
+	trailingLoop,
 	ungroundedReferences,
 } from "@exocortex/core";
 import { Type } from "typebox";
@@ -50,6 +53,10 @@ interface TaskState {
 	readonly hints: Map<string, string[]>;
 	readonly recent: string[];
 	readonly hypothesized: Set<string>;
+	/** Every tool call of the task with its result, oldest first, as far back as a loop can reach. */
+	readonly calls: { readonly key: string; readonly label: string }[];
+	/** Notices given for the loop the calls now end in: 0 none, 1 the warning, 2 the hand-over. */
+	loopLevel: number;
 }
 
 /**
@@ -57,6 +64,10 @@ interface TaskState {
  * buried first error (deterministic); on a repeat of the same normalized failure append a
  * runtime notice and, optionally, a grounded two-sentence sidecar diagnosis; past the loop
  * threshold the notice becomes a stronger, still advisory, warning. Never blocks a tool call.
+ *
+ * It also notices going round in circles without an error (D-069): the same call returning the
+ * same result, or a short cycle of calls ending the same way each round. One notice when the loop
+ * is established, one more that tells the agent to hand over to the user if it goes on.
  */
 export function createTriage(raw: Readonly<Record<string, unknown>>, ctx: ModuleContext): ExoModule {
 	const { settings, problems } = parseSettings(raw);
@@ -65,6 +76,9 @@ export function createTriage(raw: Readonly<Record<string, unknown>>, ctx: Module
 	let task: TaskState = newTask();
 	let repeats = 0;
 	let hintsGiven = 0;
+	let loops = 0;
+	/** Twice the threshold is where a notice becomes the hand-over. */
+	const handOverAt = settings.loopThreshold * 2;
 
 	return {
 		id: TRIAGE_ID,
@@ -81,10 +95,14 @@ export function createTriage(raw: Readonly<Record<string, unknown>>, ctx: Module
 				`${command} → ${tool.isError || (tool.exitCode ?? 0) !== 0 ? `exit ${tool.exitCode ?? "error"}` : "ok"}`,
 			);
 			if (task.recent.length > RECENT_COMMANDS) task.recent.shift();
+			task.calls.push({ key: callKey(tool.toolName, tool.input, tool.output), label: command });
+			if (task.calls.length > loopHistoryLength(handOverAt)) task.calls.shift();
+			// The loop ended: a later one starts over with its first notice.
+			if (!currentLoop()) task.loopLevel = 0;
 		},
 
 		async rewriteToolResult(draft, signal) {
-			if (!isFailure(draft) || isBenign(draft, settings)) return undefined;
+			if (!isFailure(draft) || isBenign(draft, settings)) return noProgress(draft);
 			const signature = errorSignature(draft.toolName, draft.exitCode, draft.output);
 			const count = (task.counts.get(signature) ?? 0) + 1;
 			task.counts.set(signature, count);
@@ -99,7 +117,7 @@ export function createTriage(raw: Readonly<Record<string, unknown>>, ctx: Module
 				};
 			}
 			repeats += 1;
-			const notice = repeatNotice(count, first?.line, settings.loopThreshold);
+			const notice = repeatNotice(count, first?.line, settings.loopThreshold, handOverAt);
 			const hypotheses =
 				count >= settings.loopThreshold ? await hypothesize(signature, count, draft, signal) : undefined;
 			if (hypotheses) {
@@ -118,9 +136,38 @@ export function createTriage(raw: Readonly<Record<string, unknown>>, ctx: Module
 		},
 
 		status() {
-			return repeats === 0 ? TRIAGE_ID : `${TRIAGE_ID} (${repeats} repeats, ${hintsGiven} hints)`;
+			if (repeats === 0 && loops === 0) return TRIAGE_ID;
+			return `${TRIAGE_ID} (${repeats} repeats, ${hintsGiven} hints${loops > 0 ? `, ${loops} loops` : ""})`;
 		},
 	};
+
+	function currentLoop() {
+		return settings.loops
+			? trailingLoop(
+					task.calls.map((c) => c.key),
+					settings.loopThreshold,
+				)
+			: undefined;
+	}
+
+	/**
+	 * A result that is not a failure, at the end of a loop: says so once, and once more at twice the
+	 * threshold. Failures in a loop get their own notice above, so the level only rises here.
+	 */
+	function noProgress(draft: ToolResultDraft) {
+		const loop = currentLoop();
+		// Results can arrive out of order when calls ran in parallel: only speak for the latest.
+		if (!loop || task.calls.at(-1)?.key !== callKey(draft.toolName, draft.input, draft.output)) return undefined;
+		const level = loop.repeats >= handOverAt ? 2 : 1;
+		if (level <= task.loopLevel) return undefined;
+		task.loopLevel = level;
+		loops += 1;
+		const cycle = task.calls.slice(-loop.period).map((c) => c.label);
+		return {
+			text: `${draft.current}\n${loopNotice(loop.repeats, cycle, level === 2)}`,
+			note: `no progress ×${loop.repeats}${loop.period > 1 ? ` (cycle of ${loop.period})` : ""}`,
+		};
+	}
 
 	function promptVars(count: number, draft: ToolResultDraft) {
 		return {
@@ -268,7 +315,15 @@ function similarity(a: ReadonlySet<string>, b: ReadonlySet<string>): number {
 }
 
 function newTask(): TaskState {
-	return { counts: new Map(), hintCalls: new Map(), hints: new Map(), recent: [], hypothesized: new Set() };
+	return {
+		counts: new Map(),
+		hintCalls: new Map(),
+		hints: new Map(),
+		recent: [],
+		hypothesized: new Set(),
+		calls: [],
+		loopLevel: 0,
+	};
 }
 
 function isFailure(draft: ToolResultDraft): boolean {
@@ -303,12 +358,32 @@ function commandOf(input: ToolResultDraft["input"], toolName: string): string {
  * Describes the repeat at runtime instead of echoing the failed call back (research R3.3), and
  * escalates at the loop threshold (R3.4).
  */
-function repeatNotice(count: number, errorLine: string | undefined, loopThreshold: number): string {
+function repeatNotice(count: number, errorLine: string | undefined, loopThreshold: number, handOverAt: number): string {
 	const same = errorLine ? ` with the same error (${clip(errorLine)})` : " the same way";
+	if (count >= handOverAt) {
+		return `[exo triage: this has now failed ${count} times${same}. ${HAND_OVER}]`;
+	}
 	if (count >= loopThreshold) {
 		return `[exo triage: this has now failed ${count} times${same}. The current approach is not working: stop retrying it, re-read the code around the error and question the assumption behind the last changes before the next attempt.]`;
 	}
 	return `[exo triage: this failed again${same}; it is the ${ordinal(count)} time this task. Repeating the same fix is unlikely to help: change something first.]`;
+}
+
+/** What a loop that survived its first warning is told: the agent cannot be stopped (D-010), so it is asked to stop. */
+const HAND_OVER =
+	"Stop repeating it. If you cannot find a different approach, stop and tell the user what you tried and what is blocking you.";
+
+/** Describes a loop of calls that keep ending the same way, without an error to point at (D-069). */
+function loopNotice(repeats: number, cycle: readonly string[], handOver: boolean): string {
+	const what =
+		cycle.length === 1
+			? `this exact call has now returned the same result ${repeats} times in a row`
+			: `the same ${cycle.length} calls (${cycle.map((c) => clip(c, 60)).join(" → ")}) have now run ${repeats} times in a row with the same results each time`;
+	const advice =
+		cycle.length === 1
+			? "Running it again will not change the result: use what it already shows, or do something different."
+			: "This loop is not making progress: change the approach before running them again.";
+	return `[exo triage: ${what}. ${handOver ? HAND_OVER : advice}]`;
 }
 
 /** The first error with context plus the output's tail: what a diagnosis needs, bounded. */

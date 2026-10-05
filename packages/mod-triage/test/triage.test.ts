@@ -111,6 +111,17 @@ describe("triage", () => {
 		expect(calls).toBe(1);
 	});
 
+	it("asks for a hand-over to the user once the failure has outlived the loop warning", async () => {
+		const { triage } = setup({ sidecar: false });
+		const texts: string[] = [];
+		for (let i = 0; i < 6; i++) texts.push((await fail(triage, draft(RUST_ERROR)))?.text ?? "");
+		expect(texts[4]).toContain("this has now failed 5 times");
+		expect(texts[4]).toContain("stop retrying it");
+		expect(texts[5]).toContain(
+			"this has now failed 6 times with the same error (error[E0502]: cannot borrow `self.stack` as mutable). Stop repeating it. If you cannot find a different approach, stop and tell the user what you tried and what is blocking you.]",
+		);
+	});
+
 	it("shows the second hint what the first one said, and drops it when it only repeats it", async () => {
 		const prompts: string[] = [];
 		const replies = [
@@ -247,6 +258,97 @@ describe("triage", () => {
 		const { triage } = setup({ hypotheses: 2, sidecar: false }, () => ({ hypothesis: "", check: "" }));
 		for (let i = 0; i < 2; i++) await fail(triage, draft(RUST_ERROR));
 		expect((await fail(triage, draft(RUST_ERROR)))?.note).toBe("repeat 3");
+	});
+
+	describe("loops without an error (D-069)", () => {
+		const ok = (command: string, output: string) => draft(output, { input: { command }, isError: false, exitCode: 0 });
+		const read = (path: string, output: string) =>
+			draft(output, { toolName: "read", input: { path }, isError: false, exitCode: null });
+
+		it("says once that the same call keeps returning the same result, then asks for a hand-over", async () => {
+			const { triage, t } = setup({}, () => ({ diagnosis: "x", next_action: "y" }));
+			const results: Awaited<ReturnType<typeof fail>>[] = [];
+			for (let i = 0; i < 7; i++) results.push(await fail(triage, read("src/lib.rs", "fn main() {} // same")));
+			expect(results.map((r) => r?.note)).toEqual([
+				undefined,
+				undefined,
+				"no progress ×3",
+				undefined,
+				undefined,
+				"no progress ×6",
+				undefined,
+			]);
+			expect(results[2]?.text).toBe(
+				"fn main() {} // same\n[exo triage: this exact call has now returned the same result 3 times in a row. Running it again will not change the result: use what it already shows, or do something different.]",
+			);
+			expect(results[5]?.text).toContain(
+				"returned the same result 6 times in a row. Stop repeating it. If you cannot find a different approach, stop and tell the user",
+			);
+			// Deterministic: no sidecar is asked.
+			expect(t.requests).toEqual([]);
+			expect(triage.status?.()).toBe("triage (0 repeats, 0 hints, 2 loops)");
+		});
+
+		it("ignores run times in the output, but not a result that changed", async () => {
+			const { triage } = setup();
+			await fail(triage, ok("npm test", "12 passed in 1.2s"));
+			await fail(triage, ok("npm test", "12 passed in 0.9s"));
+			expect((await fail(triage, ok("npm test", "12 passed in 1.4s")))?.note).toBe("no progress ×3");
+			const changing = setup().triage;
+			await fail(changing, ok("npm test", "10 passed"));
+			await fail(changing, ok("npm test", "11 passed"));
+			expect(await fail(changing, ok("npm test", "12 passed"))).toBeUndefined();
+		});
+
+		it("names a cycle of calls that keep ending the same way, on a result that is not a failure", async () => {
+			const { triage } = setup({ sidecar: false });
+			const edit = () =>
+				draft("Could not find the exact text in src/lib.rs", {
+					toolName: "edit",
+					input: { path: "src/lib.rs", oldText: "a", newText: "b" },
+					isError: false,
+					exitCode: null,
+				});
+			const notes: (string | undefined)[] = [];
+			for (let round = 0; round < 3; round++) {
+				notes.push((await fail(triage, edit()))?.note);
+				notes.push((await fail(triage, draft(RUST_ERROR)))?.note);
+			}
+			// The failing build gets the repeated-error notices; the loop is named on the next edit.
+			expect(notes).toEqual([undefined, undefined, undefined, "repeat 2", undefined, "repeat 3"]);
+			const next = await fail(triage, edit());
+			expect(next?.note).toBe("no progress ×3 (cycle of 2)");
+			expect(next?.text).toContain(
+				"[exo triage: the same 2 calls (cargo build → edit src/lib.rs) have now run 3 times in a row with the same results each time. This loop is not making progress: change the approach before running them again.]",
+			);
+			expect(await fail(triage, ok("git status", "clean"))).toBeUndefined();
+		});
+
+		it("starts over after the loop breaks or the user asks for something new, and can be turned off", async () => {
+			const { triage } = setup();
+			const same = () => fail(triage, read("a.rs", "x"));
+			await same();
+			await same();
+			expect((await same())?.note).toBe("no progress ×3");
+			await fail(triage, read("b.rs", "y"));
+			await same();
+			await same();
+			expect((await same())?.note).toBe("no progress ×3");
+			triage.onUserTurn?.({ text: "now do something else", origin: "user" });
+			await same();
+			expect(await same()).toBeUndefined();
+
+			const off = setup({ loops: false }).triage;
+			for (let i = 0; i < 5; i++) expect(await fail(off, read("a.rs", "x"))).toBeUndefined();
+		});
+
+		it("speaks only for the latest result when parallel calls finish out of order", async () => {
+			const { triage } = setup();
+			const a = read("a.rs", "x");
+			for (let i = 0; i < 3; i++) triage.onToolResult?.(a);
+			triage.onToolResult?.(read("b.rs", "y"));
+			expect(await triage.rewriteToolResult?.(a, signal)).toBeUndefined();
+		});
 	});
 
 	it("reports invalid settings", () => {

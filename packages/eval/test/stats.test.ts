@@ -271,6 +271,22 @@ describe("report", () => {
 		expect(renderMarkdown([run("a", "all-off", true)], "t")).not.toContain("## Repeated errors");
 	});
 
+	it("shows loops without progress and the calls made inside them per config (D-069)", () => {
+		const looped = (taskId: string, config: string, success: boolean, stuckLoops: number, stuckLoopCalls: number) =>
+			run(taskId, config, success, { metrics: { ...computeTraceMetrics([]), stuckLoops, stuckLoopCalls } });
+		const markdown = renderMarkdown(
+			[
+				looped("a", "all-off", false, 2, 9),
+				looped("b", "all-off", true, 0, 0),
+				looped("a", "triage", true, 1, 1),
+				looped("b", "triage", true, 0, 0),
+			],
+			"t",
+		);
+		expect(markdown).toContain("| all-off | 1/2 | 0/1 | 2 | 9 | 4.5 |");
+		expect(markdown).toContain("| triage | 1/2 | 1/1 | 1 | 1 | 1.0 |");
+	});
+
 	it("counts compactions, overflows and the failures that came with them (D-059)", () => {
 		const pressure = (
 			taskId: string,
@@ -290,6 +306,7 @@ describe("report", () => {
 			"t",
 		);
 		expect(markdown).toContain("## Context pressure");
+		expect(markdown).toContain("## Stuck loops\n\nNo run repeated a call");
 		expect(markdown).toContain("| all-off | 1/3 | 0/1 | 1/2 | 0/2 | 2 | 1 | 2 | 0 | 2 |");
 		expect(markdown).toContain("| compaction | 2/2 | 2/2 | — | 1/2 | 0 | 0 | 0 | 1 | 0 |");
 	});

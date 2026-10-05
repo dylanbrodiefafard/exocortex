@@ -7,6 +7,11 @@ const SettingsSchema = Type.Object(
 		buriedAfterLines: Type.Integer({ minimum: 0, default: 20 }),
 		/** From this many repeats of one failure, the notice turns into a loop warning (research R3.4). */
 		loopThreshold: Type.Integer({ minimum: 2, default: 3 }),
+		/**
+		 * Also notice loops without an error (D-069): the same call with the same result, or a short
+		 * cycle of calls, `loopThreshold` times in a row. Twice that, the notice asks for a hand-over.
+		 */
+		loops: Type.Boolean({ default: true }),
 		/** Ask a sidecar for a short diagnosis on repeated failures (research R3.1: never on the first). */
 		sidecar: Type.Boolean({ default: true }),
 		maxHintsPerSignature: Type.Integer({ minimum: 0, default: 2 }),
