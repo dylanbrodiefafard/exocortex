@@ -758,6 +758,93 @@ Open check: Exocortex's injected `custom_message` reaches ninfer as a second con
 - **Limit:** a failure after compaction is not proof that compaction caused it. Runs that compact are the long, hard ones, so compare the column across configs on the same tasks.
 - **Retro-masking stays unbuilt.**
 
+### D-060 — Memory learns the user's working preferences and adds the ones a prompt leaves unsaid · accepted (2026-10-05; owner's request; builds the `preference` card deferred in D-049)
+- **Goal:** if the user likes TDD and a later prompt does not mention it, the agent is told anyway.
+- **Admission: the user's own words are the external signal.** D-049 admits pitfall cards only on a verified fix because a small model's opinion of its own work is unreliable (D-055). The equivalent for preferences is that the user said it. A background sidecar reads each message the user typed and *proposes* preferences; code decides (`admitPreference`):
+  - the proposal's quote must appear in the message verbatim, or nothing is admitted;
+  - a one-off ("this time", "for now") neither states nor withdraws a preference;
+  - the rule may name no file or symbol the message does not (the guidance gate, R3.5);
+  - "same as" and "replaces" count only when they point at a preference the sidecar was shown.
+- **What is never read:** the agent's messages, extension-sent prompts, and accepted supervisor suggestions (the host now marks those `origin: "suggestion"`).
+- **When a preference applies in a repo** (`activePreferences`), any one of:
+  - the user said it as a standing rule here ("always", "never", "from now on", "I prefer" …). Code decides this from the quoted sentence; the model's opinion is not asked;
+  - the user said it in `preferenceMinSessions` (default 2) separate sessions here. One task's instruction is not a preference; the same instruction in a second session is;
+  - the user said it in 2+ repos. It is then about the user, not the repo (D-018's promotion rule).
+- **Injection (hot path, no LLM):** on a typed prompt, the applying preferences that are not already in the conversation and that the prompt does not state itself (it carries ≥60% of the rule's keywords) are added as one `exo.memory` message right after the prompt.
+  - At most `maxPreferences` (5) and `maxPreferenceChars` (900, about 225 tokens).
+  - The wording says the request wins on conflict.
+  - It is shown to the user (`display: true`): text added on their behalf should be visible.
+  - Each preference is added once per conversation, and again after a compaction, since the summary may drop it.
+  - Prompts under 4 words ("thanks", "go on") get nothing.
+- **Store:** `preferences` and `preference_sightings` tables in the memory store (migration 2). A preference is global; its sightings (repo, session, standing, the user's quote) say where it applies. Delta ops only (R5.5): ADD, MERGE (a sighting), RETIRE. A withdrawal ("stop writing tests first") retires; nothing is deleted.
+- **User control:** `/exo memory preferences` lists them; `/exo memory forget <id>` retires one.
+- **Host changes** (harness-agnostic, in `ExoModule`):
+  - `contextForUserTurn(turn)`: text for one persisted custom message after the user's prompt, returned from pi's `before_agent_start` (D-029's mechanism, first use). 2 s budget.
+  - `onCompacted()`, `command(args)`, and `UserTurn.origin: "suggestion"`.
+- **Off by default** (`memory.preferences: false`, D-052). It is not in the memory A/B: the fixtures repeat one prompt per task, so every task instruction would look like a repeated preference. Its evidence is daily use (D-014): `npm run trace -- stats` shows `preferences_added`, and `/exo memory preferences` shows what was learned.
+- **Verified without a model:** a real-pi integration test shows the message lands after the prompt and that the next request's prefix is unchanged.
+- **Open risks:**
+  - The preference reaches the model as a second consecutive `user` message. Whether ninfer's chat template accepts that is still open question 14.
+  - Paraphrases are merged by the sidecar's "same as" or by word overlap; with neither, one preference can be stored twice and each copy waits for its own second session. Embeddings (D-026) would fix that.
+  - No helped/hurt accounting yet. A preference the user keeps having to repeat is evidence that injection is not working, not that the preference is wrong.
+- **Not done:** the supervisor does not check preferences. R1.7's `implied` criteria are the place for it: a preference could lower `complete` to `uncertain`, never produce `incomplete` on its own.
+
+### D-061 — Pre-A/B improvement pass over every module · accepted (2026-10-05; owner's request, before the runs in AB_PLAN)
+- **Context:** no A/B has run yet, and every module is off by default, so fixing a module's behaviour now does not change a default (D-052) and does not invalidate a result. Each item below was found by reading the module against its own D-entry and the research.
+- **Supervisor:**
+  - **New files were invisible to the judge.** `git diff` leaves out untracked files, so for "add a module" tasks the verdict saw file names only, the stub and test-tampering signals saw nothing, and a continuation that only edited new files counted as "no progress" (two of those stop the supervisor). Evidence now includes each untracked file as a "new file" diff: up to 12 files, 6,000 characters each, smallest first so one large file cannot crowd out the rest.
+  - **Stale failures.** The evidence showed the output of the last failing command even when that command had since passed. It is now shown only if the command never passed again.
+- **Triage:**
+  - **The second hint must differ from the first** (prompt `diagnose.v2`). The sidecar is shown the advice already given and told it did not work; a hint that repeats an earlier one (word overlap > 0.6) is dropped. The cap of 2 (D-043) now counts sidecar calls. This is what makes D-057's "stopped after hint 2" a fair test.
+  - **Hints know which files were edited.** The recent-actions list showed `edit → ok`; it now shows `edit src/lib.rs → ok`.
+- **Trimmer:**
+  - **Budget.** A trimmed result is capped at `maxChars` (24,000): above it the error windows are halved, down to 4, so many long error lines cannot leave a "trimmed" output several times `minChars`.
+  - **Read-backs are measured** (R2.1, R2.4). The saved full-output path goes into the rewrite's trace event (`ToolRewrite.details`), and the report's "Trimmed outputs" section counts how many saved outputs the agent later opened.
+- **Compaction:**
+  - **Grounding gate on the narrative** (R3.5). Once the transcript is gone the agent cannot check a name. Dead ends and key facts naming a file or symbol found nowhere in the transcript or the workspace are dropped, and so is such a next step.
+  - **Accepted suggestions stay in the requests list**: they carry what was still missing.
+  - **Replay rate** (R4.4): the report counts compactions after which one of the agent's next two commands re-ran something that had already passed.
+- **Memory:** a fix the lesson sidecar calls not reusable (a typo, a one-off) makes no card. Before, it got a deterministic card anyway.
+- **All modules:** an accepted suggestion (`origin: "suggestion"`) continues the task. Triage keeps its repeat counts, the trimmer keeps the original goal, and memory does not close the task.
+- **Considered and left alone:**
+  - Supervisor: the in-loop check (R1.8) and thinking by default (waits for `supervisor-think`).
+  - Triage: resetting repeat counts after a pass. A regression to an old error is still a repeat.
+  - Trimmer: de-duplicating a re-run's identical output against the earlier copy. It would need the agent to trust a pointer to earlier context.
+  - Retro-masking (D-053).
+
+### D-062 — Embeddings for memory, and three judgements moved from patterns to the sidecar · accepted (2026-10-05; owner's call; implements D-026's "later", amends D-060 and D-039)
+- **Context:** the owner prefers an LLM call wherever it gives a much better answer than pattern matching, and will run an embedding model on the CPU. D-026 had deferred embeddings until recall was shown to be the bottleneck; this is the owner overriding that wait.
+- **Principle kept:** the model proposes or ranks; code still verifies anything that is admitted (verbatim quotes, the guidance gate, ids that must be in the offered list). Exact keys stay deterministic: error signatures, evidence gathering, verified fixes.
+- **Embeddings server:** new top-level config `embeddings: { baseUrl, model, apiKey?, timeoutMs }` for any OpenAI-compatible `/embeddings` endpoint.
+  - `createEmbedder` in core returns unit vectors and never throws: a missing, slow or broken server yields undefined, and every caller falls back to its keyword path.
+  - It is its own small client, not `InferenceClient.embed()` as D-026 sketched: it has a different server, no pool slots and no chat features.
+  - Modules get it as `ModuleContext.embedder()`. `/exo ping` checks it. The eval passes the user's `embeddings` config through, like `engine` and `pool`.
+- **Storage:** a `vectors` table in the memory store (migration 3): `(kind, ref_id, model) → Float32 blob`. Search is brute-force cosine in process. No vector database: the store holds hundreds of rows. Vectors are keyed by model, so changing the embedding model re-embeds lazily without mixing spaces.
+- **No knowledge graph.** The relations in use (preference → sightings → repo and session; card → signature → repo) are plain tables. Reconsider with `procedure`/`fact` cards linked to files and symbols.
+- **Where embeddings are used (memory only, so far):**
+  - **Pitfall recall.** Exact signature still wins. Otherwise the keyword matches are joined by cards whose trigger is at least `minSimilarity` (0.85) similar to the failing output's first error line. Cards are embedded when learned; older ones are backfilled in the background the first time they are needed. Hot-path deadline `embedTimeoutMs` (1.5 s).
+  - **Preference identity.** A proposed rule at least `preferenceSimilarity` (0.8) similar to a known preference is that preference. Order: the sidecar's "same as", then embeddings, then word overlap.
+- **Moved from patterns to the sidecar:**
+  - **Which preferences fit a prompt** (amends D-060's injection). Before the agent starts, an interactive sidecar call picks the applying preferences that are relevant to the request and not already stated in it (`preference-select.v1`). Ones it does not pick stay available for a later prompt. On failure, or with `preferenceSelect: false`: all of them minus keyword matches, as before. The host's user-turn budget rises from 2 s to 6 s; the call's own deadline is 4 s and it runs only while a preference is still unshown in the conversation.
+  - **Standing rules** (amends D-060's admission). The proposal now carries the sidecar's reading of whether the user stated a rule for future work (`preferences.v2`), since natural phrasing ("I'm a TDD person") has no fixed cue. A rule is standing if the sidecar says so or the sentence has a cue. The one-off check and the verbatim-quote check stay in code.
+  - **"The agent is waiting on the user"** (amends D-039's guard). The pattern on the final message's last lines ran before the verdict and switched the supervisor off whenever the agent ended on a question mark, including offers ("Want me to add tests too?") after unfinished work. The verdict now decides (`verdict.v3`/`v4`: a blocking question, not an offer). The pattern remains only where there is no LLM verdict to ask: the deterministic pre-verdict.
+- **Costs to know about:**
+  - Embedding calls are not in the trace or the report's token totals. They run on the CPU and do not compete for GPU slots.
+  - The preference pick adds up to 4 s before the agent starts on a prompt, in conversations that still have an unshown preference.
+  - The supervisor now makes a verdict call in cases where the pattern used to skip it.
+- **Untested with real models.** The two similarity thresholds were picked without a real embedding model and will need tuning to the one the owner runs: check the `recalled` and `preference_seen` trace events. A sidecar that over-reads `standing` makes a one-task instruction apply at once; `/exo memory preferences` shows it and `forget` removes it.
+- **Not done:** embeddings in triage (signature identity), compaction or the supervisor; an embedding-based "already said" check (the sidecar pick covers it).
+
+### D-063 — Modules say what the user is waiting on · accepted (2026-10-05; owner's request)
+- **Context:** several hooks hold pi while a sidecar answers (up to 4–10 s, 90 s for compaction). Only the settle hook said so ("exo: checking the work…"); the rest looked like a stall.
+- **Decision:** `ModuleContext.progress(message)`. A module calls it just before a wait the user would notice; the host shows it and clears it when the hook returns, so a module cannot leave a stale message behind.
+  - In pi it goes to both the status line (`setStatus`) and the text beside the working spinner (`setWorkingMessage`). When the last concurrent hook returns, the status line goes back to what the last settle left there and the spinner text to pi's default.
+  - Without a UI (print mode, the eval over RPC) it does nothing.
+- **Messages:** "Recalling your preferences…" (memory's pick before the agent starts), "Diagnosing the repeated failure…" and "Considering other causes of the repeated failure…" (triage), "Trimming noisy output…" (trimmer's sidecar tier), "Writing the compaction summary…" (compaction).
+- **Not shown:** memory's similarity recall (1.5 s at most) and any background work, which holds nothing.
+- **Unverified:** how pi's TUI renders a custom working message between a tool finishing and the next request. The status line is the dependable one.
+- **Also fixed:** applying preferences are now ordered deterministically (ties broken by id).
+
 ---
 
 ## Open questions (carried from brief §10, updated)

@@ -23,8 +23,8 @@ import {
 export const SUPERVISOR_ID = "supervisor";
 
 const LEDGER_PROMPT = loadPrompt(new URL("../prompts/ledger.v1.md", import.meta.url));
-const VERDICT_PROMPT = loadPrompt(new URL("../prompts/verdict.v1.md", import.meta.url));
-const ITEM_VERDICT_PROMPT = loadPrompt(new URL("../prompts/verdict.v2.md", import.meta.url));
+const VERDICT_PROMPT = loadPrompt(new URL("../prompts/verdict.v3.md", import.meta.url));
+const ITEM_VERDICT_PROMPT = loadPrompt(new URL("../prompts/verdict.v4.md", import.meta.url));
 
 const LedgerSchema = Type.Object({
 	is_task: Type.Boolean(),
@@ -97,6 +97,9 @@ const VOTE_TEMPERATURE = 0.7;
 const GIT_TIMEOUT_MS = 10_000;
 /** Enough of a diff for the evidence budget and a stable change fingerprint. */
 const GIT_OUTPUT_CHARS = 256 * 1024;
+/** New files whose content is shown, and how much of each. */
+const MAX_NEW_FILES = 12;
+const NEW_FILE_CHARS = 6_000;
 
 /**
  * The supervisor module (brief §6.1, D-010, D-011): extracts a goal ledger from each request,
@@ -155,7 +158,6 @@ export function createSupervisor(raw: Readonly<Record<string, unknown>>, ctx: Mo
 
 			const ledger = await withTimeout(current.ledger, settings.ledgerTimeoutMs);
 			if (!ledger || ledger.criteria.length === 0) return skip("no_ledger");
-			if (asksUserQuestion(info.lastAssistantText)) return skip("asked_user");
 			if (current.continuations >= settings.maxContinuations) return skip("max_continuations");
 
 			const evidence = await gatherEvidence(ctx, settings, current, ledger, info.lastAssistantText, signal);
@@ -194,7 +196,9 @@ async function decide(
 	finalMessage: string,
 	signal: AbortSignal,
 ): Promise<Judgement | undefined> {
-	const deterministic = settings.preVerdict ? preVerdict(evidence.checks, evidence.noChanges) : undefined;
+	// Without an LLM verdict to read the final message, the question heuristic stands in for it.
+	const pre = settings.preVerdict ? preVerdict(evidence.checks, evidence.noChanges) : undefined;
+	const deterministic = pre && { ...pre, asked_user: asksUserQuestion(finalMessage) };
 	return deterministic ?? (await judgeWithVotes(ctx, settings, ledger, evidence.text, finalMessage, signal));
 }
 
@@ -209,7 +213,13 @@ function act(
 		.map((m) => m.trim())
 		.filter(Boolean)
 		.slice(0, MAX_CRITERIA);
-	if (verdict.verdict === "incomplete" && missing.length > 0 && !verdict.asked_user) {
+	// Whether the agent is waiting on the user is the verdict's call (D-062): it can tell a blocking
+	// question from an offer of more work, which a pattern on the last line cannot.
+	if (verdict.verdict === "incomplete" && verdict.asked_user) {
+		ctx.record({ kind: "exo.action", data: { action: "skipped", reason: "asked_user" } });
+		return { kind: "notify", summary: "supervisor: the agent is waiting for your answer", level: "info" };
+	}
+	if (verdict.verdict === "incomplete" && missing.length > 0) {
 		const text = continuationMessage(missing);
 		const summary = `supervisor: ${missing.length} item(s) look unfinished`;
 		if (settings.mode === "auto") {
@@ -267,7 +277,7 @@ async function extractLedger(
 		},
 	});
 	if (!result.ok) {
-		ctx.log(`supervisor: ledger ${result.outcome}: ${result.error}`);
+		ctx.log(`ledger ${result.outcome}: ${result.error}`);
 		return undefined;
 	}
 	const value = result.value;
@@ -315,6 +325,10 @@ async function gatherEvidence(
 		git(ctx, "ls-files --others --exclude-standard"),
 	]);
 	const untrackedFiles = (untracked ?? "").split("\n").filter(Boolean).slice(0, 30);
+	// `git diff` leaves out files git does not track yet, which is where new work usually is.
+	const tracked = diff;
+	const diffWithNew =
+		tracked === undefined ? undefined : [tracked, ...(await newFileDiffs(ctx, untrackedFiles))].join("\n");
 
 	const commands = [...new Set([...settings.checks, ...(settings.runPromptChecks ? ledger.checkCommands : [])])];
 	const checks: CheckResult[] = [];
@@ -325,17 +339,38 @@ async function gatherEvidence(
 	return {
 		text: formatEvidence({
 			diffStat: stat,
-			diff,
+			diff: diffWithNew,
 			untracked: untrackedFiles,
 			tools: task.tools,
 			checks,
-			...(settings.warningSignals ? { warnings: warningsFor(diff, task.tools, finalMessage) } : {}),
+			...(settings.warningSignals ? { warnings: warningsFor(diffWithNew, task.tools, finalMessage) } : {}),
 			maxChars: settings.maxEvidenceChars,
 		}),
-		diffHash: diffFingerprint(diff, untrackedFiles),
+		diffHash: diffFingerprint(diffWithNew, untrackedFiles),
 		checks,
-		noChanges: madeNoChanges(diff, untrackedFiles, task.tools),
+		noChanges: madeNoChanges(tracked, untrackedFiles, task.tools),
 	};
+}
+
+/**
+ * Untracked files as "new file" diffs, so the verdict and the warning signals see their content
+ * and a continuation that only edits new files still counts as progress. Each file gives its
+ * first few thousand characters, smallest file first, so one large file cannot crowd out the rest.
+ */
+async function newFileDiffs(ctx: ModuleContext, files: readonly string[]): Promise<string[]> {
+	const diffs: string[] = [];
+	for (const file of files.slice(0, MAX_NEW_FILES)) {
+		const quoted = `'${file.replace(/'/g, "'\\''")}'`;
+		const out = await ctx
+			.runCommand(`git diff --no-index -- /dev/null ${quoted} | head -c ${NEW_FILE_CHARS}`, {
+				timeoutMs: GIT_TIMEOUT_MS,
+				tailChars: NEW_FILE_CHARS,
+			})
+			.catch(() => undefined);
+		const text = out?.outputTail.trimEnd() ?? "";
+		if (text.startsWith("diff --git")) diffs.push(text);
+	}
+	return diffs.sort((x, y) => x.length - y.length);
 }
 
 /** Research R1.2 #4–#7: tampered tests, stubs, unsupported success claims, narrow test runs. */
@@ -437,7 +472,7 @@ async function judge(
 			),
 		});
 		if (!result.ok) {
-			ctx.log(`supervisor: verdict ${result.outcome}: ${result.error}`);
+			ctx.log(`verdict ${result.outcome}: ${result.error}`);
 			return undefined;
 		}
 		return aggregateItems(result.value, ledger.criteria, evidence);
@@ -449,7 +484,7 @@ async function judge(
 		request: request(VERDICT_PROMPT.render({ criteria, evidence, final_message: final.text })),
 	});
 	if (!result.ok) {
-		ctx.log(`supervisor: verdict ${result.outcome}: ${result.error}`);
+		ctx.log(`verdict ${result.outcome}: ${result.error}`);
 		return undefined;
 	}
 	return result.value;

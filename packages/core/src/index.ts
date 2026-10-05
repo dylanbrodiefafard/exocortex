@@ -11,6 +11,14 @@ export {
 	InferenceError,
 } from "./inference/client.ts";
 export {
+	cosineSimilarity,
+	createEmbedder,
+	decodeVector,
+	type Embedder,
+	encodeVector,
+	resolveEmbeddings,
+} from "./inference/embeddings.ts";
+export {
 	ENGINE_PROFILES,
 	type EngineFallback,
 	type EngineFeatures,

@@ -5,6 +5,7 @@ import {
 	loadPrompt,
 	type ModuleContext,
 	type ToolOutcome,
+	ungroundedReferences,
 } from "@exocortex/core";
 import { type Static, Type } from "typebox";
 import { type CompactionSettings, parseSettings } from "./settings.ts";
@@ -63,7 +64,8 @@ export function createCompaction(raw: Readonly<Record<string, unknown>>, ctx: Mo
 		id: COMPACTION_ID,
 
 		onUserTurn(turn) {
-			if (turn.origin === "user") userMessages.push(turn.text);
+			// An accepted suggestion is part of the task's history too: it lists what was still missing.
+			if (turn.origin !== "extension") userMessages.push(turn.text);
 		},
 
 		onToolResult(tool) {
@@ -147,6 +149,7 @@ async function writeNarrative(
 	const pool = ctx.pool();
 	if (!pool) return undefined;
 	const previous = request.previousSummary ? narrativeOf(request.previousSummary) : "";
+	ctx.progress("Writing the compaction summary…");
 	const result = await pool.run({
 		module: COMPACTION_ID,
 		priority: "critical",
@@ -177,7 +180,28 @@ async function writeNarrative(
 		ctx.log(`summary ${result.outcome}: ${result.error}`);
 		return undefined;
 	}
-	return result.value;
+	return grounded(result.value, `${request.conversation}\n${previous}\n${request.customInstructions ?? ""}`, ctx);
+}
+
+/**
+ * The guidance gate for summaries (research R3.5, D-061): once the transcript is gone the agent
+ * cannot check a name, so list items naming files or symbols found nowhere in the transcript or
+ * the workspace are dropped, and a next step that does is left out.
+ */
+export function grounded(narrative: Narrative, evidence: string, ctx: Pick<ModuleContext, "cwd" | "log">): Narrative {
+	const ok = (text: string) => ungroundedReferences(text, evidence, ctx.cwd).length === 0;
+	const kept = {
+		current_work: narrative.current_work,
+		next_step: ok(narrative.next_step) ? narrative.next_step : "",
+		dead_ends: narrative.dead_ends.filter(ok),
+		key_facts: narrative.key_facts.filter(ok),
+	};
+	const dropped =
+		narrative.dead_ends.length - kept.dead_ends.length + narrative.key_facts.length - kept.key_facts.length;
+	if (dropped > 0 || kept.next_step !== narrative.next_step) {
+		ctx.log(`dropped ${dropped} ungrounded item(s)${kept.next_step === "" ? " and the next step" : ""}`);
+	}
+	return kept;
 }
 
 /** The narrative part of an earlier Exocortex summary (or all of a foreign one). */
@@ -226,7 +250,8 @@ export function renderSummary(facts: Facts, narrative: Narrative | undefined, se
 		);
 	}
 	if (narrative) {
-		sections.push(NARRATIVE_HEADING, `${narrative.current_work.trim()}\nNext: ${narrative.next_step.trim()}`);
+		const next = narrative.next_step.trim();
+		sections.push(NARRATIVE_HEADING, `${narrative.current_work.trim()}${next ? `\nNext: ${next}` : ""}`);
 		if (narrative.dead_ends.length > 0) sections.push("## Dead ends (do not retry)", list(narrative.dead_ends));
 		if (narrative.key_facts.length > 0) sections.push("## Key facts", list(narrative.key_facts));
 	}

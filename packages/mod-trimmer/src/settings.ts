@@ -16,6 +16,11 @@ const SettingsSchema = Type.Object(
 		maxErrorWindows: Type.Integer({ minimum: 0, default: 40 }),
 		collapseRuns: Type.Integer({ minimum: 2, default: 3 }),
 		maxLineChars: Type.Integer({ minimum: 80, default: 400 }),
+		/**
+		 * Ceiling for a trimmed result. Above it, error windows are halved until it fits: many long
+		 * error lines can otherwise leave a "trimmed" output several times `minChars`.
+		 */
+		maxChars: Type.Integer({ minimum: 2_000, default: 24_000 }),
 		/** Sidecar line selection when the deterministic tier still leaves this much (research R2.2). */
 		sidecar: Type.Boolean({ default: false }),
 		sidecarAboveChars: Type.Integer({ minimum: 500, default: 8_000 }),

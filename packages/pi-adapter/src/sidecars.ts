@@ -1,9 +1,11 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
+	createEmbedder,
 	createOpenAIClient,
 	createSidecarPool,
 	type EngineFallback,
 	moduleLimitsFrom,
+	resolveEmbeddings,
 	resolveEngine,
 } from "@exocortex/core";
 import type { Runtime } from "./runtime.ts";
@@ -31,8 +33,13 @@ export function registerSidecars(pi: ExtensionAPI, options: SidecarOptions): voi
 	async function rebuild(ctx: ExtensionContext): Promise<void> {
 		runtime.pool?.close();
 		runtime.pool = undefined;
+		runtime.embedder = undefined;
 		const { config } = runtime.activate(ctx.cwd);
 		if (!config.enabled) return;
+		const embeddings = resolveEmbeddings(config.embeddings, options.env);
+		if (embeddings) {
+			runtime.embedder = createEmbedder(embeddings, { onError: (message) => onError("embeddings", message) });
+		}
 		const target = resolveEngine(config.engine, await mainModelFallback(ctx), options.env);
 		if (!target) {
 			onError("sidecars", "no sidecar engine (set engine.baseUrl/model, or use an openai-completions main model)");

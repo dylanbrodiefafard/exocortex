@@ -1,3 +1,4 @@
+import type { Embedder } from "../inference/embeddings.ts";
 import type { SidecarPool } from "../inference/pool.ts";
 import type { JsonValue, TraceEventInput } from "../trace/store.ts";
 import type { CommandOutput } from "./command.ts";
@@ -10,6 +11,8 @@ export interface ModuleContext {
 	readonly cwd: string;
 	/** Sidecar pool; undefined when no engine is configured (modules then do nothing). */
 	readonly pool: () => SidecarPool | undefined;
+	/** Text embeddings for similarity search; undefined when no embeddings server is configured. */
+	readonly embedder: () => Embedder | undefined;
 	/** Appends to the current session's trace; a no-op when tracing is off. */
 	readonly record: (event: Omit<TraceEventInput, "module" | "synthetic">) => void;
 	/** Runs a shell command in `cwd` (process group killed on timeout). */
@@ -17,6 +20,12 @@ export interface ModuleContext {
 		command: string,
 		options: { readonly timeoutMs: number; readonly tailChars?: number; readonly signal?: AbortSignal },
 	) => Promise<CommandOutput>;
+	/**
+	 * Tells the user what a hook is waiting on ("Diagnosing the repeated failure…"). Call it just
+	 * before a wait they would notice; the harness clears it when the hook returns. A no-op
+	 * without a UI.
+	 */
+	readonly progress: (message: string) => void;
 	/** Debug log (no-op unless the harness's debug output is on). */
 	readonly log: (message: string) => void;
 }
@@ -24,8 +33,13 @@ export interface ModuleContext {
 /** A user (or harness-extension) prompt that starts or continues a task. */
 export interface UserTurn {
 	readonly text: string;
-	/** `extension`: sent programmatically by some extension, not typed by the user. */
-	readonly origin: "user" | "extension";
+	/**
+	 * - `user`: typed by the user.
+	 * - `extension`: sent programmatically by some extension.
+	 * - `suggestion`: a module's suggested follow-up that the user sent unchanged. It continues the
+	 *   same task and is not the user's own wording.
+	 */
+	readonly origin: "user" | "extension" | "suggestion";
 }
 
 /** A finished tool call, as the harness reported it (original output, before any rewrite). */
@@ -52,6 +66,8 @@ export interface ToolRewrite {
 	readonly text: string;
 	/** Short description for the trace and status, e.g. "trimmed 1200→140 lines". */
 	readonly note: string;
+	/** Extra fields for the rewrite's trace event (e.g. where the full output was saved). */
+	readonly details?: { readonly [key: string]: JsonValue };
 }
 
 /** The harness is about to compact the conversation: a module may write the summary. */
@@ -92,6 +108,12 @@ export type SettleAction =
 export interface ExoModule {
 	readonly id: string;
 	onUserTurn?(turn: UserTurn): void;
+	/**
+	 * Text to add to the context right after the user's message, before the agent starts on it
+	 * (D-029: persisted as its own message, so the prompt cache is untouched). Awaited within a
+	 * short budget; the agent waits on it.
+	 */
+	contextForUserTurn?(turn: UserTurn, signal: AbortSignal): Promise<string | undefined>;
 	onToolResult?(tool: ToolOutcome): void;
 	/**
 	 * Rewrites a tool result before it enters the context (D-029: cache-safe, it is new content).
@@ -106,6 +128,10 @@ export interface ExoModule {
 	 * leaves compaction to the harness's default.
 	 */
 	compact?(request: CompactionRequest, signal: AbortSignal): Promise<string | undefined>;
+	/** The harness compacted the conversation: text added earlier may no longer be in the context. */
+	onCompacted?(): void;
+	/** Handles `/exo <module> <args>` beyond on/off; returns the reply, or undefined for unknown args. */
+	command?(args: string): string | undefined;
 	/** Short status for `/exo status` and the status line. */
 	status?(): string;
 }

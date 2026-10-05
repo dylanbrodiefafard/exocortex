@@ -90,6 +90,9 @@ describe("computeTraceMetrics", () => {
 			failedCompactions: 0,
 			errorStops: 0,
 			lengthStops: 0,
+			compactionReplays: 0,
+			trimmedOutputs: 0,
+			trimmedRereads: 0,
 			// The same failure twice with nothing after it: it never had the chance to recur.
 			recurringErrors: [{ occurrences: 2, hints: 0, after: "ended", fixed: false }],
 			sidecarTokensByModule: {},
@@ -284,6 +287,49 @@ describe("computeTraceMetrics", () => {
 				),
 			).toEqual([{ occurrences: 2, hints: 0, after: "stopped", fixed: false }]);
 		});
+	});
+
+	it("counts a compaction followed by a re-run of something that had already passed (R4.4)", () => {
+		let next = 0;
+		const bash = (command: string, ok: boolean) => {
+			const toolCallId = `r${++next}`;
+			return [
+				event("tool.call", { toolCallId, toolName: "bash", input: { command } }),
+				event("tool.result", { toolCallId, toolName: "bash", isError: !ok, exitCode: ok ? 0 : 1, content: [] }),
+			];
+		};
+		const replays = (...steps: StoredTraceEvent[][]) => computeTraceMetrics(steps.flat()).compactionReplays;
+		const compaction = [event("compaction", { reason: "threshold" })];
+		expect(replays(bash("cargo build", true), compaction, bash("ls", true), bash("cargo build", true))).toBe(1);
+		// Not a replay: it failed before, it fails now, or it comes after the agent's first two commands.
+		expect(replays(bash("cargo test", false), compaction, bash("cargo test", true))).toBe(0);
+		expect(replays(bash("cargo build", true), compaction, bash("cargo build", false))).toBe(0);
+		expect(
+			replays(bash("cargo build", true), compaction, bash("ls", true), bash("pwd", true), bash("cargo build", true)),
+		).toBe(0);
+		expect(
+			replays(bash("make", true), compaction, bash("make", true), compaction, bash("make", true), bash("make", true)),
+		).toBe(2);
+	});
+
+	it("counts trimmed outputs whose saved full copy the agent read back (R2.1)", () => {
+		const trimmed = (toolCallId: string, fullOutputPath?: string) =>
+			event(
+				"exo.rewrite",
+				{ toolCallId, note: "trimmed 600→120 lines", ...(fullOutputPath ? { fullOutputPath } : {}) },
+				{ synthetic: true, module: "trimmer" },
+			);
+		const call = (toolName: string, input: object) => event("tool.call", { toolCallId: "x", toolName, input });
+		const metrics = computeTraceMetrics([
+			call("read", { path: "/tmp/exo/a.log" }),
+			trimmed("a", "/tmp/exo/a.log"),
+			trimmed("b", "/tmp/exo/b.log"),
+			trimmed("c"),
+			event("exo.rewrite", { toolCallId: "d", note: "repeat 2" }, { synthetic: true, module: "triage" }),
+			call("bash", { command: "grep -n error /tmp/exo/b.log | head" }),
+			call("read", { path: "src/lib.rs" }),
+		]);
+		expect(metrics).toMatchObject({ trimmedOutputs: 3, trimmedRereads: 1 });
 	});
 
 	it("handles an empty trace", () => {

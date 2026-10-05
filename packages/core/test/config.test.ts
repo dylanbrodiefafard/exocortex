@@ -23,6 +23,7 @@ describe("loadConfig", () => {
 				sessionTokenBudget: 0,
 				backgroundWhenIdleOnly: true,
 			},
+			embeddings: { timeoutMs: 2_000 },
 			modules: {},
 		});
 		expect(sources).toEqual([

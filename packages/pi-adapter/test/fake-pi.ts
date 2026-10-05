@@ -4,7 +4,7 @@ type Handler = (event: unknown, ctx: unknown) => unknown;
 type CommandSpec = Parameters<ExtensionAPI["registerCommand"]>[1];
 
 export interface UiCall {
-	readonly method: "notify" | "setStatus" | "setEditorText";
+	readonly method: "notify" | "setStatus" | "setEditorText" | "setWorkingMessage";
 	readonly args: readonly unknown[];
 }
 
@@ -50,6 +50,7 @@ export function createFakePi(options: { cwd: string; hasUI?: boolean; flags?: Re
 				notify: (...args: unknown[]) => ui.push({ method: "notify", args }),
 				setStatus: (...args: unknown[]) => ui.push({ method: "setStatus", args }),
 				setEditorText: (...args: unknown[]) => ui.push({ method: "setEditorText", args }),
+				setWorkingMessage: (...args: unknown[]) => ui.push({ method: "setWorkingMessage", args }),
 			},
 			...overrides,
 		} as unknown as ExtensionContext & ExtensionCommandContext;

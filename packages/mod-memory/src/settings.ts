@@ -20,6 +20,32 @@ const SettingsSchema = Type.Object(
 		maxInjectChars: Type.Integer({ minimum: 200, default: 1_600 }),
 		/** Full-text matches need this share of the error's keywords in the card's trigger. */
 		minOverlap: Type.Number({ minimum: 0, maximum: 1, default: 0.6 }),
+		/**
+		 * D-060: learn how the user likes work done from their own messages, and add the preferences a
+		 * later prompt leaves unsaid. Off until it has been tried in daily use (D-052).
+		 */
+		preferences: Type.Boolean({ default: false }),
+		/** At most this many preferences are added to one prompt. */
+		maxPreferences: Type.Integer({ minimum: 1, maximum: 10, default: 5 }),
+		maxPreferenceChars: Type.Integer({ minimum: 200, default: 900 }),
+		/** A preference not stated as a standing rule applies once it was said in this many sessions. */
+		preferenceMinSessions: Type.Integer({ minimum: 1, default: 2 }),
+		preferenceTimeoutMs: Type.Integer({ minimum: 1_000, default: 30_000 }),
+		/**
+		 * Have a sidecar pick which preferences fit a prompt and are not already stated in it, before
+		 * the agent starts. Off, or when the sidecar fails: all of them, minus keyword matches.
+		 */
+		preferenceSelect: Type.Boolean({ default: true }),
+		preferenceSelectTimeoutMs: Type.Integer({ minimum: 500, default: 4_000 }),
+		/**
+		 * With an embeddings server (D-062): a failing output whose error line is at least this similar
+		 * (cosine) to a card's trigger recalls the card, and a new preference at least
+		 * `preferenceSimilarity` similar to a known one is the same preference. Tune per embedding model.
+		 */
+		minSimilarity: Type.Number({ minimum: 0, maximum: 1, default: 0.85 }),
+		preferenceSimilarity: Type.Number({ minimum: 0, maximum: 1, default: 0.8 }),
+		/** Deadline for an embedding lookup on the hot path; past it, keywords decide. */
+		embedTimeoutMs: Type.Integer({ minimum: 100, default: 1_500 }),
 	},
 	{ additionalProperties: true },
 );

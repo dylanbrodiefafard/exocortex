@@ -108,7 +108,7 @@ export function resolveEngine(
 	};
 }
 
-function expandEnv(value: string, env: Readonly<Record<string, string | undefined>>): string | undefined {
+export function expandEnv(value: string, env: Readonly<Record<string, string | undefined>>): string | undefined {
 	const match = /^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$/.exec(value);
 	return match ? env[match[1] ?? ""] : value;
 }

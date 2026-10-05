@@ -4,6 +4,8 @@ Everything built since Phase 3 ships off by default (D-047). This is the order t
 
 Before starting, set `pool.maxConcurrent` / `pool.reservedForMain` in `~/.exocortex/config.jsonc` to match ninfer's real slots (D-038). With 2 slots that is `2` / `1`.
 
+If you run an embeddings server (D-062), set `embeddings.baseUrl` and `embeddings.model` there too and confirm with `/exo ping`. The eval picks it up from the same file. It only affects configs with memory on.
+
 **Cost.** The hard tier's median run was 68 s (D-037). Budget about 2 minutes per run to allow for the tail, so 100 runs take about 3–4 hours. Several configs can share one batch (`--config a,b,c`). They then share the baseline runs, and the report pairs every config against the first.
 
 **Reading results.** Use the report's "Paired by task" section, not the raw success column. It prints the smallest difference the run count can detect. Below that, treat results as descriptive. Re-render any slice with `npm run eval -- --report eval-runs/<stamp> --tags <slice>`.
@@ -56,7 +58,7 @@ npm run eval -- --model ninfer/coding --tags error-recovery --config all-off,tri
 - **Trimmer:**
   - **Primary:** uncached main input tokens.
   - **Non-inferiority:** success, turns and wall-clock must not rise beyond noise (D-045).
-  - **Watch for re-reads:** saved-output files being read back is the sign that something needed was trimmed.
+  - **Watch for re-reads:** the report's "Trimmed outputs" section counts saved outputs the agent read back (D-061). A high share means something needed was trimmed.
 - **Triage:**
   - **Primary:** repeated-error rate.
   - Self-Debug's gain came almost entirely from the first feedback turn (verified). Read the report's "Repeated errors" section (D-057): cap hints at 1 unless *stopped after hint 2* is a real share of *got hint 2* and beats `all-off`'s *gone after the 3rd time*.
@@ -71,7 +73,7 @@ npm run eval -- --model ninfer/coding --tags error-recovery --config all-off,tri
      npm run eval -- --model ninfer32k/coding --tags hard --config all-off,compaction --repeat 3
      ```
   3. **Primary:** success on runs with at least one compaction: *success with compaction* in the report's "Context pressure" section (D-059).
-  4. **Also read:** *failed runs under context pressure* in the `all-off` row. That count is the evidence D-053 asks for before retro-masking is reconsidered. If *error stops* is above zero with no overflow compactions, check `logs/*.stderr.log`: ninfer's overflow error may not match pi's patterns.
+  4. **Also read:** *replays after compaction* (D-061, research R4.4): the fact-anchored summary should lower it. And *failed runs under context pressure* in the `all-off` row. That count is the evidence D-053 asks for before retro-masking is reconsidered. If *error stops* is above zero with no overflow compactions, check `logs/*.stderr.log`: ninfer's overflow error may not match pi's patterns.
 - **Phase 4 acceptance (brief §8, amended by D-045):**
 
   ```sh
@@ -89,7 +91,10 @@ npm run eval -- --model ninfer/coding --tags hard --config all-off,memory,memory
 - **Primary:** the "Success by repeat" table. Memory can only help from r2 on, so look for a rise over r1 that `all-off` doesn't show.
 - **Also read:** the "Token budget" table under it (D-058): total tokens per config and per repeat (main + every sidecar, memory's own column included), tokens per pass, and Δ total against `all-off` with its CI. This is the budget-matched comparison (research R5.4). The paragraph below the table states the smallest success difference the run could detect.
 - **Expect a small effect (D-055).** Verified experience moved held-out solvers by 1–4.5 points in VibeMemBench, and `--repeat 3` cannot detect that. Read this run as a harm check plus the learning curve. It passes when success does not drop and Δ total tokens is not above zero by more than its *detectable Δ*. A benefit claim needs more repeats or cross-task fixtures. Then inspect the cards with `sqlite3 eval-runs/<stamp>/memory-memory.db 'select lesson, seen, injected, helped, hurt from cards'`.
+- **With embeddings on (D-062):** `minSimilarity` (0.85) was chosen without a real embedding model. After the run, look at the `recalled` events for cards pulled in by similarity that have nothing to do with the error; raise the threshold if there are any.
 - **Caveat:** this is same-task replay, an upper bound (research §5c). Cross-task transfer needs sibling fixtures in one repo.
+
+**Preferences (D-060) are not part of this run.** Leave `memory.preferences` off here: the fixtures repeat one prompt per task, so task instructions would be learned as preferences. Try it in daily use instead, and check `/exo memory preferences` after a few days.
 
 ## 5. Everything together
 

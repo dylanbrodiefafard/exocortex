@@ -1,4 +1,5 @@
 import {
+	type Embedder,
 	type ExoConfig,
 	type LoadedConfig,
 	loadConfig,
@@ -17,6 +18,8 @@ export interface Runtime {
 	traceSession: TraceSession | undefined;
 	/** The sidecar pool for the current pi session, when an engine is configured. */
 	pool: SidecarPool | undefined;
+	/** Set with the pool when an embeddings server is configured. */
+	embedder: Embedder | undefined;
 	/** Live `/exo` toggles layered over config (brief §5.3 kill switches). */
 	readonly overrides: { allOff: boolean; readonly modules: Record<string, Record<string, unknown>> };
 	/** Rebuilds module instances after a toggle (set by the module host). */
@@ -25,6 +28,8 @@ export interface Runtime {
 	moduleStatus: () => string[];
 	/** Every module id the host knows, enabled or not (set by the module host). */
 	moduleIds: () => readonly string[];
+	/** Passes `/exo <module> <args>` to an enabled module; undefined when it has no answer. */
+	moduleCommand: (id: string, args: string) => string | undefined;
 	/** Flushes and closes the store. */
 	shutdown(): void;
 }
@@ -70,10 +75,12 @@ export function createRuntime(options: RuntimeOptions): Runtime {
 		},
 		traceSession: undefined,
 		pool: undefined,
+		embedder: undefined,
 		overrides: { allOff: false, modules: {} },
 		rebuildModules: () => {},
 		moduleStatus: () => [],
 		moduleIds: () => [],
+		moduleCommand: () => undefined,
 		shutdown() {
 			try {
 				store?.close();

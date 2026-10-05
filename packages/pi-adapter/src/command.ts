@@ -10,10 +10,11 @@ const MODULE_MODES: Readonly<Record<string, readonly string[]>> = { supervisor: 
 /**
  * `/exo` slash command:
  * - `/exo` or `/exo status`: config state, modules and sidecar pool statistics;
- * - `/exo ping`: one tiny sidecar call, to check the sidecar engine is reachable;
+ * - `/exo ping`: one tiny sidecar call (and one embedding, if configured), to check the servers are reachable;
  * - `/exo off` / `/exo on`: kill switch for every module (brief §5.3), this session only;
  * - `/exo <module> on|off`: toggle one module, e.g. `/exo trimmer on`;
- * - `/exo supervisor suggest|auto`: also switch the supervisor's mode.
+ * - `/exo supervisor suggest|auto`: also switch the supervisor's mode;
+ * - `/exo memory preferences` / `/exo memory forget <id>`: list or retire learned preferences.
  */
 export function registerExoCommand(pi: ExtensionAPI, runtime: Runtime): void {
 	const subcommands = () => [...COMMANDS, ...runtime.moduleIds()];
@@ -25,20 +26,33 @@ export function registerExoCommand(pi: ExtensionAPI, runtime: Runtime): void {
 				.map((name) => ({ value: name, label: name })),
 		handler: async (args, ctx) => {
 			try {
-				const [sub = "status", arg] = args.trim().split(/\s+/).filter(Boolean);
+				const [sub = "status", arg, ...rest] = args.trim().split(/\s+/).filter(Boolean);
 				if (sub === "ping") await ping(runtime, ctx);
 				else if (sub === "status") say(ctx, status(runtime));
 				else if (sub === "on" || sub === "off") {
 					runtime.overrides.allOff = sub === "off";
 					runtime.rebuildModules();
 					say(ctx, `Exocortex modules ${sub === "off" ? "off" : "back on"} for this session.`);
-				} else if (runtime.moduleIds().includes(sub)) toggleModule(runtime, ctx, sub, arg);
+				} else if (runtime.moduleIds().includes(sub)) moduleCommand(runtime, ctx, sub, arg, rest);
 				else say(ctx, `Unknown /exo subcommand "${sub}". Try: ${subcommands().join(", ")}`, "warning");
 			} catch (error) {
 				say(ctx, `/exo failed: ${String(error)}`, "error");
 			}
 		},
 	});
+}
+
+/** A module answers its own subcommands (`/exo memory preferences`); anything else is a toggle. */
+function moduleCommand(
+	runtime: Runtime,
+	ctx: ExtensionCommandContext,
+	id: string,
+	arg: string | undefined,
+	rest: readonly string[],
+): void {
+	const reply = arg === undefined ? undefined : runtime.moduleCommand(id, [arg, ...rest].join(" "));
+	if (reply === undefined) toggleModule(runtime, ctx, id, arg);
+	else say(ctx, reply);
 }
 
 function toggleModule(runtime: Runtime, ctx: ExtensionCommandContext, id: string, arg: string | undefined): void {
@@ -111,6 +125,19 @@ async function ping(runtime: Runtime, ctx: ExtensionCommandContext): Promise<voi
 	} else {
 		say(ctx, `Exocortex sidecar ${result.outcome}: ${result.error}`, "error");
 	}
+	await pingEmbeddings(runtime, ctx);
+}
+
+/** Also checks the embeddings server, when one is configured. */
+async function pingEmbeddings(runtime: Runtime, ctx: ExtensionCommandContext): Promise<void> {
+	const embedder = runtime.embedder;
+	if (!embedder) return;
+	const started = performance.now();
+	const vectors = await embedder.embed(["ping"], { timeoutMs: PING_TIMEOUT_MS });
+	const ms = Math.round(performance.now() - started);
+	if (vectors?.[0])
+		say(ctx, `Exocortex embeddings OK in ${ms} ms (${embedder.model}, ${vectors[0].length} dimensions)`);
+	else say(ctx, `Exocortex embeddings (${embedder.model}) did not answer: modules fall back to keywords`, "warning");
 }
 
 /** Notifies in UI modes; prints to stderr in print/json mode, where the UI is a no-op. */

@@ -69,12 +69,20 @@ export function formatEvidence(input: EvidenceInput): string {
 		const lines = commands.map(
 			(t) => `$ ${String(t.input["command"]).slice(0, 200)}  → exit ${t.exitCode ?? (t.isError ? "error" : "?")}`,
 		);
-		const lastFailure = [...commands].reverse().find((t) => t.isError);
+		// A failure the agent has since fixed would only mislead: show it only if that command never passed again.
+		const lastFailureAt = commands.findLastIndex((t) => t.isError);
+		const failed = commands[lastFailureAt];
+		const fixedSince = commands
+			.slice(lastFailureAt + 1)
+			.some((t) => !t.isError && t.input["command"] === failed?.input["command"]);
+		const lastFailure = fixedSince ? undefined : failed;
 		sections.push(
 			[
 				"## Commands the agent ran (most recent last)",
 				...lines,
-				lastFailure ? `Output of the last failing command:\n${tail(lastFailure.output, FAILED_OUTPUT_CHARS)}` : "",
+				lastFailure
+					? `Output of the last failing command (it did not pass again):\n${tail(lastFailure.output, FAILED_OUTPUT_CHARS)}`
+					: "",
 			]
 				.filter(Boolean)
 				.join("\n"),

@@ -68,6 +68,39 @@ describe("sidecar lifecycle", () => {
 		expect(h.runtime.pool).toBe(pool);
 	});
 
+	it("pings the embeddings server too, and says so when it does not answer", async () => {
+		server = await startFakeOpenAIServer([
+			{ kind: "text", text: "pong" },
+			{ kind: "text", text: "pong" },
+		]);
+		const h = setup({ engine: { baseUrl: server.baseUrl, model: "fake-model" } });
+		await h.pi.emit("session_start");
+		h.runtime.embedder = { model: "small-embed", embed: async () => [new Float32Array(384)] };
+		await h.pi.command("exo", "ping");
+		expect(lastNotify(h)?.[0]).toMatch(/^Exocortex embeddings OK in \d+ ms \(small-embed, 384 dimensions\)$/);
+		h.runtime.embedder = { model: "small-embed", embed: async () => undefined };
+		await h.pi.command("exo", "ping");
+		expect(lastNotify(h)).toEqual([
+			"Exocortex embeddings (small-embed) did not answer: modules fall back to keywords",
+			"warning",
+		]);
+	});
+
+	it("builds an embedder only when an embeddings server is configured", async () => {
+		server = await startFakeOpenAIServer([]);
+		const engine = { baseUrl: server.baseUrl, model: "m" };
+		const without = setup({ engine });
+		await without.pi.emit("session_start");
+		expect(without.runtime.embedder).toBeUndefined();
+		without.cleanup();
+		const h = setup({ engine, embeddings: { baseUrl: "http://127.0.0.1:9/v1", model: "small-embed" } });
+		await h.pi.emit("session_start");
+		expect(h.runtime.embedder?.model).toBe("small-embed");
+		// Nothing listens there: the embedder reports it and callers fall back.
+		expect(await h.runtime.embedder?.embed(["x"])).toBeUndefined();
+		expect(h.errors.map((e) => e.where)).toEqual(["embeddings"]);
+	});
+
 	it("reports a missing engine once and leaves the pool unset", async () => {
 		const h = setup({});
 		await h.pi.emit("session_start", {}, h.pi.ctx({ model: { api: "anthropic-messages", provider: "x", id: "y" } }));

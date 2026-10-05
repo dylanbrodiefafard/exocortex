@@ -40,11 +40,14 @@ To load it permanently, add the adapter path to `extensions` in `~/.pi/agent/set
 
 Every session is recorded to `~/.exocortex/exocortex.db`. To configure that, copy [`exocortex.config.example.jsonc`](exocortex.config.example.jsonc) to `~/.exocortex/config.jsonc`. A broken config disables Exocortex rather than breaking pi.
 
+**Embeddings (optional).** Point `embeddings` in the config at any OpenAI-compatible `/embeddings` server, for example a small model on the CPU. Memory then recognises the same error, or the same preference, said in different words. Without it, keyword matching is used. `/exo ping` checks both servers.
+
 Inside pi:
 - `/exo` shows status.
 - `/exo ping` makes one sidecar call to check that the sidecar engine is reachable.
 - `/exo off` and `/exo on` turn every module off or back on for the session.
 - `/exo <module> on|off` toggles one module for the session (`supervisor`, `trimmer`, `triage`, `memory`, `compaction`).
+- `/exo memory preferences` and `/exo memory forget <id>` list and remove learned preferences.
 
 ### Supervisor
 
@@ -67,6 +70,8 @@ Each is off by default. Enable them under `modules` in `~/.exocortex/config.json
 ### Memory (Phase 5)
 
 Enable with `"memory": { "enabled": true }` or `/exo memory on`. When a build or test command fails, the agent edits files and the same command then passes, memory saves a short lesson about that fix for this repo. The next time the same error appears, even in a later session, the lesson is added to the failing output. Lessons that keep failing to help are retired automatically. Cards live in `~/.exocortex/memory.db`.
+
+With `"preferences": true` it also learns how you like work done. It reads only what you type. Say something as a standing rule ("always write the failing test first", "from now on keep commits small"), or give the same instruction in two sessions, and it becomes a preference. Later prompts that leave it unsaid get it added as a short visible note; your prompt wins on any conflict. `/exo memory preferences` lists what it has learned and `/exo memory forget <id>` removes one (D-060).
 
 Why each works this way, with the research behind it, is in [`docs/DECISIONS.md`](docs/DECISIONS.md) (D-041 to D-049) and [`docs/RESEARCH.md`](docs/RESEARCH.md).
 
@@ -107,7 +112,7 @@ npm run eval -- --report eval-runs/<stamp> --tags spec-compliance   # re-render 
 - Each run copies a fixture from `tasks/` into `eval-runs/<timestamp>/work/` and drives pi over RPC with only Exocortex loaded. It then scores the run with the task's check command and computes metrics from the trace.
 - Output goes to `eval-runs/<timestamp>/`: `summary.md`, `results.json`, per-run stderr and check logs, and pi sessions.
 - With two or more configs, the summary compares each one with the first, task by task: the mean success difference with a bootstrap 95% CI, a sign test, changes in turns, tokens and wall-clock, and the smallest difference the run count can detect. A dozen tasks × 5 repeats only detects large effects; see `docs/RESEARCH.md` §7.
-- The summary also shows how repeated errors went and which triage hint preceded the end of each (D-057), compactions and context overflows per config (D-059), and, with `--repeat 2` or more, success and total tokens by repeat (D-058).
+- The summary also shows how repeated errors went and which triage hint preceded the end of each (D-057), how often trimmed outputs were read back (D-061), compactions, replays after them and context overflows per config (D-059), and, with `--repeat 2` or more, success and total tokens by repeat (D-058).
 - Models and auth come from your `~/.pi/agent`. Pass `--pi-agent-dir` to use another directory.
 - The fixtures need `python3`, `go`, `cargo` and `g++`/`make`.
 

@@ -36,7 +36,36 @@ describe("formatEvidence", () => {
 		expect(order.every((i, k) => i >= 0 && (k === 0 || i > (order[k - 1] ?? -1)))).toBe(true);
 		expect(text).toContain("README.md (new, untracked)");
 		expect(text).toContain("$ pytest  → exit 1");
-		expect(text).toContain("Output of the last failing command:\n1 failed");
+		expect(text).toContain("Output of the last failing command (it did not pass again):\n1 failed");
+	});
+
+	it("leaves out a failure's output once the same command has passed", () => {
+		const run = (command: string, exitCode: number, output: string) => ({
+			toolName: "bash",
+			input: { command },
+			isError: exitCode !== 0,
+			exitCode,
+			output,
+		});
+		const text = formatEvidence({
+			diffStat: "",
+			diff: "",
+			untracked: [],
+			tools: [run("pytest", 1, "1 failed"), run("ruff check", 1, "E501"), run("pytest", 0, "1 passed")],
+			checks: [],
+			maxChars: 10_000,
+		});
+		expect(text).toContain("Output of the last failing command (it did not pass again):\nE501");
+		const fixed = formatEvidence({
+			diffStat: "",
+			diff: "",
+			untracked: [],
+			tools: [run("pytest", 1, "1 failed"), run("pytest", 0, "1 passed")],
+			checks: [],
+			maxChars: 10_000,
+		});
+		expect(fixed).toContain("$ pytest  → exit 1");
+		expect(fixed).not.toContain("last failing command");
 	});
 
 	it("drops the diff first and hard-caps the length", () => {

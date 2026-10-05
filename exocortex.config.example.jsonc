@@ -32,6 +32,15 @@
 		"backgroundWhenIdleOnly": true // background work waits for the main agent to go idle
 	},
 
+	// Optional: an OpenAI-compatible /embeddings server, e.g. a small model on the CPU (D-062).
+	// Memory uses it to recognise the same error or preference in other words; without it, keywords decide.
+	"embeddings": {
+		// "baseUrl": "http://localhost:8081/v1",
+		// "model": "your-embedding-model",
+		// "apiKey": "$EMBEDDINGS_API_KEY",
+		"timeoutMs": 2000
+	},
+
 	// Modules are off unless enabled here. Every module also takes "maxCallsPerTurn" (default 4)
 	// and "maxTokensPerCall" (default 1024). Toggle live in pi with /exo on|off and /exo <module> on|off.
 	"modules": {
@@ -63,6 +72,7 @@
 		"triage": {
 			"enabled": false,
 			"sidecar": true, // a two-sentence hint when the same failure repeats (never on the first)
+			"maxHintsPerSignature": 2, // sidecar hints per repeated error; the second must differ from the first
 			"loopThreshold": 3, // repeats before the stronger "this approach is not working" warning
 			"hintTimeoutMs": 8000,
 			"hypotheses": 0, // at the loop threshold, this many parallel sidecars propose causes from different angles
@@ -75,7 +85,13 @@
 			"inject": true, // add a matching lesson to a failing tool result
 			"distill": true, // a background sidecar phrases each lesson (else a summary of the edit)
 			"maxCards": 2,
-			"maxInjectChars": 1600 // ~400 tokens
+			"maxInjectChars": 1600, // ~400 tokens
+			"preferences": false, // learn how you like work done from what you type; add what a later prompt leaves unsaid (D-060)
+			"maxPreferences": 5,
+			"preferenceMinSessions": 2, // sessions an instruction must recur in, unless you said it as a standing rule
+			"preferenceSelect": true, // a sidecar picks which preferences fit each prompt (else: all, minus keyword matches)
+			"minSimilarity": 0.85, // with embeddings: how close an error must be to a card's to recall it
+			"preferenceSimilarity": 0.8 // with embeddings: how close two preferences must be to count as one
 		},
 		"compaction": {
 			"enabled": false,

@@ -69,6 +69,23 @@ const PoolConfig = Type.Object(
 	{ default: {}, additionalProperties: false },
 );
 
+/**
+ * An OpenAI-compatible `/embeddings` server, e.g. a small model on the CPU (D-026, D-062). Optional:
+ * without `baseUrl` and `model`, modules match by keywords instead.
+ */
+const EmbeddingsConfig = Type.Object(
+	{
+		/** Base URL including `/v1`. */
+		baseUrl: Type.Optional(Type.String({ minLength: 1 })),
+		model: Type.Optional(Type.String({ minLength: 1 })),
+		/** Literal key, or `$NAME` / `${NAME}` to read an environment variable. */
+		apiKey: Type.Optional(Type.String()),
+		/** Deadline per call; on the hot path a slow answer is worth less than the keyword fallback. */
+		timeoutMs: Type.Integer({ minimum: 100, default: 2_000 }),
+	},
+	{ default: {}, additionalProperties: false },
+);
+
 const ExoConfigSchema = Type.Object(
 	{
 		/** Master kill switch: false disables every module and the trace store. */
@@ -83,6 +100,7 @@ const ExoConfigSchema = Type.Object(
 		),
 		engine: EngineConfig,
 		pool: PoolConfig,
+		embeddings: EmbeddingsConfig,
 		/** Per-module settings keyed by module id. Modules are off unless enabled here (D-001). */
 		modules: Type.Record(Type.String(), ModuleConfig, { default: {} }),
 	},

@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { type CompactionRequest, runShellCommand } from "@exocortex/core";
 import { createTestModuleContext, type SidecarReply } from "@exocortex/testkit";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createCompaction } from "../src/compaction.ts";
+import { createCompaction, grounded } from "../src/compaction.ts";
 
 let dir: string;
 beforeEach(() => {
@@ -148,5 +148,39 @@ describe("compaction", () => {
 		);
 		expect(summary).toContain("… [truncated]");
 		expect(summary).toContain("- … and 5 more");
+	});
+});
+
+describe("grounded", () => {
+	it("drops list items and a next step that name things found nowhere in the transcript or workspace", () => {
+		writeFileSync(join(dir, "real.rs"), "");
+		const logs: string[] = [];
+		const kept = grounded(
+			{
+				current_work: "Fixing `eval`.",
+				next_step: "Edit src/ghost.rs to add `Phantom`.",
+				dead_ends: ["tried `RefCell`: double borrow", "tried `made_up_fn`: did not help"],
+				key_facts: ["real.rs holds the entry point", "`eval` is recursive", "see docs/none.md"],
+			},
+			"[Assistant]: I tried `RefCell` around `eval`",
+			{ cwd: dir, log: (m) => logs.push(m) },
+		);
+		expect(kept).toEqual({
+			current_work: "Fixing `eval`.",
+			next_step: "",
+			dead_ends: ["tried `RefCell`: double borrow"],
+			key_facts: ["real.rs holds the entry point", "`eval` is recursive"],
+		});
+		expect(logs).toEqual(["dropped 2 ungrounded item(s) and the next step"]);
+	});
+
+	it("keeps accepted suggestions among the requests and leaves out an empty next step", async () => {
+		const { module } = setup({}, () => ({ ...NARRATIVE, next_step: "Open `nowhere_fn`." }));
+		module.onUserTurn?.({ text: "implement forth", origin: "user" });
+		module.onUserTurn?.({ text: "Not done yet. 1. Add the README", origin: "suggestion" });
+		const summary = await module.compact?.(request(), signal);
+		expect(summary).toContain("2. Not done yet. 1. Add the README");
+		expect(summary).toContain("## Current work\n\nFixing the borrow in Interpreter::eval.\n\n## Dead ends");
+		expect(summary).not.toContain("Next:");
 	});
 });

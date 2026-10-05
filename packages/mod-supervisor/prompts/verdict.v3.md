@@ -6,7 +6,7 @@ For each checklist item, decide whether the evidence shows it is done. Then give
 - "failed": the agent says it cannot do the task, or the work is broken in a way it did not try to fix.
 - "uncertain": the evidence is not enough to tell. Prefer this over guessing.
 
-Also set `asked_user` to true if the agent's final message ends by asking the developer a question or for a decision.
+Also set `asked_user` to true only if the agent stopped because it needs an answer or a decision from the developer before it can go on. An offer of more work after it finished ("Want me to add tests too?") is not that.
 
 Acceptance checklist:
 {{criteria}}

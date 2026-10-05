@@ -80,6 +80,8 @@ describe("trimmer", () => {
 		expect(rewrite.text).toMatch(/\[exo trimmer: showing \d+ of 601 lines; full output: .*call_1\.log/);
 		expect(readFileSync(saved, "utf8")).toBe(log);
 		expect(rewrite.note).toMatch(/^trimmed 601→\d+ lines \(head\/tail\/errors\)$/);
+		// The saved path goes to the trace, so the eval can tell when the agent reads it back.
+		expect(rewrite.details).toEqual({ fullOutputPath: saved });
 		expect(trimmer.status?.()).toMatch(/^trimmer \(1 trimmed, −\d+k chars\)$/);
 	});
 
@@ -138,6 +140,23 @@ describe("trimmer", () => {
 		});
 		await small.trimmer.rewriteToolResult?.(draft(buildLog(3000)), signal);
 		expect(calls).toEqual([]);
+	});
+
+	it("halves the error windows while the result is over maxChars, keeping the first errors", async () => {
+		// 120 long, distinct errors spread through 1,200 lines: every window is kept without a budget.
+		const lines = Array.from({ length: 1_200 }, (_, i) =>
+			i % 10 === 5
+				? `src/mod_${letters(i)}.rs:${i}:1: error: mismatched types in ${letters(i).repeat(60)}`
+				: `   Compiling crate-${letters(i)} v0.1.0`,
+		);
+		const log = lines.join("\n");
+		const loose = await setup({ maxChars: 1_000_000 }).trimmer.rewriteToolResult?.(draft(log), signal);
+		const tight = await setup({ maxChars: 6_000 }).trimmer.rewriteToolResult?.(draft(log), signal);
+		if (!loose || !tight) throw new Error("expected rewrites");
+		expect(loose.text.length).toBeGreaterThan(12_000);
+		expect(tight.text.length).toBeLessThan(loose.text.length / 2);
+		expect(tight.text).toContain("src/mod_f.rs:5:1: error: mismatched types");
+		expect(tight.text).toContain(lines.at(-1));
 	});
 
 	it("does not rewrite when trimming would not shrink the output", async () => {

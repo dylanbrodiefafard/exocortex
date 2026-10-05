@@ -1,6 +1,7 @@
 import {
 	type ChatRequest,
 	createSidecarPool,
+	type Embedder,
 	ENGINE_PROFILES,
 	type InferenceClient,
 	InferenceError,
@@ -19,6 +20,8 @@ export interface TestModuleContext {
 	/** Every trace event the module recorded. */
 	readonly records: Omit<TraceEventInput, "module" | "synthetic">[];
 	readonly logs: string[];
+	/** Every progress message the module showed the user. */
+	readonly progress: string[];
 }
 
 /**
@@ -29,10 +32,13 @@ export interface TestModuleContext {
 export function createTestModuleContext(options: {
 	readonly cwd: string;
 	readonly reply?: (request: ChatRequest, index: number) => SidecarReply | Promise<SidecarReply>;
+	/** A scripted embeddings model: one vector per text, or undefined for "the server failed". */
+	readonly embed?: (texts: readonly string[]) => number[][] | undefined;
 }): TestModuleContext {
 	const requests: ChatRequest[] = [];
 	const records: Omit<TraceEventInput, "module" | "synthetic">[] = [];
 	const logs: string[] = [];
+	const progress: string[] = [];
 	const { reply } = options;
 	const client: InferenceClient | undefined = reply && {
 		async chat(request) {
@@ -60,15 +66,28 @@ export function createTestModuleContext(options: {
 			},
 			moduleLimits: () => ({ maxCallsPerTurn: 100, maxTokensPerCall: 2048 }),
 		});
+	const { embed } = options;
+	const embedder: Embedder | undefined = embed && {
+		model: "test-embed",
+		// Unit length, as the real embedder returns them.
+		embed: async (texts) =>
+			embed(texts)?.map((v) => {
+				const length = Math.hypot(...v) || 1;
+				return Float32Array.from(v.map((x) => x / length));
+			}),
+	};
 	return {
 		requests,
 		records,
 		logs,
+		progress,
 		context: {
 			cwd: options.cwd,
 			pool: () => pool,
+			embedder: () => embedder,
 			record: (event) => records.push(event),
 			runCommand: (command, opts) => runShellCommand(command, { cwd: options.cwd, ...opts }),
+			progress: (message) => progress.push(message),
 			log: (message) => logs.push(message),
 		},
 	};

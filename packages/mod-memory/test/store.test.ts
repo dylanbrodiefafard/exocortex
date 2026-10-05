@@ -88,3 +88,44 @@ describe("keywords", () => {
 		]);
 	});
 });
+
+describe("vector store (D-062)", () => {
+	it("keeps one vector per card or preference and embedding model", () => {
+		const store = openMemoryStore(":memory:");
+		store.setVector("card", 1, "model-a", Float32Array.from([1, 0]));
+		store.setVector("card", 1, "model-a", Float32Array.from([0, 1]));
+		store.setVector("card", 1, "model-b", Float32Array.from([1, 0, 0]));
+		store.setVector("preference", 1, "model-a", Float32Array.from([0.5, 0.5]));
+		expect([...store.vectors("card", "model-a")].map(([id, v]) => [id, Array.from(v)])).toEqual([[1, [0, 1]]]);
+		expect(store.vectors("card", "model-b").get(1)).toHaveLength(3);
+		expect(store.vectors("preference", "model-b").size).toBe(0);
+		store.close();
+	});
+});
+
+describe("preference store (D-060)", () => {
+	it("keeps every sighting, retires without deleting and counts injections", () => {
+		let clock = 100;
+		const store = openMemoryStore(":memory:", () => clock++);
+		const id = store.addPreference("Keep commits small.");
+		store.addSighting(id, { scope: "repo-a", session: "s1", standing: true, quote: "always keep commits small" });
+		store.addSighting(id, { scope: "repo-b", session: "s2", standing: false, quote: "small commits please" });
+		store.markPreferencesInjected([id, id]);
+		expect(store.preferences()).toEqual([
+			{
+				id,
+				rule: "Keep commits small.",
+				injected: 2,
+				createdAt: 100,
+				sightings: [
+					{ scope: "repo-a", session: "s1", standing: true, quote: "always keep commits small", seenAt: 101 },
+					{ scope: "repo-b", session: "s2", standing: false, quote: "small commits please", seenAt: 102 },
+				],
+			},
+		]);
+		expect(store.retirePreference(id)).toBe(true);
+		expect(store.retirePreference(id)).toBe(false);
+		expect(store.preferences()).toEqual([]);
+		store.close();
+	});
+});

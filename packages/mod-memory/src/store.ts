@@ -1,7 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
-import { openDatabase } from "@exocortex/core";
+import { decodeVector, encodeVector, openDatabase } from "@exocortex/core";
 
 /** One lesson (brief §6.4). Phase 5 v1 stores only `pitfall` cards (research R5.1). */
 export interface Card {
@@ -47,7 +47,43 @@ export interface MemoryStore {
 	/** RETIRE cards that hurt more than they help (R5.3): hurt − helped ≥ 2 after 3+ injections. */
 	retireUnhelpful(): number;
 	cards(scope?: string): Card[];
+	/** Live preferences with every sighting, oldest first (D-060). */
+	preferences(): StoredPreference[];
+	/** ADD a preference; its first sighting is recorded separately. */
+	addPreference(rule: string): number;
+	/** MERGE: the user stated this preference (again). */
+	addSighting(preferenceId: number, sighting: Omit<Sighting, "seenAt">): void;
+	/** RETIRE: the user withdrew it, or asked to forget it. False when it was not live. */
+	retirePreference(id: number): boolean;
+	markPreferencesInjected(ids: readonly number[]): void;
+	/** Stores the embedding of a card's trigger or a preference's rule, per embedding model (D-062). */
+	setVector(kind: VectorKind, id: number, model: string, vector: Float32Array): void;
+	/** Every stored vector of one kind and model, by card or preference id. */
+	vectors(kind: VectorKind, model: string): Map<number, Float32Array>;
 	close(): void;
+}
+
+type VectorKind = "card" | "preference";
+
+/** One time the user stated a preference, in their own words. */
+export interface Sighting {
+	readonly scope: string;
+	/** The harness session it was said in: separate sessions are separate evidence. */
+	readonly session: string;
+	/** Said as a standing rule ("always…", "from now on…"). */
+	readonly standing: boolean;
+	/** The user's words, verbatim. */
+	readonly quote: string;
+	readonly seenAt: number;
+}
+
+/** How the user likes work done (D-060). Global; its sightings say where it applies. */
+export interface StoredPreference {
+	readonly id: number;
+	readonly rule: string;
+	readonly injected: number;
+	readonly createdAt: number;
+	readonly sightings: readonly Sighting[];
 }
 
 const MIGRATIONS: readonly string[] = [
@@ -70,6 +106,34 @@ const MIGRATIONS: readonly string[] = [
 	CREATE INDEX cards_signature ON cards (signature, valid_to);
 	CREATE INDEX cards_scope ON cards (scope, valid_to);
 	CREATE VIRTUAL TABLE cards_fts USING fts5(trigger, lesson, card_id UNINDEXED, tokenize = 'unicode61');
+	`,
+	`
+	CREATE TABLE preferences (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		rule TEXT NOT NULL,
+		injected INTEGER NOT NULL DEFAULT 0,
+		created_at INTEGER NOT NULL,
+		valid_to INTEGER
+	);
+	CREATE TABLE preference_sightings (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		preference_id INTEGER NOT NULL REFERENCES preferences(id),
+		scope TEXT NOT NULL,
+		session TEXT NOT NULL,
+		standing INTEGER NOT NULL DEFAULT 0,
+		quote TEXT NOT NULL,
+		seen_at INTEGER NOT NULL
+	);
+	CREATE INDEX preference_sightings_preference ON preference_sightings (preference_id);
+	`,
+	`
+	CREATE TABLE vectors (
+		kind TEXT NOT NULL,
+		ref_id INTEGER NOT NULL,
+		model TEXT NOT NULL,
+		vector BLOB NOT NULL,
+		PRIMARY KEY (kind, ref_id, model)
+	);
 	`,
 ];
 
@@ -102,6 +166,22 @@ interface Row {
 	hurt: number;
 	created_at: number;
 	valid_to: number | null;
+}
+
+interface PreferenceRow {
+	id: number;
+	rule: string;
+	injected: number;
+	created_at: number;
+}
+
+interface SightingRow {
+	preference_id: number;
+	scope: string;
+	session: string;
+	standing: number;
+	quote: string;
+	seen_at: number;
 }
 
 /** Opens (and migrates) the memory card store. `:memory:` for tests. */
@@ -192,6 +272,75 @@ export function openMemoryStore(path: string, now: () => number = Date.now): Mem
 		cards(scope) {
 			const rows = (scope === undefined ? select("1 = 1").all() : select("scope = ?").all(scope)) as unknown as Row[];
 			return rows.map(toCard);
+		},
+
+		preferences() {
+			const sightings = new Map<number, Sighting[]>();
+			const rows = db.prepare("SELECT * FROM preference_sightings ORDER BY id").all() as unknown as SightingRow[];
+			for (const row of rows) {
+				sightings.set(row.preference_id, [
+					...(sightings.get(row.preference_id) ?? []),
+					{
+						scope: row.scope,
+						session: row.session,
+						standing: row.standing === 1,
+						quote: row.quote,
+						seenAt: row.seen_at,
+					},
+				]);
+			}
+			const live = db.prepare("SELECT * FROM preferences WHERE valid_to IS NULL ORDER BY id").all();
+			return (live as unknown as PreferenceRow[]).map((row) => ({
+				id: row.id,
+				rule: row.rule,
+				injected: row.injected,
+				createdAt: row.created_at,
+				sightings: sightings.get(row.id) ?? [],
+			}));
+		},
+
+		addPreference(rule) {
+			return Number(
+				db.prepare("INSERT INTO preferences (rule, created_at) VALUES (?, ?)").run(rule, now()).lastInsertRowid,
+			);
+		},
+
+		addSighting(preferenceId, sighting) {
+			db.prepare(
+				"INSERT INTO preference_sightings (preference_id, scope, session, standing, quote, seen_at) VALUES (?, ?, ?, ?, ?, ?)",
+			).run(preferenceId, sighting.scope, sighting.session, sighting.standing ? 1 : 0, sighting.quote, now());
+		},
+
+		retirePreference(id) {
+			return (
+				Number(
+					db.prepare("UPDATE preferences SET valid_to = ? WHERE id = ? AND valid_to IS NULL").run(now(), id).changes,
+				) > 0
+			);
+		},
+
+		markPreferencesInjected(ids) {
+			const update = db.prepare("UPDATE preferences SET injected = injected + 1 WHERE id = ?");
+			for (const id of ids) update.run(id);
+		},
+
+		setVector(kind, id, model, vector) {
+			db.prepare("INSERT OR REPLACE INTO vectors (kind, ref_id, model, vector) VALUES (?, ?, ?, ?)").run(
+				kind,
+				id,
+				model,
+				encodeVector(vector),
+			);
+		},
+
+		vectors(kind, model) {
+			const rows = db.prepare("SELECT ref_id, vector FROM vectors WHERE kind = ? AND model = ?").all(kind, model);
+			return new Map(
+				(rows as unknown as { ref_id: number; vector: Uint8Array }[]).map((row) => [
+					row.ref_id,
+					decodeVector(row.vector),
+				]),
+			);
 		},
 
 		close() {

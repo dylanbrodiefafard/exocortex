@@ -72,6 +72,8 @@ function context(script: Script | undefined): ModuleContext {
 	return {
 		cwd: repo,
 		pool: () => pool,
+		embedder: () => undefined,
+		progress: () => {},
 		record: (event) => records.push(event),
 		runCommand: (command, options) => runShellCommand(command, { cwd: repo, ...options }),
 		log: () => {},
@@ -94,6 +96,29 @@ function kinds(): string[] {
 }
 
 describe("supervisor", () => {
+	it("shows the judge what is inside new files, and counts edits to them as progress", async () => {
+		const sup = createSupervisor(
+			{ warningSignals: true, runPromptChecks: false },
+			context({ ledger: LEDGER, verdicts: [INCOMPLETE] }),
+		);
+		sup.onUserTurn?.({ text: "Make app.py print v2 and add a README.", origin: "user" });
+		writeFileSync(join(repo, "it's new.py"), "def render():\n    raise NotImplementedError\n");
+		writeFileSync(join(repo, "big.txt"), `${"filler line\n".repeat(4_000)}the end\n`);
+		const first = await sup.onSettle?.(DONE, signal);
+		const evidence = String(requests.at(-1)?.messages[0]?.["content"]);
+		expect(evidence).toContain("+def render():");
+		expect(evidence).toContain("1 stub marker(s) added in it's new.py: raise NotImplementedError");
+		const firstHash = records.filter((r) => r.kind === "exo.action").length;
+
+		// The follow-up is accepted twice; each time only the untracked file changes.
+		for (const body of ["def render():\n    return 1\n", "def render():\n    return 2\n"]) {
+			sup.onUserTurn?.({ text: (first as { text: string }).text, origin: "suggestion" });
+			writeFileSync(join(repo, "it's new.py"), body);
+			await sup.onSettle?.(DONE, signal);
+		}
+		expect(kinds().slice(firstHash)).not.toContain("exo.action:skipped");
+	});
+
 	it("suggests a follow-up listing what is missing, then counts the accepted suggestion as a continuation", async () => {
 		const sup = createSupervisor({}, context({ ledger: LEDGER, verdicts: [INCOMPLETE] }));
 		sup.onUserTurn?.({ text: "Make app.py print v2 and add a README. Check with `python3 app.py`.", origin: "user" });
@@ -140,22 +165,37 @@ describe("supervisor", () => {
 		});
 	});
 
-	it("stays quiet when the agent asked the user a question, without calling the verdict sidecar", async () => {
-		const sup = createSupervisor({}, context({ ledger: LEDGER, verdicts: [INCOMPLETE] }));
-		sup.onUserTurn?.({ text: "Make app.py print v2.", origin: "user" });
-		const action = await sup.onSettle?.(
-			{ outcome: "completed", lastAssistantText: "I can do it two ways.\n\nWhich one do you prefer?" },
+	it("leaves 'is the agent waiting on the user' to the verdict: a blocking question stops it, an offer does not", async () => {
+		const blocked = createSupervisor({}, context({ ledger: LEDGER, verdicts: [{ ...INCOMPLETE, asked_user: true }] }));
+		blocked.onUserTurn?.({ text: "Make app.py print v2.", origin: "user" });
+		expect(await blocked.onSettle?.(DONE, signal)).toEqual({
+			kind: "notify",
+			summary: "supervisor: the agent is waiting for your answer",
+			level: "info",
+		});
+		expect(records.at(-1)?.data).toEqual({ action: "skipped", reason: "asked_user" });
+
+		// Ending on an offer used to switch the supervisor off before any verdict.
+		const offered = createSupervisor({}, context({ ledger: LEDGER, verdicts: [INCOMPLETE] }));
+		offered.onUserTurn?.({ text: "Make app.py print v2 and add a README.", origin: "user" });
+		const action = await offered.onSettle?.(
+			{ outcome: "completed", lastAssistantText: "Updated app.py.\n\nWould you like me to add tests too?" },
 			signal,
 		);
-		expect(action).toBeUndefined();
-		expect(kinds()).toEqual(["exo.ledger:", "exo.action:skipped"]);
-		expect(records.at(-1)?.data).toEqual({ action: "skipped", reason: "asked_user" });
+		expect(action).toMatchObject({ kind: "suggest" });
+		expect(String(requests.at(-1)?.messages[0]?.["content"])).toContain("An offer of more work after it finished");
 	});
 
-	it("respects the verdict's asked_user flag", async () => {
-		const sup = createSupervisor({}, context({ ledger: LEDGER, verdicts: [{ ...INCOMPLETE, asked_user: true }] }));
+	it("without an LLM verdict, a failing check does not continue an agent that ended on a question", async () => {
+		const settings = { mode: "auto", preVerdict: true, checks: ["false"], runPromptChecks: false };
+		const sup = createSupervisor(settings, context({ ledger: LEDGER, verdicts: [COMPLETE] }));
 		sup.onUserTurn?.({ text: "Make app.py print v2.", origin: "user" });
-		expect(await sup.onSettle?.(DONE, signal)).toMatchObject({ kind: "notify" });
+		const asked = await sup.onSettle?.(
+			{ outcome: "completed", lastAssistantText: "There are two ways to do this.\n\nWhich one do you prefer?" },
+			signal,
+		);
+		expect(asked).toMatchObject({ kind: "notify", summary: "supervisor: the agent is waiting for your answer" });
+		expect(await sup.onSettle?.(DONE, signal)).toMatchObject({ kind: "continue" });
 	});
 
 	it("auto mode continues until two continuations make no progress (no runaway loops)", async () => {

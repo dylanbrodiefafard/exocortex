@@ -149,6 +149,7 @@ export function renderMarkdown(records: readonly RunRecord[], title: string): st
 	lines.push(
 		...verdictSection(summaries),
 		...recurringSection(records, configs),
+		...trimmerSection(records, configs),
 		...contextSection(records, configs),
 		...repeatSection(records, summaries),
 		...pairedSection(records, summaries),
@@ -223,6 +224,31 @@ function recurringSection(records: readonly RunRecord[], configs: readonly strin
 	];
 }
 
+/** Research R2.1: how often the agent went back for what the trimmer cut. */
+function trimmerSection(records: readonly RunRecord[], configs: readonly string[]): string[] {
+	const rows = configs.map((config) => {
+		const metrics = metricsOf(records, config);
+		return {
+			config,
+			trimmed: sum(metrics.map((m) => m.trimmedOutputs ?? 0)),
+			reread: sum(metrics.map((m) => m.trimmedRereads ?? 0)),
+		};
+	});
+	if (rows.every((r) => r.trimmed === 0)) return [];
+	return [
+		"",
+		"## Trimmed outputs",
+		"",
+		"| config | outputs trimmed | full output read back |",
+		"|---|---|---|",
+		...rows
+			.filter((r) => r.trimmed > 0)
+			.map((r) => `| ${r.config} | ${r.trimmed} | ${r.reread} (${pct(r.reread / r.trimmed)}) |`),
+		"",
+		"*Read back* counts trimmed outputs whose saved full copy the agent later opened (its path appears in a later tool call). Each one is a sign the trimmer cut something the agent needed: token savings that come with many read-backs are not savings (research R2.1, R2.4).",
+	];
+}
+
 /** Compactions and context overflows per config: the evidence D-053 asks for before masking is revisited. */
 function contextSection(records: readonly RunRecord[], configs: readonly string[]): string[] {
 	const pressured = (r: RunRecord) =>
@@ -240,8 +266,8 @@ function contextSection(records: readonly RunRecord[], configs: readonly string[
 		runs.length === 0 ? "—" : `${runs.filter((r) => r.success).length}/${runs.length}`;
 	return [
 		...heading,
-		"| config | runs that compacted | success with compaction | success without | overflow compactions | failed compactions | error stops | length stops | failed runs under context pressure |",
-		"|---|---|---|---|---|---|---|---|---|",
+		"| config | runs that compacted | success with compaction | success without | replays after compaction | overflow compactions | failed compactions | error stops | length stops | failed runs under context pressure |",
+		"|---|---|---|---|---|---|---|---|---|---|",
 		...configs.map((config) => {
 			const runs = records.filter((r) => r.config === config && r.metrics);
 			const metrics = metricsOf(records, config);
@@ -251,6 +277,7 @@ function contextSection(records: readonly RunRecord[], configs: readonly string[
 				`${compacted.length}/${runs.length}`,
 				passed(compacted),
 				passed(runs.filter((r) => !compacted.includes(r))),
+				`${sum(metrics.map((m) => m.compactionReplays ?? 0))}/${sum(metrics.map((m) => m.compactions))}`,
 				sum(metrics.map((m) => m.overflowCompactions ?? 0)),
 				sum(metrics.map((m) => m.failedCompactions ?? 0)),
 				sum(metrics.map((m) => m.errorStops ?? 0)),
@@ -259,7 +286,7 @@ function contextSection(records: readonly RunRecord[], configs: readonly string[
 			].join(" | ")} |`;
 		}),
 		"",
-		"*Overflow compactions* are the ones pi started because a request no longer fit the context window or the reply was cut short, whether they succeeded or not; *failed compactions* could not produce a summary or could not recover. *Error stops* and *length stops* count turns that ended in a provider error or at the output limit: an overflow pi did not recognise shows up there. *Failed runs under context pressure* failed their check after compacting or overflowing. Runs that compact are the long ones, so compare *success with compaction* across configs, not against *success without*. Retro-masking is reconsidered only if these failures are common in the baseline (D-053).",
+		"*Replays after compaction* counts compactions after which one of the agent's next two commands re-ran a command that had already passed: the summary lost that it was done (research R4.4). *Overflow compactions* are the ones pi started because a request no longer fit the context window or the reply was cut short, whether they succeeded or not; *failed compactions* could not produce a summary or could not recover. *Error stops* and *length stops* count turns that ended in a provider error or at the output limit: an overflow pi did not recognise shows up there. *Failed runs under context pressure* failed their check after compacting or overflowing. Runs that compact are the long ones, so compare *success with compaction* across configs, not against *success without*. Retro-masking is reconsidered only if these failures are common in the baseline (D-053).",
 	];
 }
 

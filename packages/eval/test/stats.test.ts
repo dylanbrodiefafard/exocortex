@@ -284,14 +284,14 @@ describe("report", () => {
 				pressure("b", "all-off", false, { compactions: 2, overflowCompactions: 1 }),
 				pressure("c", "all-off", false, { failedCompactions: 1, overflowCompactions: 1, errorStops: 2 }),
 				pressure("a", "compaction", true, { compactions: 1, lengthStops: 1 }),
-				pressure("b", "compaction", true, { compactions: 1 }),
+				pressure("b", "compaction", true, { compactions: 1, compactionReplays: 1 }),
 				run("c", "compaction", false),
 			],
 			"t",
 		);
 		expect(markdown).toContain("## Context pressure");
-		expect(markdown).toContain("| all-off | 1/3 | 0/1 | 1/2 | 2 | 1 | 2 | 0 | 2 |");
-		expect(markdown).toContain("| compaction | 2/2 | 2/2 | — | 0 | 0 | 0 | 1 | 0 |");
+		expect(markdown).toContain("| all-off | 1/3 | 0/1 | 1/2 | 0/2 | 2 | 1 | 2 | 0 | 2 |");
+		expect(markdown).toContain("| compaction | 2/2 | 2/2 | — | 1/2 | 0 | 0 | 0 | 1 | 0 |");
 	});
 
 	it("says so when nothing compacted, and points at provider errors", () => {
@@ -300,6 +300,16 @@ describe("report", () => {
 		);
 		const errored = run("a", "off", false, { metrics: { ...computeTraceMetrics([]), errorStops: 3 } });
 		expect(renderMarkdown([errored], "t")).toContain("3 turns ended in a provider error");
+	});
+
+	it("shows how often trimmed outputs were read back", () => {
+		const trimmed = (config: string, trimmedOutputs: number, trimmedRereads: number) =>
+			run("a", config, true, { metrics: { ...computeTraceMetrics([]), trimmedOutputs, trimmedRereads } });
+		const markdown = renderMarkdown([trimmed("all-off", 0, 0), trimmed("trimmer", 8, 2)], "t");
+		expect(markdown).toContain("## Trimmed outputs");
+		expect(markdown).toContain("| trimmer | 8 | 2 (25%) |");
+		expect(markdown).not.toContain("| all-off | 0 |");
+		expect(renderMarkdown([trimmed("all-off", 0, 0)], "t")).not.toContain("## Trimmed outputs");
 	});
 
 	it("omits it for a single config", () => {

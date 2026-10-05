@@ -194,6 +194,7 @@ Before **every** request, pi rebuilds the message list from the persisted sessio
   - It does **not** fire on tool-loop turns, on `sendMessage({triggerTurn})` (which calls `_runAgentPrompt` directly, `:2271-2276`), or on `agent_before_settle` continuations.
 - **Conversion to the LLM:** `convertToLlm` maps `custom` to `role:"user"` with the same content (`ce/src/core/messages.ts:162-169`). The user message and the injected note therefore reach the provider as **two consecutive `user` messages**; openai-completions does not merge them (`ai/src/api/openai-completions.ts:1256-1290`).
   - **UNVERIFIED:** some strict jinja chat templates reject non-alternating roles. Test the target llama.cpp model.
+  - **Verified (D-060):** `pi-cli.integration.test.ts` runs real pi with memory's preference note. The provider receives `user` (the prompt) then `user` (the note), and the next request replays both unchanged as its prefix.
   - Alternative: the `input` event's `transform` folds text into the user message itself. Note that this text is persisted and shown in the UI as user text.
 - **System prompt:** returning `systemPrompt`, or mutating `systemPromptOptions` sections or tools, produces a system-message **delta** appended to the transcript (`extensions.md:103`; `system-prompt.ts` `diffSystemPromptSections`).
   - For `openai-completions`, `supportsMidConvoSystemMessages` defaults to `false`, so later system messages are **folded into the leading system message** (`ai/src/types.ts:847`, default at `openai-completions.ts:1677`).

@@ -93,6 +93,19 @@ describe("/exo", () => {
 		expect(notices(h).at(-1)?.[0]).toBe("Trimmer: off for this session.");
 	});
 
+	it("lets a module answer its own subcommands before treating the argument as a toggle", async () => {
+		const h = setup();
+		h.runtime.moduleIds = () => ["memory"];
+		h.runtime.moduleCommand = (id, args) =>
+			id === "memory" && args === "forget 3" ? "Forgot preference 3." : undefined;
+		await h.pi.command("exo", "memory forget 3");
+		expect(notices(h).at(-1)?.[0]).toBe("Forgot preference 3.");
+		await h.pi.command("exo", "memory on");
+		expect(notices(h).at(-1)?.[0]).toBe("Memory: on for this session.");
+		await h.pi.command("exo", "memory");
+		expect(notices(h).at(-1)).toEqual(["Usage: /exo memory on|off", "warning"]);
+	});
+
 	it("warns on unknown subcommands and reports handler failures", async () => {
 		const h = setup();
 		await h.pi.command("exo", "frobnicate");

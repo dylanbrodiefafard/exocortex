@@ -13,7 +13,7 @@ import { parseSettings, type TriageSettings } from "./settings.ts";
 
 export const TRIAGE_ID = "triage";
 
-const DIAGNOSE_PROMPT = loadPrompt(new URL("../prompts/diagnose.v1.md", import.meta.url));
+const DIAGNOSE_PROMPT = loadPrompt(new URL("../prompts/diagnose.v2.md", import.meta.url));
 const HYPOTHESIS_PROMPT = loadPrompt(new URL("../prompts/hypothesis.v1.md", import.meta.url));
 /** Diagnostic angles for parallel hypotheses (PlanSearch-style diversity, research R6.1). */
 const FRAMES = loadPrompt(new URL("../prompts/frames.v1.md", import.meta.url))
@@ -26,7 +26,7 @@ const HypothesisSchema = Type.Object({
 	check: Type.String({ maxLength: 400 }),
 });
 const HYPOTHESIS_TEMPERATURE = 0.8;
-/** Hypotheses sharing more of their words than this are duplicates. */
+/** Hypotheses or hints sharing more of their words than this are duplicates. */
 const DUPLICATE_SIMILARITY = 0.6;
 
 const DiagnosisSchema = Type.Object({
@@ -43,7 +43,10 @@ const MAX_LINE_CHARS = 300;
 
 interface TaskState {
 	readonly counts: Map<string, number>;
-	readonly hints: Map<string, number>;
+	/** Sidecar calls made for hints, per signature (the cap counts calls, shown or not). */
+	readonly hintCalls: Map<string, number>;
+	/** Hints the agent was shown, per signature. */
+	readonly hints: Map<string, string[]>;
 	readonly recent: string[];
 	readonly hypothesized: Set<string>;
 }
@@ -138,6 +141,7 @@ export function createTriage(raw: Readonly<Record<string, unknown>>, ctx: Module
 		const pool = ctx.pool();
 		if (settings.hypotheses === 0 || !pool || task.hypothesized.has(signature)) return undefined;
 		task.hypothesized.add(signature);
+		ctx.progress("Considering other causes of the repeated failure…");
 		const vars = promptVars(count, draft);
 		const evidence = `${draft.output}\n${goal}\n${task.recent.join("\n")}`;
 		const results = await Promise.all(
@@ -172,10 +176,12 @@ export function createTriage(raw: Readonly<Record<string, unknown>>, ctx: Module
 	}
 
 	async function diagnose(signature: string, count: number, draft: ToolResultDraft, signal: AbortSignal) {
-		const given = task.hints.get(signature) ?? 0;
+		const calls = task.hintCalls.get(signature) ?? 0;
 		const pool = ctx.pool();
-		if (!settings.sidecar || !pool || given >= settings.maxHintsPerSignature) return undefined;
-		task.hints.set(signature, given + 1);
+		if (!settings.sidecar || !pool || calls >= settings.maxHintsPerSignature) return undefined;
+		task.hintCalls.set(signature, calls + 1);
+		const earlier = task.hints.get(signature) ?? [];
+		ctx.progress("Diagnosing the repeated failure…");
 		const result = await pool.run({
 			module: TRIAGE_ID,
 			priority: "interactive",
@@ -187,7 +193,10 @@ export function createTriage(raw: Readonly<Record<string, unknown>>, ctx: Module
 				messages: [
 					{
 						role: "user",
-						content: DIAGNOSE_PROMPT.render(promptVars(count, draft)),
+						content: DIAGNOSE_PROMPT.render({
+							...promptVars(count, draft),
+							previous: earlier.map((h) => `- ${h}`).join("\n") || "(none)",
+						}),
 					},
 				],
 				maxTokens: 300,
@@ -208,7 +217,14 @@ export function createTriage(raw: Readonly<Record<string, unknown>>, ctx: Module
 			ctx.log(`dropped a hint naming unknown ${ungrounded.join(", ")}`);
 			return undefined;
 		}
-		return clip(hint, 600);
+		// The earlier hint did not stop the failure, so saying it again cannot help (D-061).
+		if (earlier.some((h) => similarity(wordSet(h), wordSet(hint)) > DUPLICATE_SIMILARITY)) {
+			ctx.log("dropped a hint that repeats an earlier one");
+			return undefined;
+		}
+		const shown = clip(hint, 600);
+		task.hints.set(signature, [...earlier, shown]);
+		return shown;
 	}
 }
 
@@ -251,7 +267,7 @@ function similarity(a: ReadonlySet<string>, b: ReadonlySet<string>): number {
 }
 
 function newTask(): TaskState {
-	return { counts: new Map(), hints: new Map(), recent: [], hypothesized: new Set() };
+	return { counts: new Map(), hintCalls: new Map(), hints: new Map(), recent: [], hypothesized: new Set() };
 }
 
 function isFailure(draft: ToolResultDraft): boolean {
@@ -274,9 +290,12 @@ export function isBenign(
 	return settings.benignCommands.some((benign) => words === benign || words.startsWith(`${benign} `));
 }
 
+/** The command, or for file tools the tool and its path (`edit src/lib.rs`), so hints know what was tried. */
 function commandOf(input: ToolResultDraft["input"], toolName: string): string {
 	const command = input["command"];
-	return typeof command === "string" ? clip(command.replace(/\s+/g, " ").trim(), 200) : toolName;
+	if (typeof command === "string") return clip(command.replace(/\s+/g, " ").trim(), 200);
+	const path = input["path"] ?? input["file_path"];
+	return typeof path === "string" ? `${toolName} ${clip(path, 160)}` : toolName;
 }
 
 /**

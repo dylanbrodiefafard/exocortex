@@ -232,7 +232,7 @@ function isolatedMemory(config: Record<string, unknown>, runDir: string, name: s
 function machineSettings(cwd: string): Record<string, unknown> {
 	const loaded = loadConfig({ cwd, env: { ...process.env, EXO_CONFIG: undefined } });
 	if (!loaded.sources[0]?.found || loaded.problems.length > 0) return {};
-	return { engine: loaded.config.engine, pool: loaded.config.pool };
+	return { engine: loaded.config.engine, pool: loaded.config.pool, embeddings: loaded.config.embeddings };
 }
 
 export interface ValidationResult {

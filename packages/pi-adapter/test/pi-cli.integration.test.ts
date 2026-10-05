@@ -3,6 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type ChatRequestFingerprint, openTraceStore, type StoredTraceEvent, sharedPrefix } from "@exocortex/core";
+import { openMemoryStore } from "@exocortex/mod-memory";
 import {
 	type FakeOpenAIServer,
 	type FakeOpenAIServerOptions,
@@ -297,6 +298,54 @@ describe("pi CLI with the Exocortex extension", { timeout: 30_000 }, () => {
 		const injected = events.find((e) => e.kind === "message" && e.synthetic);
 		expect(injected).toMatchObject({ module: "supervisor" });
 		expect(sidecarCalls.map((c) => c.priority)).toEqual(["interactive", "critical", "critical"]);
+	});
+
+	it("memory adds a learned preference right after the user's prompt, and the prefix stays stable (D-060)", async () => {
+		const memoryDir = await mkdtemp(join(tmpdir(), "exo-pi-mem-"));
+		try {
+			const dbPath = join(memoryDir, "memory.db");
+			const store = openMemoryStore(dbPath);
+			const id = store.addPreference("Write the failing test before the implementation.");
+			// Said in two repos, so it applies everywhere, including this run's fresh directory.
+			store.addSighting(id, { scope: "repo-a", session: "s1", standing: false, quote: "tests first" });
+			store.addSighting(id, { scope: "repo-b", session: "s2", standing: false, quote: "tests first please" });
+			store.close();
+
+			let main = 0;
+			const run = await runPi([], {}, "Add a function that parses durations", {
+				exoConfig: { modules: { memory: { enabled: true, preferences: true, dbPath } } },
+				server: {
+					// The sidecar picks which preferences fit the prompt before the agent starts.
+					respond: (body) =>
+						(body as { stream?: boolean }).stream
+							? (ONE_TOOL_CALL[main++] ?? { kind: "text", text: "(extra)" })
+							: { kind: "text", text: JSON.stringify({ apply: [1] }) },
+				},
+			});
+			expect(run.code).toBe(0);
+			type Request = { stream?: boolean; messages: { role: string; content: unknown }[] };
+			const requests = (server?.requests ?? []) as Request[];
+			expect(requests[0]?.stream).toBeFalsy();
+			expect(JSON.stringify(requests[0]?.messages)).toContain("1. Write the failing test before the implementation.");
+			const [first, second] = requests.filter((r) => r.stream);
+			const roles = first?.messages.map((m) => m.role) ?? [];
+			expect(roles.slice(-2)).toEqual(["user", "user"]);
+			expect(JSON.stringify(first?.messages.at(-2)?.content)).toContain("Add a function that parses durations");
+			const added = JSON.stringify(first?.messages.at(-1)?.content);
+			expect(added).toContain("exo memory: standing preferences");
+			expect(added).toContain("- Write the failing test before the implementation. (said in 2 sessions)");
+			// The second request replays it unchanged: the first request's messages are its prefix.
+			expect(second?.messages.slice(0, first?.messages.length)).toEqual(first?.messages);
+
+			const { events } = readTrace(run.dbPath);
+			expect(events.find((e) => e.kind === "exo.memory")?.data).toEqual({
+				action: "preferences_added",
+				preferences: [id],
+			});
+			expect(events.some((e) => e.kind === "message" && e.synthetic && e.module === "memory")).toBe(true);
+		} finally {
+			await rm(memoryDir, { recursive: true, force: true });
+		}
 	});
 
 	it("/exo supervisor off disables the module for the session", async () => {

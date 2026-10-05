@@ -5,7 +5,7 @@ Judge each checklist item separately:
 - "unmet": it is clearly not done or not attempted, or a warning below shows it was faked. In `fix`, write a short instruction to the agent.
 - "unknown": the evidence does not show either way. Prefer this over guessing.
 
-Also set `failed` to true if the agent says it cannot do the task or gave up, and `asked_user` to true if its final words ask the developer a question or for a decision.
+Also set `failed` to true if the agent says it cannot do the task or gave up, and `asked_user` to true only if the agent stopped because it needs an answer or a decision from the developer before it can go on. An offer of more work after it finished ("Want me to add tests too?") is not that.
 
 Acceptance checklist:
 {{criteria}}

@@ -111,6 +111,55 @@ describe("triage", () => {
 		expect(calls).toBe(1);
 	});
 
+	it("shows the second hint what the first one said, and drops it when it only repeats it", async () => {
+		const prompts: string[] = [];
+		const replies = [
+			{ diagnosis: "The borrow of `self.stack` outlives the push.", next_action: "Clone the value before mutating." },
+			{
+				diagnosis: "The borrow of `self.stack` outlives the push.",
+				next_action: "Clone the value before mutating it.",
+			},
+		];
+		const { triage, t } = setup({}, (prompt) => {
+			prompts.push(prompt);
+			return replies[prompts.length - 1] ?? {};
+		});
+		await fail(triage, draft(RUST_ERROR));
+		expect((await fail(triage, draft(RUST_ERROR)))?.note).toBe("repeat 2 + hint");
+		const third = await fail(triage, draft(RUST_ERROR));
+		expect(prompts[0]).toContain("Advice already given for this failure:\n(none)");
+		expect(prompts[1]).toContain(
+			"Advice already given for this failure:\n- The borrow of `self.stack` outlives the push. Clone the value before mutating.",
+		);
+		expect(third?.note).toBe("repeat 3");
+		expect(third?.text).not.toContain("hint:");
+		expect(t.logs).toContain("dropped a hint that repeats an earlier one");
+		// The dropped call still counts toward the cap: no third sidecar call.
+		await fail(triage, draft(RUST_ERROR));
+		expect(prompts).toHaveLength(2);
+	});
+
+	it("keeps a second hint that says something new, and tells the sidecar which files were edited", async () => {
+		const prompts: string[] = [];
+		const replies = [
+			{ diagnosis: "The borrow of `self.stack` outlives the push.", next_action: "Clone the value before mutating." },
+			{ diagnosis: "The iterator still holds `self.stack`.", next_action: "Collect the items into a Vec first." },
+		];
+		const { triage, t } = setup({}, (prompt) => {
+			prompts.push(prompt);
+			return replies[prompts.length - 1] ?? {};
+		});
+		await fail(triage, draft(RUST_ERROR));
+		expect(t.progress).toEqual([]);
+		await fail(triage, draft(RUST_ERROR));
+		triage.onToolResult?.({ toolName: "edit", input: { path: "lib.rs" }, isError: false, exitCode: null, output: "" });
+		const third = await fail(triage, draft(RUST_ERROR));
+		expect(third?.note).toBe("repeat 3 + hint");
+		expect(third?.text).toContain("Collect the items into a Vec first.");
+		expect(t.progress).toEqual(["Diagnosing the repeated failure…", "Diagnosing the repeated failure…"]);
+		expect(prompts[1]).toContain("- edit lib.rs → ok");
+	});
+
 	it("drops hints naming files or symbols absent from the evidence and workspace", async () => {
 		const { triage, t } = setup({}, () => ({
 			diagnosis: "The bug is in `parser_state` of src/parser.rs.",

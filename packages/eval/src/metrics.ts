@@ -55,6 +55,11 @@ export interface TraceMetrics {
 	readonly errorStops?: number;
 	/** Turns cut off by the output limit (`stopReason: "length"`). */
 	readonly lengthStops?: number;
+	/** Compactions after which one of the agent's next two commands re-ran one that had already passed (R4.4). */
+	readonly compactionReplays?: number;
+	/** Tool outputs the trimmer shortened, and how many of their saved full outputs the agent read back (R2.1). */
+	readonly trimmedOutputs?: number;
+	readonly trimmedRereads?: number;
 	/** One entry per error signature that occurred 2+ times: how the repeats and triage's hints went (D-057). */
 	readonly recurringErrors?: readonly RecurringError[];
 	/** Sidecar prompt + completion tokens by module (D-058). */
@@ -152,6 +157,8 @@ export function computeTraceMetrics(
 		failedCompactions: events.filter((e) => e.kind === "compaction.failed").length,
 		errorStops: stops(events, "error"),
 		lengthStops: stops(events, "length"),
+		compactionReplays: compactionReplays(events),
+		...trimmerRereads(events),
 		recurringErrors: recurringErrors(events),
 		sidecarTokensByModule: tokensByModule(sidecarCalls),
 		sidecarCalls: sidecarCalls.length,
@@ -160,6 +167,65 @@ export function computeTraceMetrics(
 			(c) => c.outcome !== "ok" && c.outcome !== "rejected_turn_cap" && c.outcome !== "rejected_budget",
 		).length,
 	};
+}
+
+/** How many commands the agent runs right after a compaction count as "its next actions" (research R4.4). */
+const REPLAY_WINDOW = 2;
+
+/**
+ * Research R4.4: a summary that loses "this already passed" makes the agent run it again. Counts
+ * compactions followed, within its next two commands, by a successful re-run of a command whose
+ * last run before the compaction had also succeeded.
+ */
+function compactionReplays(events: readonly StoredTraceEvent[]): number {
+	const results = new Map<string, boolean>();
+	for (const e of events) {
+		if (e.kind === "tool.result") results.set(String(record(e.data)["toolCallId"]), !failed(record(e.data)));
+	}
+	const passedLast = new Map<string, boolean>();
+	let replays = 0;
+	/** Commands still to look at after the latest compaction, and what had passed before it. */
+	let watch: { left: number; passed: Set<string> } | undefined;
+	for (const e of events) {
+		if (e.kind === "compaction") {
+			watch = { left: REPLAY_WINDOW, passed: new Set([...passedLast].filter(([, ok]) => ok).map(([c]) => c)) };
+			continue;
+		}
+		if (e.kind !== "tool.call") continue;
+		const data = record(e.data);
+		const command = record(data["input"])["command"];
+		if (typeof command !== "string") continue;
+		const ok = results.get(String(data["toolCallId"])) ?? false;
+		if (watch && watch.left > 0) {
+			watch.left -= 1;
+			if (ok && watch.passed.has(command)) {
+				replays += 1;
+				watch = undefined;
+			}
+		}
+		passedLast.set(command, ok);
+	}
+	return replays;
+}
+
+/** Research R2.1: the agent reading a saved full output back means the trimmer cut something it needed. */
+function trimmerRereads(events: readonly StoredTraceEvent[]): { trimmedOutputs: number; trimmedRereads: number } {
+	const saved = new Map<string, number>();
+	let trimmedOutputs = 0;
+	events.forEach((e, index) => {
+		if (e.kind !== "exo.rewrite" || e.module !== "trimmer") return;
+		trimmedOutputs += 1;
+		const path = record(e.data)["fullOutputPath"];
+		if (typeof path === "string" && path !== "" && !saved.has(path)) saved.set(path, index);
+	});
+	let trimmedRereads = 0;
+	for (const [path, index] of saved) {
+		const reread = events.some(
+			(e, i) => i > index && e.kind === "tool.call" && JSON.stringify(record(e.data)["input"] ?? "").includes(path),
+		);
+		if (reread) trimmedRereads += 1;
+	}
+	return { trimmedOutputs, trimmedRereads };
 }
 
 function stops(events: readonly StoredTraceEvent[], reason: string): number {

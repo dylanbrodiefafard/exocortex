@@ -24,6 +24,8 @@ const SelectionSchema = Type.Object({
 const GOAL_CHARS = 1_000;
 /** Lines always kept after a sidecar selection: the exit status and final summary live at the end. */
 const SIDECAR_TAIL_LINES = 10;
+/** The budget never cuts below this many error windows: the first errors are the root causes. */
+const MIN_ERROR_WINDOWS = 4;
 
 /**
  * Trims long tool outputs before the main model sees them (brief §6.2, D-029: a rewrite of new
@@ -48,7 +50,7 @@ export function createTrimmer(raw: Readonly<Record<string, unknown>>, ctx: Modul
 			if (NEVER_TRIMMED.has(draft.toolName) || !settings.tools.includes(draft.toolName)) return undefined;
 			if (draft.current.length <= settings.minChars) return undefined;
 			const lines = prepareLines(draft.current, settings);
-			let result = trimLines(lines, settings);
+			let result = trimToBudget(lines, settings);
 			let how = "head/tail/errors";
 			if (settings.sidecar && result.text.length > settings.sidecarAboveChars) {
 				const selected = await selectWithSidecar(ctx, settings, draft, lines, goal, signal);
@@ -61,7 +63,7 @@ export function createTrimmer(raw: Readonly<Record<string, unknown>>, ctx: Modul
 			const path = draft.fullOutputPath ?? saveFullOutput(settings, draft, ctx);
 			trimmed += 1;
 			charsSaved += draft.current.length - result.text.length;
-			return rewriteOf(result, how, path);
+			return { ...rewriteOf(result, how, path), ...(path ? { details: { fullOutputPath: path } } : {}) };
 		},
 
 		status() {
@@ -70,6 +72,17 @@ export function createTrimmer(raw: Readonly<Record<string, unknown>>, ctx: Modul
 				: `${TRIMMER_ID} (${trimmed} trimmed, −${Math.round(charsSaved / 1000)}k chars)`;
 		},
 	};
+}
+
+/** The deterministic tier, with fewer error windows while the result is over `maxChars`. */
+function trimToBudget(lines: readonly string[], settings: TrimmerSettings): Trimmed {
+	let windows = settings.maxErrorWindows;
+	let result = trimLines(lines, settings);
+	while (result.text.length > settings.maxChars && windows > MIN_ERROR_WINDOWS) {
+		windows = Math.max(MIN_ERROR_WINDOWS, Math.floor(windows / 2));
+		result = trimLines(lines, { ...settings, maxErrorWindows: windows });
+	}
+	return result;
 }
 
 function rewriteOf(result: Trimmed, how: string, path: string | undefined): ToolRewrite {
@@ -93,6 +106,7 @@ async function selectWithSidecar(
 	if (!pool) return undefined;
 	const numbered = lines.map((line, i) => `${i + 1}: ${line.slice(0, settings.maxLineChars)}`).join("\n");
 	if (numbered.length > settings.sidecarMaxInputChars) return undefined;
+	ctx.progress("Trimming noisy output…");
 	const result = await pool.run({
 		module: TRIMMER_ID,
 		priority: "interactive",

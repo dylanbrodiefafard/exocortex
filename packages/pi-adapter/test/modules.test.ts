@@ -73,7 +73,10 @@ afterEach(() => {
 function setup(
 	modules: Record<string, ModuleFactory>,
 	enabled: Record<string, Record<string, unknown>>,
-	options: { hasUI?: boolean; budgetsMs?: { rewrite?: number; settle?: number; compact?: number } } = {},
+	options: {
+		hasUI?: boolean;
+		budgetsMs?: { rewrite?: number; settle?: number; compact?: number; userTurn?: number };
+	} = {},
 ) {
 	harness = createAdapterHarness({ modules: enabled }, options);
 	const logs: string[] = [];
@@ -530,5 +533,194 @@ describe("compaction hosting", () => {
 		const { h: empty } = setup({ a: probeModule("a", newProbe()) }, { a: { enabled: true } });
 		await empty.pi.emit("session_start");
 		expect(await empty.pi.emit("session_before_compact", compactEvent())).toBeUndefined();
+	});
+});
+
+describe("user-turn context, suggestions and module commands", () => {
+	it("adds modules' context as one tagged message after the user's prompt, once per prompt", async () => {
+		const seen: UserTurn[] = [];
+		const provider = (id: string, text: string | undefined) => (): ExoModule => ({
+			id,
+			contextForUserTurn: async (turn) => {
+				seen.push(turn);
+				return text;
+			},
+		});
+		const { h } = setup(
+			{ a: provider("a", " remember A "), b: provider("b", undefined), c: provider("c", "remember C") },
+			{ a: { enabled: true }, b: { enabled: true }, c: { enabled: true } },
+		);
+		await h.pi.emit("session_start");
+		expect(await h.pi.emit("before_agent_start", { prompt: "x" })).toBeUndefined();
+		await h.pi.emit("input", { text: "add a parser", source: "interactive" });
+		expect(await h.pi.emit("before_agent_start", { prompt: "add a parser" })).toEqual({
+			message: {
+				customType: "exo.a",
+				content: "remember A\n\nremember C",
+				display: true,
+				details: { exo: { module: "a", modules: ["a", "c"] } },
+			},
+		});
+		expect(seen[0]).toEqual({ text: "add a parser", origin: "user" });
+		expect(await h.pi.emit("before_agent_start", { prompt: "add a parser" })).toBeUndefined();
+	});
+
+	it("gives up on slow or failing context providers without holding the prompt", async () => {
+		const { h } = setup(
+			{
+				slow: (): ExoModule => ({ id: "slow", contextForUserTurn: () => new Promise(() => {}) }),
+				bad: (): ExoModule => ({
+					id: "bad",
+					contextForUserTurn: async () => {
+						throw new Error("boom");
+					},
+				}),
+			},
+			{ slow: { enabled: true }, bad: { enabled: true } },
+			{ budgetsMs: { userTurn: 20 } },
+		);
+		await h.pi.emit("session_start");
+		await h.pi.emit("input", { text: "go", source: "interactive" });
+		expect(await h.pi.emit("before_agent_start", {})).toBeUndefined();
+		await h.pi.emit("input", { text: "go", source: "interactive" });
+		h.runtime.overrides.modules["slow"] = { enabled: false };
+		h.runtime.rebuildModules();
+		expect(await h.pi.emit("before_agent_start", {})).toBeUndefined();
+		expect(h.errors.map((e) => e.where)).toEqual(["bad.contextForUserTurn"]);
+	});
+
+	it("marks a suggestion the user sent unchanged, and tells modules about compactions", async () => {
+		const a = newProbe();
+		let compacted = 0;
+		const { h } = setup(
+			{
+				a: probeModule("a", a, () => ({
+					kind: "suggest",
+					text: "Not done yet.\n1. Add the README",
+					summary: "1 item",
+				})),
+				b: (): ExoModule => ({ id: "b", onCompacted: () => void compacted++ }),
+			},
+			{ a: { enabled: true }, b: { enabled: true } },
+		);
+		await h.pi.emit("session_start");
+		await h.pi.emit("agent_before_settle", settleEvent());
+		await h.pi.emit("input", { text: "Not done yet.  1. Add the README\n", source: "interactive" });
+		await h.pi.emit("agent_before_settle", settleEvent());
+		await h.pi.emit("input", { text: "Not done yet. 1. Add the README, and a changelog", source: "interactive" });
+		await h.pi.emit("input", { text: "Not done yet.\n1. Add the README", source: "interactive" });
+		expect(a.turns.map((t) => t.origin)).toEqual(["suggestion", "user", "user"]);
+		await h.pi.emit("session_compact", { reason: "threshold" });
+		expect(compacted).toBe(1);
+	});
+
+	it("routes /exo <module> <args> to the module and traces rewrite details", async () => {
+		const { h } = setup(
+			{
+				a: (): ExoModule => ({
+					id: "a",
+					command: (args) => (args === "list things" ? "two things" : undefined),
+					rewriteToolResult: async (d) => ({ text: `${d.current}!`, note: "n", details: { fullOutputPath: "/tmp/f" } }),
+				}),
+				bad: (): ExoModule => ({
+					id: "bad",
+					command: () => {
+						throw new Error("boom");
+					},
+				}),
+			},
+			{ a: { enabled: true }, bad: { enabled: true } },
+		);
+		await h.pi.emit("session_start");
+		expect(h.runtime.moduleCommand("a", "list things")).toBe("two things");
+		expect(h.runtime.moduleCommand("a", "on")).toBeUndefined();
+		expect(h.runtime.moduleCommand("missing", "x")).toBeUndefined();
+		expect(h.runtime.moduleCommand("bad", "x")).toBeUndefined();
+		expect(h.errors.map((e) => e.where)).toEqual(["bad.command"]);
+		const traced: { data: unknown }[] = [];
+		h.runtime.traceSession = { append: (e: { data: unknown }) => traced.push(e) } as never;
+		await h.pi.emit("tool_result", bashResult("boom"));
+		expect(traced[0]?.data).toEqual({ fullOutputPath: "/tmp/f", toolCallId: "call-1", note: "n", chars: 5 });
+	});
+});
+
+describe("progress while a hook holds pi", () => {
+	const statuses = (h: AdapterHarness) =>
+		h.pi.ui
+			.filter((c) => c.method === "setStatus" || c.method === "setWorkingMessage")
+			.map((c) => [c.method, ...c.args]);
+
+	it("shows a module's progress on the status line and the spinner, then restores both", async () => {
+		let context: ModuleContext | undefined;
+		const { h } = setup(
+			{
+				a: (_settings, ctx): ExoModule => {
+					context = ctx;
+					return {
+						id: "a",
+						contextForUserTurn: async () => {
+							ctx.progress("Recalling your preferences…");
+							return "note";
+						},
+						rewriteToolResult: async () => undefined,
+						onSettle: async () => ({ kind: "notify", summary: "a: complete", level: "info" }),
+					};
+				},
+			},
+			{ a: { enabled: true } },
+		);
+		await h.pi.emit("session_start");
+		await h.pi.emit("input", { text: "add a parser", source: "interactive" });
+		await h.pi.emit("before_agent_start", {});
+		expect(statuses(h)).toEqual([
+			["setStatus", "exo", "exo: Recalling your preferences…"],
+			["setWorkingMessage", "Recalling your preferences…"],
+			["setStatus", "exo", undefined],
+			["setWorkingMessage"],
+		]);
+
+		// A hook that reports nothing touches nothing; progress outside a hook is dropped.
+		h.pi.ui.length = 0;
+		await h.pi.emit("tool_result", bashResult("boom"));
+		context?.progress("too late");
+		expect(statuses(h)).toEqual([]);
+
+		// After a settle left a status, progress gives it back when done.
+		await h.pi.emit("agent_before_settle", settleEvent());
+		h.pi.ui.length = 0;
+		await h.pi.emit("input", { text: "now add tests", source: "interactive" });
+		await h.pi.emit("before_agent_start", {});
+		expect(statuses(h).at(-2)).toEqual(["setStatus", "exo", "exo: a: complete"]);
+	});
+
+	it("keeps the message until the last of several concurrent hooks returns, and is silent without a UI", async () => {
+		const release: (() => void)[] = [];
+		const module = (): ModuleFactory => (_settings, ctx) => ({
+			id: "a",
+			rewriteToolResult: async () => {
+				ctx.progress("Trimming noisy output…");
+				await new Promise<void>((resolve) => release.push(resolve));
+				return undefined;
+			},
+		});
+		const { h } = setup({ a: module() }, { a: { enabled: true } });
+		await h.pi.emit("session_start");
+		const first = h.pi.emit("tool_result", bashResult("one"));
+		const second = h.pi.emit("tool_result", bashResult("two"));
+		await new Promise((r) => setTimeout(r, 10));
+		release[0]?.();
+		await first;
+		expect(statuses(h).some((c) => c[0] === "setWorkingMessage" && c.length === 1)).toBe(false);
+		release[1]?.();
+		await second;
+		expect(statuses(h).slice(-2)).toEqual([["setStatus", "exo", undefined], ["setWorkingMessage"]]);
+
+		const headless = setup({ a: module() }, { a: { enabled: true } }, { hasUI: false });
+		await headless.h.pi.emit("session_start", {}, headless.h.pi.ctx({ hasUI: false }));
+		const held = headless.h.pi.emit("tool_result", bashResult("x"), headless.h.pi.ctx({ hasUI: false }));
+		await new Promise((r) => setTimeout(r, 10));
+		release[2]?.();
+		await held;
+		expect(statuses(headless.h)).toEqual([]);
 	});
 });

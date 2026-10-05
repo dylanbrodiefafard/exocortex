@@ -17,6 +17,7 @@ import {
 	type ToolOutcome,
 	type ToolResultDraft,
 	toJsonValue,
+	type UserTurn,
 } from "@exocortex/core";
 import { COMPACTION_ID, createCompaction } from "@exocortex/mod-compaction";
 import { createMemory, MEMORY_ID } from "@exocortex/mod-memory";
@@ -44,6 +45,8 @@ const SETTLE_BUDGET_MS = 5 * 60_000;
 const REWRITE_BUDGET_MS = 20_000;
 /** Hard cap on a module-written compaction summary; pi's default compaction runs after it. */
 const COMPACT_BUDGET_MS = 120_000;
+/** Hard cap on how long modules may hold a new user prompt before the agent starts on it. */
+const USER_TURN_BUDGET_MS = 6_000;
 const STATUS_KEY = "exo";
 
 export interface ModuleHostOptions {
@@ -53,7 +56,12 @@ export interface ModuleHostOptions {
 	/** Module factories by config id; defaults to every module Exocortex ships. */
 	readonly modules?: Readonly<Record<string, ModuleFactory>>;
 	/** Overrides the hold-the-loop budgets (tests). */
-	readonly budgetsMs?: { readonly rewrite?: number; readonly settle?: number; readonly compact?: number };
+	readonly budgetsMs?: {
+		readonly rewrite?: number;
+		readonly settle?: number;
+		readonly compact?: number;
+		readonly userTurn?: number;
+	};
 }
 
 /**
@@ -70,8 +78,47 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 	const rewriteBudgetMs = options.budgetsMs?.rewrite ?? REWRITE_BUDGET_MS;
 	const settleBudgetMs = options.budgetsMs?.settle ?? SETTLE_BUDGET_MS;
 	const compactBudgetMs = options.budgetsMs?.compact ?? COMPACT_BUDGET_MS;
+	const userTurnBudgetMs = options.budgetsMs?.userTurn ?? USER_TURN_BUDGET_MS;
 	let modules: ExoModule[] = [];
 	let cwd = process.cwd();
+	/** The follow-up a module last put in the editor: sent unchanged, it is not the user's wording. */
+	let suggested: string | undefined;
+	let turn: UserTurn | undefined;
+	/** The UI of the hooks now holding pi, how many there are, and whether one of them reported progress. */
+	let holding: { ui: ExtensionContext["ui"]; hooks: number; shown: boolean } | undefined;
+	/** The status the last settle left on the status line: progress replaces it only for a while. */
+	let settledStatus: string | undefined;
+
+	/**
+	 * Runs a hook that holds pi, letting modules say what they are waiting on (`ctx.progress`):
+	 * the message goes on the status line and next to pi's working spinner, and both are restored
+	 * when the last such hook returns.
+	 */
+	async function whileHolding<T>(ctx: ExtensionContext, hook: () => Promise<T>): Promise<T> {
+		if (!ctx.hasUI) return hook();
+		holding = holding ?? { ui: ctx.ui, hooks: 0, shown: false };
+		const held = holding;
+		held.hooks += 1;
+		try {
+			return await hook();
+		} finally {
+			held.hooks -= 1;
+			if (held.hooks === 0) {
+				if (held.shown) {
+					held.ui.setStatus(STATUS_KEY, settledStatus);
+					held.ui.setWorkingMessage();
+				}
+				if (holding === held) holding = undefined;
+			}
+		}
+	}
+
+	function progress(message: string): void {
+		if (!holding) return;
+		holding.shown = true;
+		holding.ui.setStatus(STATUS_KEY, `exo: ${message}`);
+		holding.ui.setWorkingMessage(message);
+	}
 
 	function build(): void {
 		modules = [];
@@ -90,13 +137,29 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 	runtime.rebuildModules = build;
 	runtime.moduleStatus = () => modules.map((m) => m.status?.() ?? m.id);
 	runtime.moduleIds = () => Object.keys(factories);
+	runtime.moduleCommand = (id, args) => {
+		try {
+			return modules.find((m) => m.id === id)?.command?.(args);
+		} catch (error) {
+			onError(`${id}.command`, error);
+			return undefined;
+		}
+	};
 
 	function moduleContext(id: string): ModuleContext {
 		return {
 			cwd,
 			pool: () => runtime.pool,
+			embedder: () => runtime.embedder,
 			record: (event) => runtime.traceSession?.append({ ...event, module: id, synthetic: true }),
 			runCommand: (command, opts) => runShellCommand(command, { cwd, ...opts }),
+			progress: (message) => {
+				try {
+					progress(message);
+				} catch (error) {
+					onError(`${id}.progress`, error);
+				}
+			},
 			log: (message) => options.log(`${id}: ${message}`),
 		};
 	}
@@ -123,13 +186,32 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 	});
 
 	pi.on("input", (event) => {
-		each("onUserTurn", (m) =>
-			m.onUserTurn?.({ text: event.text, origin: event.source === "extension" ? "extension" : "user" }),
-		);
+		const accepted = suggested !== undefined && sameText(suggested, event.text);
+		suggested = undefined;
+		const current: UserTurn = {
+			text: event.text,
+			origin: event.source === "extension" ? "extension" : accepted ? "suggestion" : "user",
+		};
+		turn = current;
+		each("onUserTurn", (m) => m.onUserTurn?.(current));
 		return undefined;
 	});
 
-	pi.on("tool_result", async (event) => {
+	pi.on("before_agent_start", async (_event, ctx) => {
+		try {
+			return await whileHolding(ctx, userTurnContext);
+		} catch (error) {
+			onError("modules.before_agent_start", error);
+			return undefined;
+		}
+	});
+
+	pi.on("session_compact", () => {
+		each("onCompacted", (m) => m.onCompacted?.());
+		return undefined;
+	});
+
+	pi.on("tool_result", async (event, ctx) => {
 		const outcome: ToolOutcome = {
 			toolName: event.toolName,
 			input: toObject(event.input),
@@ -139,7 +221,7 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 		};
 		each("onToolResult", (m) => m.onToolResult?.(outcome));
 		try {
-			return await rewrite(event, outcome);
+			return await whileHolding(ctx, () => rewrite(event, outcome));
 		} catch (error) {
 			onError("modules.tool_result", error);
 			return undefined;
@@ -155,9 +237,9 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 		}
 	});
 
-	pi.on("session_before_compact", async (event) => {
+	pi.on("session_before_compact", async (event, ctx) => {
 		try {
-			return await compact(event);
+			return await whileHolding(ctx, () => compact(event));
 		} catch (error) {
 			onError("modules.session_before_compact", error);
 			return undefined;
@@ -168,6 +250,46 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 		modules = [];
 		return undefined;
 	});
+
+	/**
+	 * Lets modules add context to a new user prompt (D-029): their texts become one persisted
+	 * `exo.<module>` custom message right after the user's message. `before_agent_start` fires once
+	 * per prompt, so each `input` is offered once.
+	 */
+	async function userTurnContext() {
+		const current = turn;
+		turn = undefined;
+		const providers = modules.filter((m) => m.contextForUserTurn);
+		if (!current || providers.length === 0) return undefined;
+		const controller = new AbortController();
+		const budget = setTimeout(() => controller.abort(), userTurnBudgetMs);
+		try {
+			const parts: { module: string; text: string }[] = [];
+			for (const module of providers) {
+				if (controller.signal.aborted) break;
+				const text = await untilAborted(
+					module.contextForUserTurn?.(current, controller.signal),
+					controller.signal,
+				).catch((error: unknown) => {
+					onError(`${module.id}.contextForUserTurn`, error);
+					return undefined;
+				});
+				if (text?.trim()) parts.push({ module: module.id, text: text.trim() });
+			}
+			const [first] = parts;
+			if (!first) return undefined;
+			return {
+				message: {
+					customType: `exo.${first.module}`,
+					content: parts.map((p) => p.text).join("\n\n"),
+					display: true,
+					details: { exo: { module: first.module, modules: parts.map((p) => p.module) } },
+				},
+			};
+		} finally {
+			clearTimeout(budget);
+		}
+	}
 
 	/**
 	 * Lets modules rewrite a text-only tool result in turn. The original stays in the trace (the
@@ -211,7 +333,7 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 				kind: "exo.rewrite",
 				synthetic: true,
 				module: module.id,
-				data: { toolCallId: draft.toolCallId, note: result.note, chars: result.text.length },
+				data: { ...result.details, toolCallId: draft.toolCallId, note: result.note, chars: result.text.length },
 			});
 		}
 		return { text: current, notes };
@@ -288,6 +410,7 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 			return undefined;
 		} finally {
 			// Nothing to report: don't leave "checking the work…" on the status line.
+			if (!acted) settledStatus = undefined;
 			if (!acted && ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, undefined);
 			clearTimeout(budget);
 		}
@@ -295,10 +418,12 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 
 	function apply(moduleId: string, action: SettleAction, ctx: ExtensionContext) {
 		const status = (text: string | undefined) => {
+			settledStatus = text;
 			if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, text);
 		};
 		switch (action.kind) {
 			case "suggest":
+				suggested = action.text;
 				status(`exo: ${action.summary} (suggestion in editor)`);
 				if (ctx.hasUI) {
 					ctx.ui.setEditorText(action.text);
@@ -332,6 +457,10 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 				return undefined;
 		}
 	}
+}
+
+function sameText(a: string, b: string): boolean {
+	return a.replace(/\s+/g, " ").trim() === b.replace(/\s+/g, " ").trim();
 }
 
 function lastAssistantText(event: AgentBeforeSettleEvent): string {
