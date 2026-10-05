@@ -37,6 +37,10 @@ npm run eval -- --model ninfer/coding --tags hard --repeat 5 \
 
 - **Primary:** precision of `complete`, because a false "done" is the costly error. **Secondary:** Δ success, and verdict latency (sidecar tokens, wall-clock).
 - **What changes a default:** an option that raises precision of `complete` without lowering success, at acceptable cost, becomes the default in a new D-entry. After the single-option runs, confirm with `supervisor-research` (all options on).
+- **After research verification (D-054):**
+  - `supervisor-think` has the strongest prior: non-thinking judges were near chance on pairwise code judging. If GPU time is short, run `supervisor,supervisor-think` first.
+  - `supervisor-items` also sets `finalMessage: "claims"`. CodeJudgeBench found judges do better *with* the judged response's full text, so stripping the narrative could hurt. If `supervisor-items` is flat or negative, rerun it with `"finalMessage"` removed (a local copy of the config) before judging per-criterion verdicts.
+  - `completeVotes` stays the logprob-free confidence route: logprobs are anti-calibrated on Qwen 3.5 27B (VERDI, verified).
 
 ## 3. Phase 4 modules (D-042 to D-045)
 
@@ -53,8 +57,10 @@ npm run eval -- --model ninfer/coding --tags error-recovery --config all-off,tri
   - **Watch for re-reads:** saved-output files being read back is the sign that something needed was trimmed.
 - **Triage:**
   - **Primary:** repeated-error rate.
+  - Self-Debug's gain came almost entirely from the first feedback turn (verified). Check in the trace whether the second hint per signature ever precedes a fix; if not, cap at 1.
   - **Secondary:** success, and turns from first failure to success.
   - `triage-hypotheses` also measures Phase 6 (D-050).
+- **Retro-masking (R2.3) is not in this plan** (D-053): for Qwen3-32B the source study showed no masking gain, and a local 30B lost half its prefix hits under masking. Revisit only if the compaction run below shows context-driven failures.
 - **Compaction:** the hard tasks rarely reach pi's compaction threshold. Force it with a small-context copy of the model:
   1. In `~/.pi/agent/models.json`, copy your ninfer provider block under a new provider name, for example `"ninfer32k"`. Keep the same `baseUrl` and model `id` (so ninfer sees the same model name) and set the model's `"contextWindow": 32768`.
   2. Run:
@@ -78,7 +84,8 @@ npm run eval -- --model ninfer/coding --tags hard --config all-off,memory,memory
 ```
 
 - **Primary:** the "Success by repeat" table. Memory can only help from r2 on, so look for a rise over r1 that `all-off` doesn't show.
-- **Also read:** total tokens, compared on a budget-matched basis (research R5.4). Then inspect the cards with `sqlite3 eval-runs/<stamp>/memory-memory.db 'select lesson, seen, injected, helped, hurt from cards'`.
+- **Also read:** total tokens, compared on a budget-matched basis (research R5.4).
+- **Expect a small effect (D-055).** Verified experience moved held-out solvers by 1–4.5 points in VibeMemBench, and `--repeat 3` cannot detect that. Read this run as a harm check (no drop in success, no budget-matched token loss) plus the learning curve. A benefit claim needs more repeats or cross-task fixtures. Then inspect the cards with `sqlite3 eval-runs/<stamp>/memory-memory.db 'select lesson, seen, injected, helped, hurt from cards'`.
 - **Caveat:** this is same-task replay, an upper bound (research §5c). Cross-task transfer needs sibling fixtures in one repo.
 
 ## 5. Everything together
