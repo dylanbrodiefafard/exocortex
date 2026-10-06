@@ -148,8 +148,7 @@ export function commandKey(tool: ToolOutcome): string | undefined {
 	const line = tool.input["command"];
 	if (typeof line !== "string") return undefined;
 	// What a test or build run is piped into shapes its output, not what ran.
-	const pipe = verifyingRun(line) ? line.indexOf("|", line.lastIndexOf("&&") + 1) : -1;
-	const command = pipe === -1 ? line : line.slice(0, pipe);
+	const command = verifyingRun(line)?.unpiped ?? line;
 	return command
 		.replace(/\s*2>&1/g, "")
 		.replace(/\s+/g, " ")

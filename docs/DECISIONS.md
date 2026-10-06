@@ -1214,51 +1214,46 @@ Open check: Exocortex's injected `custom_message` reaches ninfer as a second con
 - **Rules:** a finding is confirmed with a failing test before it is fixed, and one that does not reproduce is marked so in the plan with the reason.
 - **Consequences:** D-052 still holds: every module is off by default, so no result changes meaning. Fixtures should be re-calibrated after C2 (the tamper guard) lands, since it can change which runs pass.
 
-### D-080 — Core infrastructure hardened: trace, sidecar pool, config authority, processes · accepted (2026-10-06; stream D of D-076; amends D-033, D-036 and D-062's "never throws")
-- **Context:** stream D of the hardening plan, items D1–D11. All eleven reproduced with a failing test and are fixed. Core is loaded inside pi's process, so the common thread is: nothing may throw from a timer, nothing may reject unhandled, and nothing synchronous may wait long.
-- **A project's config has limited authority (D5; amends D-033).** `<cwd>/.exocortex/config.jsonc` arrives with a cloned repository. It may set `enabled` and `modules`. `engine`, `embeddings`, `trace` and `pool` in it are dropped and reported as problems, which disables Exocortex with a warning (D-033's fail closed) and names the user's file as the place for them.
-  - Before, such a file could point sidecar calls at any host with `apiKey: "$ANY_ENV_VAR"` as the bearer token, and write the trace anywhere.
-  - A file named by `EXO_CONFIG` is the user's own, wherever it is, including inside the project. The eval's per-run config files are unaffected.
-  - `__proto__` keys are removed from parsed config at every depth: the parser turns one into the object's prototype, which would supply keys no check on own keys sees.
-  - README and the example config said a project "overrides any global key"; both corrected.
-- **Config validation (D6, D7; amends D-033).**
-  - `loadConfig` takes `modules`: the known module ids, each with its settings schema. An unknown id, a setting the schema does not name, or a value it refuses is a problem. The adapter passes the five modules' schemas (`pi-adapter/src/module-settings.ts`; each module now exports its `SettingsSchema`). Callers that pass nothing (the eval's CLIs) get the old, loose check.
-  - This is stricter than before for users: a module-setting typo used to fall back to the default in silence, and now disables Exocortex with a warning, as D-033 says a typo should.
-  - A module entry without `enabled` is valid (it was rejected) and means off.
-  - `pool.timeoutMs`, `pool.maxHoldMs` and `embeddings.timeoutMs` are capped at 2^31−1 ms: a longer `setTimeout` fires at once. `engine.baseUrl` and `embeddings.baseUrl` must parse as http(s) URLs.
-  - A relative `trace.dbPath` resolves against the directory of the config file that set it, not the process's cwd.
-  - `loadConfig` no longer throws on an unreadable file; it is a problem.
-- **Trace store (D1, D11; amends D-033).**
-  - Event data and session meta are serialised at `append`/`startSession`. A value with no JSON form costs only itself. Before, it failed the whole batch at flush, session row included, and every later event of that session then failed its foreign key.
-  - Inside a flush, a row the database refuses is dropped alone. When the database cannot be written (locked, full, I/O error) the batch stays buffered and a timer retries with a doubling delay up to 5 s. The buffer is capped (`maxPending`, 20,000): past it events and sidecar records are dropped and counted, session rows are kept, and the loss is reported once.
-  - Flushes use `BEGIN IMMEDIATE` and a 20 ms busy timeout (it was 2 s, on pi's event loop). `close()` allows its last flush 500 ms, then reports what it could not write.
-  - `onError` and the rollback are guarded; `flush`, `close` and `append` cannot throw.
-  - `openDatabase` sets `busy_timeout` before any other pragma and retries the switch to WAL, which SQLite does not wait for. Migrations run in one `BEGIN IMMEDIATE` transaction that reads `user_version` again inside it. Eight processes opening one new file at once all succeed; seven of eight failed before.
-  - `trace.retentionDays` (default 0: keep everything) deletes older sessions with their events and sidecar calls when the store opens, at most 500 sessions per open, and skips when the file is locked.
-  - `events(…, { kinds })` filters in SQL.
-- **Sidecar pool (D3, D4, D9; amends D-036).**
-  - **Held background calls.** The deadline still includes queueing, with one exception: it does not run while a `background` call is held because the main agent is active. It runs whenever the call is free to start or running, and stops again if the main agent resumes before a slot was free. Each stretch of holding is bounded by the new `pool.maxHoldMs` (default 10 minutes), after which the call resolves with the new outcome `expired_held`. Before, a call held for longer than its timeout timed out without ever running.
-  - **`drain(timeoutMs)`** resolves `{ settled, remaining }` once no `background` call is queued or running, or when the time is up. While draining, background calls are not held for the main agent. It cancels nothing; `close()` after it cuts what is left. It is not wired into shutdown here (M13, E2).
-  - **Accounting.** Token usage is counted per response as it arrives, so a structured call whose repair turn times out reports the first response's tokens. The session budget is checked again when a queued call's turn comes (`rejected_budget`). The trace records the `max_tokens` actually sent, after the module's clamp.
-  - **Cut-off replies.** An `ok` result carries `finishReason`; `"length"` means the reply hit `max_tokens`, and the trace row's `error` column says so. A structured reply cut off before it held a valid answer gets no repair turn and the new outcome `truncated`.
-  - `run()` also resolves, as `error`, when the limits callback throws.
-- **Structured output (D2; amends D-036's "extracted tolerantly").** `extractJson` drops everything up to the last `</think>`, with or without an opening tag, and treats text after an unclosed `<think>` as reasoning. Candidates are the whole text, then balanced `{…}`/`[…]` values from the end backwards, read with JSON's string rules. The first one that passes the schema wins. Before, a draft inside unfinished reasoning could be returned as the answer, and prose containing two JSON values cost a repair turn. The scan is bounded (1,000,000 characters, 8 levels) so a reply of unbalanced brackets cannot hold the event loop.
-- **`runProcess` (D8).** It resolves when the process exits, plus 200 ms for output still in the pipes, instead of when the pipes close. A daemonised child that inherited them no longer holds the caller past the timeout. A synchronous `spawn` error and an already-aborted signal resolve instead of rejecting or running. Output is decoded with a `StringDecoder` per stream. After a kill it waits at most 1 s for the exit.
-- **Helpers that said "never throws" (D10; amends D-062).** The embedder builds its timeout inside the `try` and clamps it. `toJsonValue` survives throwing getters, proxies and deep nesting, keeps an `Error`'s name, message, stack and cause, turns a `Map` into pairs and a `Set` into an array, and summarises every array-buffer view (a `Float32Array` used to expand to one property per element).
-- **Different from the plan's proposed fix:**
-  - D3: the proposal was to start the deadline at first eligibility. The clock pauses during every hold instead, since a call can become eligible, find no free slot, and be held again.
-  - D9: a cut-off structured reply is its own outcome (`truncated`) and not `invalid_output`, so the trace shows that the cure is a higher `maxTokensPerCall`.
-  - D7: unknown settings are found by comparing keys with the schema's properties in core. The module schemas keep `additionalProperties: true`, so the modules' own `parseSettings` is unchanged.
-- **Not done, and why:**
-  - **Retention is off by default.** Deleting a user's recorded sessions is the owner's call; the setting exists and is documented. No `VACUUM`: freed pages are reused, the file does not shrink.
-  - **No `finishReason` column in `sidecar_calls`.** It would need a migration; the `truncated` outcome and the note in `error` carry it.
-  - **Module paths** (memory's `dbPath`, the trimmer's `saveDir`) are resolved by the modules, not by `config.ts`. D6 fixed `trace.dbPath` only.
-  - **`/exo` overrides** are not checked against the module schemas.
-- **Open risks:**
-  - **A project's file can still enable modules and set their options, and the supervisor's `checks` are shell commands run when the agent stops.** So a cloned repository can still get a command run, if the user works in it with Exocortex on; it can also choose where memory's `dbPath` and the trimmer's `saveDir` write. D5 closes the path the audit named (redirecting sidecar traffic and leaking an environment variable); this one is the same class and needs its own decision: for example, a project may only switch modules off, or its `checks` need a one-time confirmation. The README now tells users to read a cloned repository's file.
-  - A valid config that used a module setting no schema names now disables Exocortex until it is fixed. The shipped example and all eval configs are tested against the schemas.
-  - With the 20 ms busy timeout, two busy sessions on one trace file retry more often than before. Nothing is lost while the buffer cap holds, but events reach the file later.
-  - `drain` waits for a follow-up call only if it is submitted in the same turn of the event loop as the result it follows. A module that awaits something else in between is not waited for.
+---
+
+### D-077 — Command lines are parsed and an output's lines are read by what they can prove · accepted (2026-10-06; hardening stream A of D-076; amends D-041, D-043's benign exits, D-070 item 6, D-073 items 1 and 5, D-074 and D-075)
+- **Context:** core's `runs.ts`, `output.ts` and `loops.ts` are what memory, triage, compaction, the trimmer, the supervisor and the eval read commands and output through. The audit's items A1–A13 all reproduced (81 of the first 142 fixture cases failed against the old code), and the fixtures found one more: CTest's green summary `100% tests passed, 0 tests failed out of 2` matched the failure pattern, so a passing `ctest | tail` read as failed.
+- **Decision.**
+  1. **A command line is parsed** (A1; new `core/modules/shell.ts`). The trimmer's tokenizer moved to core and grew: quotes, backslashes, comments, redirections with their targets, heredocs, `$(…)`, `${…}`, backticks, subshells and brace groups.
+     - `splitCommand` is the trimmer's function, and still declines heredocs, substitutions and groups.
+     - `shellCommands` lists every command a line runs, through subshells and `bash -c '…'`, and says for each whether the line's exit code would show its failure (`exitShown`) and whether a pipe took it (`piped`). It follows `&&`, `||`, `;`, newlines, `&`, `|`, `set -o pipefail`, `set -e` and conditions (`if`, `while`, `!`). A subshell's `set` ends with it; the word `pipefail` elsewhere on the line no longer counts.
+     - `verifyingRun` looks at every command and takes the line's last test run, else its last build (the audit proposed the last of either; the supervisor asks for the tests first). `hidden` is true when any run on the line is not shown by the exit code, so `cargo build | tail; cargo test` is read from its output.
+     - `VerifyingRun` gains `unpiped`: the line without what the run is piped into. Memory's command key uses it, where it cut the string at the first `|`, quoted or not.
+  2. **Wrappers are stripped, then the runner is matched by its words** (A2, A5). `unwrapCommand` removes assignments, `env`, `time`, `timeout [opts] N`, `sudo`, `nice`, `uv run`, `poetry run`, `npx`, `pnpm exec`, `nix … -c` and the like. Runners are matched on the command name and its subcommand, not by a regex over the line: `cargo +nightly test`, `cargo nextest run`, `python3.11 -m pytest`, `.venv/bin/pytest`, `make -j 8 -C build test`, `npm run check`, `pnpm test`, `yarn test`, `bun test`, `just test`, `./run_tests.sh`, `bash scripts/test.sh`. `cargo buildx` is no longer a build. `verifyingRun(line, { tests })` takes a caller's own test commands (for the supervisor's `checks`, S7).
+  3. **A piped command that is not a known run is `unknown`** (A3). `outcomeOf` returned `passed` for `./integration.sh | tail`. Callers: memory already acts only on `failed` and `passed`; compaction already lists an `unknown` run under neither heading; triage and the eval ask only `maskedFailure`; the supervisor and the adapter ask `verifyingRun`/`hiddenRun`. None needed a change beyond memory's key. A line with a test run whose own exit code was seen is still `passed`, whatever else on it was piped.
+  4. **Three grammars instead of one** (A6, A4, A7).
+     - *Failed*: what a runner or compiler prints only when it fails. New: `test result: FAILED`, a bare `FAIL`, doctest names with spaces, pytest's `N failed`/`N errors` summary, nextest's summary, CTest's `***Failed`, GoogleTest's `file:N: Failure`, `ninja: build stopped`, linker errors by their wording. Go compile errors need the column, which log lines never have. unittest's `ERROR:` header needs `name (class)` after it, so pip's `ERROR: pip's dependency resolver…` is not one.
+     - *Crash*: a traceback, a Python exception name (now with a module path, and not `SystemExit: 0`), a Rust panic. It is the error of an output known to have failed. Behind a pipe it decides only when no pass summary comes after it: a green unittest run prints the traceback of an exception the code logged and handled. This is new and goes past the audit's proposal, which was to drop single lines.
+     - *Notable*: kept by the trimmer, proves nothing. Go's `file.go:N:` log lines, `ld:` notes and warnings, and the old looser spellings. Go's indented `x_test.go:N:` lines count as a failure's message only when the output has a `--- FAIL`.
+     - `classifyErrorLine` still answers the trimmer's question (all three are `specific`). New `lineVerdicts(lines)` answers "did it fail"; `firstErrorLine`, `failureLines`, `readHiddenRun` and the sidecar veto use it.
+  5. **A mention of an error is a statement, not a name** (A8). Before the generic words are looked for, backticked and quoted identifiers, paths, URLs and `a::b` module paths are removed, a word joined by `-`, `_` or `.` to another is not counted (`error-chain`, `--fatal-warnings`, `errors.go`), and a line of quoted source (`3 |     let error = 1;`) is skipped. `failures=0` and `0 tests failed` join the false positives.
+  6. **A failure's identity keeps its values** (A9). Positions are normalised first. Temporary paths, UUIDs, `host:port` and addresses go everywhere, inside quotes too. Times, dates and durations go only outside quotes, and in `failureLines` only where a toolchain prints them: a timestamp starting the line or in brackets, a duration in parentheses, after `in`/`took`/`time`, or ending Go's and CTest's result lines. tsc's `(12,5)` is a position. A rustc error carries the file named on the ` --> ` line under it, without the line number.
+  7. **Smaller fixes.** The ANSI pattern stops an OSC sequence at its terminator or the end of the line (A10). `ungroundedReferences` takes a bare word for a path only with a `/` or a source extension, not `Node.js`-style product names, and looks a name up without its `()`, `:line` or type arguments (A11). The benign-exit rule is core's `isBenignExit`, with `BENIGN_EXIT_COMMANDS` as its default list; triage's `isBenign` calls it with its own setting (A12).
+  8. **Fixtures** (A13): `core/test/run-fixtures.test.ts` holds real-shaped Rust, Go, C/C++ and Python output and about a hundred command lines, each read in both directions.
+- **Changed behaviour to know about.**
+  - `set -o pipefail; cargo test | tail` is now a run whose exit code is its own; it was not recognised at all.
+  - pytest's `10 passed, 2 errors` behind a pipe reads `failed`; it was `unknown`.
+  - Triage's benign exit looks at the last command after a pipe: `cat log | grep x` exiting 1 is benign, `grep x log | sort` exiting 1 is not. It was the reverse.
+  - The trimmer's command split now handles `\"` inside double quotes, skips comments and drops a redirection's target, where it gave up or kept a stray word. Its tests pass unchanged.
+  - Callers of `classifyErrorLine` that mean "did it fail" (memory's `detail.ts`) still get the trimmer's answer; stream M can move to `lineVerdicts`.
+- **Not done.**
+  - **Clang in A9.** gcc and clang put the file in the error line itself, so nothing is appended; only rustc's ` --> ` is.
+  - **`callKey` keeps the loose time and duration rules** outside quotes. It hashes the whole output of any command, where timings appear in more shapes than a summary grammar can list, and a missed loop was judged worse than two results differing only in an unquoted `5 ms` reading as one. Its `a.c:12:34` misreading is fixed.
+  - **`tests` is not passed down** to `hiddenRun`, `outcomeOf` or `maskedFailure`; only `verifyingRun` takes it until a caller needs more.
+  - **Compilers** (`gcc`, `g++`, `clang`, `rustc`) are not build runs, as before. **JavaScript summaries** (jest, vitest) are still left to the sidecar (D-075).
+  - **The supervisor's evidence** is unchanged (D-075's note stands; S7).
+- **Open risks.**
+  - Untested with a real model. The shell reader models what agents usually write, not bash: `case`, functions and loops are read through conservatively (their commands count as hidden), `eval`, `xargs`, `ssh` and `docker exec` are not read into, and `$'…'` quoting is not known.
+  - **Hidden is conservative.** Any run on the line that the exit code does not show makes the line `hidden`, so more lines are read from their output, and a test run the patterns cannot read costs a sidecar call (D-075's 4 s).
+  - **A script is a test run by its name** (`test`, `tests`, `check` in the file name; `build` for a build). A project's `./check-links.sh` counts as one.
+  - **A pass summary now outvotes an earlier traceback or panic** behind a pipe. A runner that prints a pass summary for one suite and crashes in another without saying so would read as passed; the D-016 runners end a failing run with a line of the first grammar.
+  - **More runs are recognised**, so the supervisor's "files changed after the last full test run" note and memory's and compaction's readings apply to commands they ignored before. D-052 still holds: every module is off by default and nothing has been A/B'd.
+  - `eval.integration.test.ts` ("supervisor suggest mode") failed once in four full runs here and passed alone three times; it drives the real pi CLI and looks timing-dependent, not related to this change.
 
 ---
 
@@ -1358,6 +1353,54 @@ Open check: Exocortex's injected `custom_message` reaches ninfer as a second con
   - **The detectable difference is an estimate** from 6–30 differences and assumes they are roughly normal. With many ties the real power is lower.
   - **A config block without `enabled` is a config problem today,** and one problem turns the trace off, so the eval writes `enabled: false` into the memory and trimmer blocks it adds. Stream D's D7 makes `enabled` optional.
   - **Usage is a default change in the shared fake:** a test in another stream that asserts 10 and 5 will fail on merge and needs its numbers updated.
+
+---
+
+### D-080 — Core infrastructure hardened: trace, sidecar pool, config authority, processes · accepted (2026-10-06; stream D of D-076; amends D-033, D-036 and D-062's "never throws")
+- **Context:** stream D of the hardening plan, items D1–D11. All eleven reproduced with a failing test and are fixed. Core is loaded inside pi's process, so the common thread is: nothing may throw from a timer, nothing may reject unhandled, and nothing synchronous may wait long.
+- **A project's config has limited authority (D5; amends D-033).** `<cwd>/.exocortex/config.jsonc` arrives with a cloned repository. It may set `enabled` and `modules`. `engine`, `embeddings`, `trace` and `pool` in it are dropped and reported as problems, which disables Exocortex with a warning (D-033's fail closed) and names the user's file as the place for them.
+  - Before, such a file could point sidecar calls at any host with `apiKey: "$ANY_ENV_VAR"` as the bearer token, and write the trace anywhere.
+  - A file named by `EXO_CONFIG` is the user's own, wherever it is, including inside the project. The eval's per-run config files are unaffected.
+  - `__proto__` keys are removed from parsed config at every depth: the parser turns one into the object's prototype, which would supply keys no check on own keys sees.
+  - README and the example config said a project "overrides any global key"; both corrected.
+- **Config validation (D6, D7; amends D-033).**
+  - `loadConfig` takes `modules`: the known module ids, each with its settings schema. An unknown id, a setting the schema does not name, or a value it refuses is a problem. The adapter passes the five modules' schemas (`pi-adapter/src/module-settings.ts`; each module now exports its `SettingsSchema`). Callers that pass nothing (the eval's CLIs) get the old, loose check.
+  - This is stricter than before for users: a module-setting typo used to fall back to the default in silence, and now disables Exocortex with a warning, as D-033 says a typo should.
+  - A module entry without `enabled` is valid (it was rejected) and means off.
+  - `pool.timeoutMs`, `pool.maxHoldMs` and `embeddings.timeoutMs` are capped at 2^31−1 ms: a longer `setTimeout` fires at once. `engine.baseUrl` and `embeddings.baseUrl` must parse as http(s) URLs.
+  - A relative `trace.dbPath` resolves against the directory of the config file that set it, not the process's cwd.
+  - `loadConfig` no longer throws on an unreadable file; it is a problem.
+- **Trace store (D1, D11; amends D-033).**
+  - Event data and session meta are serialised at `append`/`startSession`. A value with no JSON form costs only itself. Before, it failed the whole batch at flush, session row included, and every later event of that session then failed its foreign key.
+  - Inside a flush, a row the database refuses is dropped alone. When the database cannot be written (locked, full, I/O error) the batch stays buffered and a timer retries with a doubling delay up to 5 s. The buffer is capped (`maxPending`, 20,000): past it events and sidecar records are dropped and counted, session rows are kept, and the loss is reported once.
+  - Flushes use `BEGIN IMMEDIATE` and a 20 ms busy timeout (it was 2 s, on pi's event loop). `close()` allows its last flush 500 ms, then reports what it could not write.
+  - `onError` and the rollback are guarded; `flush`, `close` and `append` cannot throw.
+  - `openDatabase` sets `busy_timeout` before any other pragma and retries the switch to WAL, which SQLite does not wait for. Migrations run in one `BEGIN IMMEDIATE` transaction that reads `user_version` again inside it. Eight processes opening one new file at once all succeed; seven of eight failed before.
+  - `trace.retentionDays` (default 0: keep everything) deletes older sessions with their events and sidecar calls when the store opens, at most 500 sessions per open, and skips when the file is locked.
+  - `events(…, { kinds })` filters in SQL.
+- **Sidecar pool (D3, D4, D9; amends D-036).**
+  - **Held background calls.** The deadline still includes queueing, with one exception: it does not run while a `background` call is held because the main agent is active. It runs whenever the call is free to start or running, and stops again if the main agent resumes before a slot was free. Each stretch of holding is bounded by the new `pool.maxHoldMs` (default 10 minutes), after which the call resolves with the new outcome `expired_held`. Before, a call held for longer than its timeout timed out without ever running.
+  - **`drain(timeoutMs)`** resolves `{ settled, remaining }` once no `background` call is queued or running, or when the time is up. While draining, background calls are not held for the main agent. It cancels nothing; `close()` after it cuts what is left. It is not wired into shutdown here (M13, E2).
+  - **Accounting.** Token usage is counted per response as it arrives, so a structured call whose repair turn times out reports the first response's tokens. The session budget is checked again when a queued call's turn comes (`rejected_budget`). The trace records the `max_tokens` actually sent, after the module's clamp.
+  - **Cut-off replies.** An `ok` result carries `finishReason`; `"length"` means the reply hit `max_tokens`, and the trace row's `error` column says so. A structured reply cut off before it held a valid answer gets no repair turn and the new outcome `truncated`.
+  - `run()` also resolves, as `error`, when the limits callback throws.
+- **Structured output (D2; amends D-036's "extracted tolerantly").** `extractJson` drops everything up to the last `</think>`, with or without an opening tag, and treats text after an unclosed `<think>` as reasoning. Candidates are the whole text, then balanced `{…}`/`[…]` values from the end backwards, read with JSON's string rules. The first one that passes the schema wins. Before, a draft inside unfinished reasoning could be returned as the answer, and prose containing two JSON values cost a repair turn. The scan is bounded (1,000,000 characters, 8 levels) so a reply of unbalanced brackets cannot hold the event loop.
+- **`runProcess` (D8).** It resolves when the process exits, plus 200 ms for output still in the pipes, instead of when the pipes close. A daemonised child that inherited them no longer holds the caller past the timeout. A synchronous `spawn` error and an already-aborted signal resolve instead of rejecting or running. Output is decoded with a `StringDecoder` per stream. After a kill it waits at most 1 s for the exit.
+- **Helpers that said "never throws" (D10; amends D-062).** The embedder builds its timeout inside the `try` and clamps it. `toJsonValue` survives throwing getters, proxies and deep nesting, keeps an `Error`'s name, message, stack and cause, turns a `Map` into pairs and a `Set` into an array, and summarises every array-buffer view (a `Float32Array` used to expand to one property per element).
+- **Different from the plan's proposed fix:**
+  - D3: the proposal was to start the deadline at first eligibility. The clock pauses during every hold instead, since a call can become eligible, find no free slot, and be held again.
+  - D9: a cut-off structured reply is its own outcome (`truncated`) and not `invalid_output`, so the trace shows that the cure is a higher `maxTokensPerCall`.
+  - D7: unknown settings are found by comparing keys with the schema's properties in core. The module schemas keep `additionalProperties: true`, so the modules' own `parseSettings` is unchanged.
+- **Not done, and why:**
+  - **Retention is off by default.** Deleting a user's recorded sessions is the owner's call; the setting exists and is documented. No `VACUUM`: freed pages are reused, the file does not shrink.
+  - **No `finishReason` column in `sidecar_calls`.** It would need a migration; the `truncated` outcome and the note in `error` carry it.
+  - **Module paths** (memory's `dbPath`, the trimmer's `saveDir`) are resolved by the modules, not by `config.ts`. D6 fixed `trace.dbPath` only.
+  - **`/exo` overrides** are not checked against the module schemas.
+- **Open risks:**
+  - **A project's file can still enable modules and set their options, and the supervisor's `checks` are shell commands run when the agent stops.** So a cloned repository can still get a command run, if the user works in it with Exocortex on; it can also choose where memory's `dbPath` and the trimmer's `saveDir` write. D5 closes the path the audit named (redirecting sidecar traffic and leaking an environment variable); this one is the same class and needs its own decision: for example, a project may only switch modules off, or its `checks` need a one-time confirmation. The README now tells users to read a cloned repository's file.
+  - A valid config that used a module setting no schema names now disables Exocortex until it is fixed. The shipped example and all eval configs are tested against the schemas.
+  - With the 20 ms busy timeout, two busy sessions on one trace file retry more often than before. Nothing is lost while the buffer cap holds, but events reach the file later.
+  - `drain` waits for a follow-up call only if it is submitted in the same turn of the event loop as the result it follows. A module that awaits something else in between is not waited for.
 
 ---
 

@@ -5,7 +5,7 @@ import { errorSignature, runShellCommand, type ToolOutcome, type UserTurnContext
 import { createTestModuleContext, type SidecarReply } from "@exocortex/testkit";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { cardDetail, detailShare, FAILURE_DETAIL_LINES, failureDetail } from "../src/detail.ts";
-import { createEpisodeTracker } from "../src/episodes.ts";
+import { commandKey, createEpisodeTracker } from "../src/episodes.ts";
 import { createMemory, deterministicLesson, recall } from "../src/memory.ts";
 import { openMemoryStore } from "../src/store.ts";
 
@@ -165,6 +165,19 @@ describe("failure detail (D-072)", () => {
 		const later = `thread 'aaa' (1) panicked at tests/other.rs:1:1:\n${TABLE}`;
 		expect(detailShare(table, new Set(failureDetail(later, FAILURE_DETAIL_LINES)))).toBe(1);
 		expect(detailShare([], new Set())).toBe(1);
+	});
+});
+
+describe("commandKey", () => {
+	const key = (command: string) =>
+		commandKey({ toolName: "bash", input: { command }, isError: false, exitCode: 0, output: "" });
+
+	it("is one name for a run however its output was cut, and leaves a quoted pipe alone (D-077)", () => {
+		expect(key("cd app && cargo test 2>&1 | tail -30")).toBe("cd app && cargo test");
+		expect(key("cargo test |& grep -E 'FAILED|ok'")).toBe("cargo test");
+		expect(key("go test -run 'TestA|TestB' ./...")).toBe("go test -run 'TestA|TestB' ./...");
+		expect(key("go test -run 'TestA|TestB' ./... | tail")).toBe("go test -run 'TestA|TestB' ./...");
+		expect(key("cat a.txt | head")).toBe("cat a.txt | head");
 	});
 });
 

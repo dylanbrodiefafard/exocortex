@@ -460,6 +460,10 @@ describe("isBenign", () => {
 		expect(of("grep x file", 2)).toBe(false);
 		expect(of("grepx file")).toBe(false);
 		expect(of("grep x file && make")).toBe(false);
+		// Core's rule (D-077): the command that set the exit code, read as the shell reads the line.
+		expect(of("cat build.log | grep -c ERROR")).toBe(true);
+		expect(of("echo 'x; grep' && make")).toBe(false);
+		expect(of("cd src &&\n  grep -rn TODO .")).toBe(true);
 		expect(isBenign({ exitCode: 1, input: {}, toolName: "read" }, settings)).toBe(false);
 	});
 });

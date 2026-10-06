@@ -28,6 +28,98 @@ describe("callKey", () => {
 	});
 });
 
+describe("callKey (D-077)", () => {
+	const key = (output: string) => callKey("bash", { command: "make" }, output);
+
+	it("reads a.c:12:34 as a place in a file, not a clock time", () => {
+		expect(key("a.c:12:34: warning: unused")).not.toBe(key("a.c:13:35: warning: unused"));
+		expect(key("src/lib.rs:9:5")).not.toBe(key("src/lib.rs:9:6"));
+		expect(key("started 12:34:56 done")).toBe(key("started 12:35:01 done"));
+	});
+
+	it("keeps what a program printed in quotes", () => {
+		expect(key("assert '10:30' == '10:45'")).not.toBe(key("assert '10:44' == '10:45'"));
+		expect(key('got "2026-10-05", want "2026-10-06"')).not.toBe(key('got "2026-10-04", want "2026-10-06"'));
+	});
+
+	it("is the same across temporary directories, generated ids and ports", () => {
+		expect(key("wrote '/tmp/pytest-of-u/pytest-12/test_a0/out.json' on 127.0.0.1:43211")).toBe(
+			key("wrote '/tmp/pytest-of-u/pytest-13/test_a0/out.json' on 127.0.0.1:51876"),
+		);
+		expect(key("job 6f1c2a9e-3b4d-4c5e-8f70-123456789abc on localhost:8123")).toBe(
+			key("job 0a0b0c0d-1111-4222-8333-444455556666 on localhost:9456"),
+		);
+		expect(key("cache /var/folders/ab/xyz123/T/tmp1/x and /home/u/tmp/keep")).toBe(
+			key("cache /var/folders/ab/xyz123/T/tmp2/y and /home/u/tmp/keep"),
+		);
+		expect(key("see /home/u/tmp/a")).not.toBe(key("see /home/u/tmp/b"));
+	});
+});
+
+describe("failureKey: what stays and what goes (D-077)", () => {
+	const key = (output: string) => failureKey({ toolName: "bash", input: { command: "make test" }, output });
+
+	it.each([
+		// A value in the message is the failure; erasing it made a different wrong answer the same failure.
+		["AssertionError: '10:30' != '10:45'", "AssertionError: '10:44' != '10:45'"],
+		[
+			"    cal_test.go:9: Easter(1981) = 1981-04-26, want 1981-04-19\n--- FAIL: TestEaster (0.00s)",
+			"    cal_test.go:9: Easter(1981) = 1981-04-12, want 1981-04-19\n--- FAIL: TestEaster (0.00s)",
+		],
+		["E   AssertionError: expected 5 ms, got 6 ms", "E   AssertionError: expected 5 ms, got 7 ms"],
+		["E   assert 10:30 == 10:45", "E   assert 10:44 == 10:45"],
+		// The same rustc error in another file is another error.
+		["error[E0308]: mismatched types\n  --> src/a.rs:3:5", "error[E0308]: mismatched types\n  --> src/b.rs:3:5"],
+		["src/a.ts(12,5): error TS2322: Type 'x'", "src/b.ts(12,5): error TS2322: Type 'x'"],
+	])("differs: %s / %s", (a, b) => {
+		expect(key(a)).not.toBe(key(b));
+	});
+
+	it.each([
+		// What moves between two runs of the same failure.
+		["src/a.ts(12,5): error TS2322: Type 'x'", "src/a.ts(40,9): error TS2322: Type 'x'"],
+		[
+			"FileNotFoundError: [Errno 2] No such file or directory: '/tmp/pytest-of-u/pytest-12/test_a0/in.txt'",
+			"FileNotFoundError: [Errno 2] No such file or directory: '/tmp/pytest-of-u/pytest-13/test_a0/in.txt'",
+		],
+		[
+			"E   ConnectionRefusedError: 127.0.0.1:43211 (request 6f1c2a9e-3b4d-4c5e-8f70-123456789abc)",
+			"E   ConnectionRefusedError: 127.0.0.1:51876 (request 0a0b0c0d-1111-4222-8333-444455556666)",
+		],
+		[
+			"panic: dial tcp [::1]:5432: connect: connection refused",
+			"panic: dial tcp [::1]:6543: connect: connection refused",
+		],
+		[
+			"error[E0308]: mismatched types\n  --> src/a.rs:3:5\n   |\n3  | x",
+			"error[E0308]: mismatched types\n  --> src/a.rs:90:1\n   |\n90 | x",
+		],
+		["2026-10-05 10:00:01,123 ERROR worker failed", "2026-10-06 11:30:10,456 ERROR worker failed"],
+		["[12:00:01] FAIL\tpkg", "[12:07:44] FAIL\tpkg"],
+		["FAIL\texample.com/rl\t0.004s", "FAIL\texample.com/rl\t1.204s"],
+		["[  FAILED  ] RingTest.Wraps (0 ms)", "[  FAILED  ] RingTest.Wraps (12 ms)"],
+		["1/2 Test #1: ring .....***Failed    0.01 sec", "1/2 Test #1: ring .....***Failed    0.31 sec"],
+		["====== 1 failed, 2 passed in 0.52s ======", "====== 1 failed, 2 passed in 1.07s ======"],
+		[
+			"test result: FAILED. 2 passed; 1 failed; finished in 0.00s",
+			"test result: FAILED. 2 passed; 1 failed; finished in 0.31s",
+		],
+	])("same: %s / %s", (a, b) => {
+		expect(key(a)).toBe(key(b));
+	});
+
+	it("names the file under a rustc error, not its line, and stops at the next error", () => {
+		expect(failureLines("error[E0308]: mismatched types\n  --> src/a.rs:3:5\nerror: aborting")).toEqual([
+			"error: aborting",
+			"error[E0308]: mismatched types --> src/a.rs",
+		]);
+		expect(failureLines("error: linking failed\nerror[E0308]: mismatched\n --> src/a.rs:1:1")).toEqual([
+			"error: linking failed",
+			"error[E0308]: mismatched --> src/a.rs",
+		]);
+	});
+});
+
 describe("trailingLoop", () => {
 	const keys = (text: string) => text.split("");
 

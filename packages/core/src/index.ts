@@ -71,21 +71,27 @@ export {
 	firstErrorLine,
 	isRoutineLine,
 	isTestPath,
+	type LineVerdict,
+	lineVerdicts,
 	normalizeErrorLine,
 	ungroundedReferences,
 } from "./modules/output.ts";
 export { loadPrompt, type PromptTemplate, renderPrompt } from "./modules/prompts.ts";
 export {
+	BENIGN_EXIT_COMMANDS,
 	type HiddenRunReading,
 	hiddenRun,
+	isBenignExit,
 	judgeHiddenRun,
 	maskedFailure,
 	outcomeOf,
+	type RunOptions,
 	type RunVerdict,
 	readHiddenRun,
 	type VerifyingRun,
 	verifyingRun,
 } from "./modules/runs.ts";
+export { commandBase, type ShellCommand, shellCommands, splitCommand, unwrapCommand } from "./modules/shell.ts";
 export type {
 	Committable,
 	CompactionRequest,

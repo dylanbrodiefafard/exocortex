@@ -6,6 +6,7 @@ import {
 	failureKey,
 	fileEdits,
 	firstErrorLine,
+	isBenignExit,
 	loadPrompt,
 	loopHistoryLength,
 	type ModuleContext,
@@ -407,20 +408,14 @@ function indent(text: string): string {
 	return text.split("\n").join("\n  ");
 }
 
-/** `grep` finding nothing (exit 1) is an answer, not a failure. Looks at the last `&&`/`;` step. */
+/** `grep` finding nothing (exit 1) is an answer, not a failure: core's rule (D-077), with this module's list. */
 export function isBenign(
 	draft: Pick<ToolResultDraft, "exitCode" | "input" | "toolName">,
 	settings: TriageSettings,
 ): boolean {
-	if (draft.exitCode !== 1) return false;
-	const command = commandOf(draft.input, draft.toolName);
-	const last =
-		command
-			.split(/&&|;|\|\|/)
-			.at(-1)
-			?.trim() ?? "";
-	const words = last.replace(/^(\w+=\S*\s+)+/, "");
-	return settings.benignCommands.some((benign) => words === benign || words.startsWith(`${benign} `));
+	const command = draft.input["command"];
+	const line = typeof command === "string" ? command : commandOf(draft.input, draft.toolName);
+	return isBenignExit(line, draft.exitCode, settings.benignCommands);
 }
 
 /** The command, or for file tools the tool and its path (`edit src/lib.rs`), so hints know what was tried. */

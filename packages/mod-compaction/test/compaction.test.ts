@@ -87,6 +87,8 @@ describe("compaction", () => {
 		bash("cargo fmt", 0);
 		bash("ls  -la", 0);
 		bash("cargo fmt", 0);
+		// Not a known run, and piped: its exit code was `tail`'s, so it is listed nowhere (D-077).
+		bash("./integration.sh 2>&1 | tail -3", 0, "3 scenarios run");
 		module.onToolResult?.({ toolName: "read", input: { path: "x" }, isError: false, exitCode: null, output: "" });
 
 		const summary = await summaryOf(module, request({ conversation: "[User]: implement forth in src/lib.rs" }));

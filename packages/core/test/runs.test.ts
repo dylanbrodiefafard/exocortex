@@ -1,7 +1,15 @@
 import { createTestModuleContext, type SidecarReply } from "@exocortex/testkit";
 import { describe, expect, it } from "vitest";
 import { fileEdits } from "../src/modules/edits.ts";
-import { judgeHiddenRun, maskedFailure, outcomeOf, readHiddenRun, verifyingRun } from "../src/modules/runs.ts";
+import {
+	BENIGN_EXIT_COMMANDS,
+	isBenignExit,
+	judgeHiddenRun,
+	maskedFailure,
+	outcomeOf,
+	readHiddenRun,
+	verifyingRun,
+} from "../src/modules/runs.ts";
 
 describe("verifyingRun", () => {
 	it("finds the test or build run a command line ends in", () => {
@@ -9,15 +17,22 @@ describe("verifyingRun", () => {
 			kind: "test",
 			bare: "cargo test --offline",
 			hidden: false,
+			unpiped: "cd app && RUST_BACKTRACE=1 cargo test --offline 2>&1",
 		});
 		expect(verifyingRun("make -s -j4")?.kind).toBe("build");
 		expect(verifyingRun("timeout 60 go test ./... | tail -20")).toEqual({
 			kind: "test",
 			bare: "go test ./...",
 			hidden: true,
+			unpiped: "timeout 60 go test ./...",
 		});
-		expect(verifyingRun("set -o pipefail; cargo test | tail")).toBeUndefined();
+		// `pipefail` set either way: the pipeline exits with the run's status (D-077 reads `;` too).
+		expect(verifyingRun("set -o pipefail; cargo test | tail")?.hidden).toBe(false);
 		expect(verifyingRun("set -o pipefail && cargo test | tail")?.hidden).toBe(false);
+		// The word alone is not the option: a subshell's setting ends with it.
+		expect(verifyingRun("(set -o pipefail; true) && cargo test | tail")?.hidden).toBe(true);
+		expect(verifyingRun("echo pipefail; cargo test | tail")?.hidden).toBe(true);
+		expect(verifyingRun("set +o pipefail; cargo test | tail")?.hidden).toBe(true);
 		expect(verifyingRun("cat src/lib.rs | head")).toBeUndefined();
 	});
 });
@@ -45,6 +60,37 @@ describe("maskedFailure", () => {
 		expect(maskedFailure(piped(output, { input: { command: "git log | head" } }))).toBe(false);
 		expect(maskedFailure(piped(output, { exitCode: 1 }))).toBe(false);
 		expect(maskedFailure(piped(output, { input: { path: "a.rs" } }))).toBe(false);
+	});
+});
+
+describe("isBenignExit", () => {
+	it("is exit code 1 from a command that answers with it", () => {
+		expect(isBenignExit("grep -q x file", 1)).toBe(true);
+		expect(isBenignExit("LC_ALL=C timeout 5 /usr/bin/rg foo", 1)).toBe(true);
+		expect(isBenignExit("make && git diff --exit-code", 1)).toBe(true);
+		expect(isBenignExit("[ -f Cargo.lock ]", 1)).toBe(true);
+		expect(isBenignExit("(cd src && grep -rn TODO .)", 1)).toBe(true);
+		expect(isBenignExit("grep x file", 2)).toBe(false);
+		expect(isBenignExit("grep x file", null)).toBe(false);
+		expect(isBenignExit("grepx file", 1)).toBe(false);
+		expect(isBenignExit("git diffx", 1)).toBe(false);
+		expect(isBenignExit("", 1)).toBe(false);
+		expect(isBenignExit("grep 'open", 1)).toBe(false);
+	});
+
+	it("looks at the command that set the exit code: the last one, after a pipe too", () => {
+		expect(isBenignExit("grep x file && make", 1)).toBe(false);
+		expect(isBenignExit("cat log | grep ERROR", 1)).toBe(true);
+		expect(isBenignExit("grep ERROR log | sort", 1)).toBe(false);
+		expect(isBenignExit("echo 'a; grep' && make", 1)).toBe(false);
+		expect(isBenignExit("make; grep -c 'x && y' out", 1)).toBe(true);
+	});
+
+	it("takes the caller's list", () => {
+		expect(isBenignExit("jq -e .ok out.json", 1)).toBe(false);
+		expect(isBenignExit("jq -e .ok out.json", 1, ["jq"])).toBe(true);
+		expect(isBenignExit("grep x file", 1, [])).toBe(false);
+		expect(BENIGN_EXIT_COMMANDS).toContain("git diff");
 	});
 });
 
@@ -91,7 +137,9 @@ describe("reading a run whose exit code a pipe hid (D-075)", () => {
 		expect(readHiddenRun(piped("ok  \texample.com/pkg\t0.21s", "go test ./... | tail -3"))).toBe("passed");
 		expect(readHiddenRun(piped("Ran 7 tests in 0.366s\n\nOK", "python3 -m unittest 2>&1 | tail -3"))).toBe("passed");
 		expect(readHiddenRun(piped("===== 12 passed in 0.41s =====", "pytest | tail -1"))).toBe("passed");
-		expect(readHiddenRun(piped("==== 10 passed, 2 errors in 0.41s ====", "pytest | tail -1"))).toBe("unknown");
+		// pytest's own summary says so (D-077; it was `unknown` while only pass summaries were read).
+		expect(readHiddenRun(piped("==== 10 passed, 2 errors in 0.41s ====", "pytest | tail -1"))).toBe("failed");
+		expect(readHiddenRun(piped("==== 10 passed, 2 warnings in 0.41s ====", "pytest | tail -1"))).toBe("passed");
 		// TAP's passing lines are not Go's package summary.
 		expect(readHiddenRun(piped("ok 12 - parses ipv6", "make test | tail -1"))).toBe("unknown");
 		expect(readHiddenRun(piped("3", "cargo test 2>&1 | grep -c ok"))).toBe("unknown");
@@ -167,6 +215,13 @@ describe("reading a run whose exit code a pipe hid (D-075)", () => {
 		// "passed" against a line that mentions a failure.
 		const mixed = "Tests:       1 failed, 3 passed, 4 total";
 		expect((await judge(mixed, { verdict: "passed", evidence: mixed })).reading).toEqual(unknown);
+		// A line that only names something called an error does not veto "passed" (D-077).
+		const named = `PASS src/errors/error.test.js\n${JEST}`;
+		expect((await judge(named, { verdict: "passed", evidence: "Tests:       4 passed, 4 total" })).reading).toEqual({
+			verdict: "passed",
+			source: "sidecar",
+			evidence: "Tests:       4 passed, 4 total",
+		});
 		expect((await judge(JEST, { verdict: "unknown", evidence: "" })).reading).toEqual(unknown);
 		expect((await judge(JEST, new Error("down"))).reading).toEqual(unknown);
 	});

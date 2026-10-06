@@ -6,7 +6,9 @@ import {
 	errorSignature,
 	firstErrorLine,
 	isRoutineLine,
+	lineVerdicts,
 	normalizeErrorLine,
+	ungroundedReferences,
 } from "../src/modules/output.ts";
 
 describe("cleanTerminalOutput", () => {
@@ -14,6 +16,15 @@ describe("cleanTerminalOutput", () => {
 		expect(cleanTerminalOutput("\u001b[31merror\u001b[0m: x")).toBe("error: x");
 		expect(cleanTerminalOutput("10%\r50%\r100% done\r\nnext")).toBe("100% done\nnext");
 		expect(cleanTerminalOutput("\u001b]0;title\u0007plain")).toBe("plain");
+	});
+
+	it("removes each OSC sequence on its own, not what lies between two of them", () => {
+		const link = (url: string, text: string) => `\u001b]8;;${url}\u001b\\${text}\u001b]8;;\u001b\\`;
+		const output = `${link("file:///a.rs", "a.rs")}: error here\nmiddle line\n${link("file:///b.rs", "b.rs")}: fine`;
+		expect(cleanTerminalOutput(output)).toBe("a.rs: error here\nmiddle line\nb.rs: fine");
+		expect(cleanTerminalOutput("\u001b]0;one\u0007kept\u001b]0;two\u0007")).toBe("kept");
+		// An unterminated sequence does not swallow the lines after it.
+		expect(cleanTerminalOutput("\u001b]0;title\nnext line\u0007")).toContain("next line");
 	});
 });
 
@@ -56,6 +67,129 @@ describe("classifyErrorLine", () => {
 		"Compiling forth v0.1.0",
 	])("%s → not an error", (line) => {
 		expect(classifyErrorLine(line)).toBeUndefined();
+	});
+});
+
+describe("classifyErrorLine and lineVerdicts (D-077)", () => {
+	const verdict = (line: string) => lineVerdicts([line])[0];
+
+	it.each([
+		// Python exceptions with a module path; Rust doctest names with spaces.
+		["json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)", "error"],
+		["subprocess.CalledProcessError: Command '['make']' returned non-zero exit status 2.", "error"],
+		["KeyboardInterrupt", "error"],
+		["SystemExit: 2", "error"],
+		["test src/lib.rs - add (line 5) ... FAILED", "failed"],
+		["test result: FAILED. 0 passed; 1 failed; 0 ignored", "failed"],
+		["FAILED (failures=1, errors=2)", "failed"],
+		["FAIL", "failed"],
+		["50% tests passed, 1 tests failed out of 2", "failed"],
+		["FAIL [   0.004s] forth eval::words", "failed"],
+		["ninja: build stopped: subcommand failed.", "failed"],
+		["gmake[1]: *** [Makefile:12: all] Error 2", "failed"],
+		["/usr/bin/ld: cannot find -lfoo: No such file or directory", "failed"],
+		["ld: symbol(s) not found for architecture arm64", "failed"],
+		["a.o: multiple definition of `main'", "failed"],
+		["2 failed, 1 passed, 3 errors in 1.20s", "failed"],
+		["Something failed badly", "mention"],
+		["ERROR    root:fetch.py:12 could not connect", "mention"],
+	] as const)("%s → %s", (line, expected) => {
+		expect(verdict(line)).toBe(expected);
+		expect(classifyErrorLine(line)).toBe(expected === "mention" ? "generic" : "specific");
+	});
+
+	it("keeps pip's resolver note without taking it for a failed test", () => {
+		const note = "ERROR: pip's dependency resolver does not currently take into account all the packages";
+		expect(classifyErrorLine(note)).toBe("specific");
+		expect(verdict(note)).toBe("mention");
+	});
+
+	it.each([
+		// Worth keeping when trimming, but a green run prints them too.
+		"    limiter_test.go:41: burst of 5 took 12ms",
+		"server.go:88: listening on :8080",
+		"/usr/bin/ld: warning: libfoo.so.1, needed by libbar.so, not found (try using -rpath or -rpath-link)",
+		"/usr/bin/ld: skipping incompatible /usr/lib/libz.so when searching for -lz",
+		"100% tests passed, 0 tests failed out of 12",
+		"SystemExit: 0",
+	])("kept, not a verdict: %s", (line) => {
+		expect(classifyErrorLine(line)).toBe("specific");
+		expect(verdict(line)).toBeUndefined();
+	});
+
+	it.each([
+		// The generic pattern used to fire on names.
+		"[ 25%] Building CXX object CMakeFiles/netcalc.dir/src/error.cpp.o",
+		"ok  \texample.com/app/internal/errors\t0.01s",
+		"   Compiling error-chain v0.12.4",
+		"test parse::error::tests::roundtrip ... ok",
+		"warning: unused variable: `error`",
+		"warning: unused variable 'error' [-Wunused-variable]",
+		"3 |     let error = 1;",
+		"   17 |   throw fatal(error);",
+		"  |         ^^^^^ help: prefix it with an underscore: `_error`",
+		"g++ -Wl,--fatal-warnings -o app main.o",
+		"Downloading https://example.com/errors/failed.tar.gz",
+		"Ran 4 tests, failures=0, errors: 0",
+		"running errors.go through gofmt",
+		"cargo test --no-fail-fast",
+		"use std::error::Error;",
+	])("names no error: %s", (line) => {
+		expect(classifyErrorLine(line)).toBeUndefined();
+		expect(verdict(line)).toBeUndefined();
+	});
+
+	it.each([
+		"cc1plus: all warnings being treated as errors",
+		"Loading...failed",
+		"build failed.",
+		"I/O error on device",
+		"3 failures",
+		"fatal: not a git repository",
+	])("still a mention: %s", (line) => {
+		expect(verdict(line)).toBe("mention");
+	});
+
+	it("counts a Go test's log lines only when a test failed", () => {
+		const log = "    holiday_test.go:41: Easter(1981) = 1981-04-26, want 1981-04-19";
+		expect(lineVerdicts(["=== RUN   TestEaster", log, "--- PASS: TestEaster (0.00s)", "PASS"])).toEqual([
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+		]);
+		expect(lineVerdicts(["--- FAIL: TestEaster (0.00s)", log, "FAIL"])).toEqual(["failed", "error", "failed"]);
+		// A log line that mentions an error is at most a mention.
+		expect(lineVerdicts(["    api_test.go:9: got error as expected", "PASS"])).toEqual(["mention", undefined]);
+		expect(lineVerdicts(["  server.go:88: bind failed"])).toEqual(["mention"]);
+	});
+
+	it("reads an indented line with and without its indentation", () => {
+		expect(lineVerdicts(["    error[E0308]: mismatched types", "  E   assert 1 == 2"])).toEqual(["failed", "failed"]);
+	});
+});
+
+describe("ungroundedReferences (D-077)", () => {
+	const cwd = "/nonexistent-exo-workspace";
+
+	it("does not take prose for paths", () => {
+		const prose = "Use Node.js or Vue.js here, e.g. a map (i.e. a dict), v1.2 and/or etc. See the U.S. docs.";
+		expect(ungroundedReferences(prose, "", cwd)).toEqual([]);
+	});
+
+	it("still flags an invented file, with a directory or a source extension", () => {
+		expect(ungroundedReferences("Edit src/nope and src/nope.xyz, then parser.rs and index.js.", "", cwd)).toEqual([
+			"src/nope.xyz",
+			"parser.rs",
+			"index.js",
+		]);
+	});
+
+	it("looks a name up without its call parentheses, position or type arguments", () => {
+		const evidence = "fn parse_config(path: &str) in src/lib.rs, struct Stack, mod eval";
+		const hint = "Call `parse_config()`, see `src/lib.rs:42:9`, `Stack<T>` and `eval::`.";
+		expect(ungroundedReferences(hint, evidence, cwd)).toEqual([]);
+		expect(ungroundedReferences("Call `parse_cfg()` on `Heap<T>`.", evidence, cwd)).toEqual(["parse_cfg()", "Heap<T>"]);
 	});
 });
 
