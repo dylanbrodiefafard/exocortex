@@ -315,15 +315,6 @@ tasks/          eval fixtures
 docs/
 ```
 
-## Development
-
-```sh
-npm install
-npm run check      # lint + typecheck + knip + tests: exactly what CI runs
-npm run format     # apply formatting and safe lint fixes
-npm run test:watch
-```
-
 ## Acknowledgements
 
 - [pi](https://github.com/badlogic/pi-mono), the coding agent Exocortex extends.
