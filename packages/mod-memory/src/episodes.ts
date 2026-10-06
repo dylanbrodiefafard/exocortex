@@ -1,4 +1,12 @@
-import { errorSignature, type FileEdit, fileEdits, firstErrorLine, type ToolOutcome } from "@exocortex/core";
+import {
+	errorSignature,
+	type FileEdit,
+	fileEdits,
+	firstErrorLine,
+	outcomeOf,
+	type ToolOutcome,
+	verifyingRun,
+} from "@exocortex/core";
 import { cardDetail } from "./detail.ts";
 
 /**
@@ -116,11 +124,10 @@ export function createEpisodeTracker(): { observe(tool: ToolOutcome): FixEpisode
 			}
 			const command = commandKey(tool);
 			if (!command || !VERIFYING_COMMAND.test(command)) return [];
-			if (tool.isError || (tool.exitCode !== null && tool.exitCode !== 0)) {
-				onFailure(command, tool);
-				return [];
-			}
-			return onSuccess(command);
+			// A run behind a pipe is read from its output (D-075); one that cannot be read proves nothing.
+			const outcome = outcomeOf(tool);
+			if (outcome === "failed") onFailure(command, tool);
+			return outcome === "passed" ? onSuccess(command) : [];
 		},
 		reset() {
 			open.clear();
@@ -133,10 +140,16 @@ export function editsOf(episode: FixEpisode): Edit[] {
 	return episode.steps.flatMap((step) => step.edits);
 }
 
-/** One command, however its output was redirected: `cargo test` and `cargo test 2>&1` are the same run. */
+/**
+ * One command, however its output was redirected or cut: `cargo test`, `cargo test 2>&1` and
+ * `cargo test 2>&1 | tail -30` are the same run.
+ */
 export function commandKey(tool: ToolOutcome): string | undefined {
-	const command = tool.input["command"];
-	if (typeof command !== "string") return undefined;
+	const line = tool.input["command"];
+	if (typeof line !== "string") return undefined;
+	// What a test or build run is piped into shapes its output, not what ran.
+	const pipe = verifyingRun(line) ? line.indexOf("|", line.lastIndexOf("&&") + 1) : -1;
+	const command = pipe === -1 ? line : line.slice(0, pipe);
 	return command
 		.replace(/\s*2>&1/g, "")
 		.replace(/\s+/g, " ")

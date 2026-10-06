@@ -38,6 +38,8 @@ export const TRACE_EVENT_KINDS = [
 	"exo.compaction",
 	/** Memory learned, merged, recalled or retired a card. */
 	"exo.memory",
+	/** How a test run whose exit code a pipe hid was read: from its output, or by a sidecar (D-075). */
+	"exo.run",
 ] as const;
 
 export type TraceEventKind = (typeof TRACE_EVENT_KINDS)[number];

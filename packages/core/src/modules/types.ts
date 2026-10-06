@@ -62,6 +62,11 @@ export interface ToolOutcome {
 	readonly isError: boolean;
 	readonly exitCode: number | null;
 	readonly output: string;
+	/**
+	 * For a test or build run whose exit code a pipe hid (`cargo test | tail`): what its output
+	 * shows (D-075). Set by the harness adapter; read it through `outcomeOf`.
+	 */
+	readonly hidden?: "passed" | "failed" | "unknown";
 }
 
 /** A tool result offered to modules for rewriting, before the main model sees it. */

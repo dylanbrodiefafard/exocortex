@@ -7,6 +7,7 @@ import {
 	firstErrorLine,
 	loadPrompt,
 	type ModuleContext,
+	outcomeOf,
 	SIDECAR_MAX_TOKENS,
 	type ToolOutcome,
 	ungroundedReferences,
@@ -501,7 +502,7 @@ export function createMemory(raw: Readonly<Record<string, unknown>>, ctx: Module
 			if (names) {
 				const same = shown.signature === signature && detailShare(shown.card.detail, names) >= settings.minDetail;
 				if (same) shown.recurred += 1;
-			} else if (command !== undefined && command === shown.command && tool.exitCode === 0 && !tool.isError) {
+			} else if (command !== undefined && command === shown.command && outcomeOf(tool) === "passed") {
 				shown.passed = true;
 			}
 		}
@@ -772,8 +773,7 @@ export function deterministicLesson(episode: FixEpisode): string {
 }
 
 function failureSignature(tool: ToolOutcome): string | undefined {
-	const failed = tool.isError || (tool.exitCode !== null && tool.exitCode !== 0);
-	if (!failed || typeof tool.input["command"] !== "string") return undefined;
+	if (outcomeOf(tool) !== "failed" || typeof tool.input["command"] !== "string") return undefined;
 	return errorSignature(tool.toolName, tool.exitCode, tool.output);
 }
 

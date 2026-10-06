@@ -324,6 +324,34 @@ const bashResult = (text: string, extra: Record<string, unknown> = {}) => ({
 	...extra,
 });
 
+describe("runs whose exit code a pipe hid (D-075)", () => {
+	it("reads the output once and tells every module, and says nothing about other calls", async () => {
+		const a = newProbe();
+		const b = newProbe();
+		const { h } = setup(
+			{ a: probeModule("a", a), b: probeModule("b", b) },
+			{ a: { enabled: true }, b: { enabled: true } },
+		);
+		await h.pi.emit("session_start");
+		const run = (command: string, text: string) =>
+			h.pi.emit("tool_result", {
+				toolName: "bash",
+				toolCallId: "c1",
+				input: { command },
+				isError: false,
+				structuredContent: { exit_code: 0 },
+				content: [{ type: "text", text }],
+			});
+		await run("cargo test 2>&1 | tail -3", "test result: ok. 4 passed; 0 failed");
+		await run("cargo test 2>&1 | tail -3", "test a ... FAILED");
+		await run("cargo test 2>&1 | grep -c ok", "4");
+		await run("cargo test", "test result: ok. 4 passed; 0 failed");
+		expect(a.tools.map((t) => t.hidden)).toEqual(["passed", "failed", "unknown", undefined]);
+		expect(b.tools).toEqual(a.tools);
+		expect(h.errors).toEqual([]);
+	});
+});
+
 describe("tool-result rewrites", () => {
 	it("tells modules which part of the text is bash's exit status", async () => {
 		const drafts: ToolResultDraft[] = [];

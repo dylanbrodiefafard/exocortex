@@ -5,6 +5,7 @@ import {
 	loadPrompt,
 	type ModuleContext,
 	maskedFailure,
+	outcomeOf,
 	type ToolOutcome,
 	ungroundedReferences,
 } from "@exocortex/core";
@@ -77,7 +78,8 @@ export function createCompaction(raw: Readonly<Record<string, unknown>>, ctx: Mo
 			const record = commandRecord(tool, commands);
 			if (!record) return;
 			commands.delete(record.command); // re-insert: most recent last
-			commands.set(record.command, record);
+			// A run behind a pipe whose output does not show how it ended is listed nowhere (D-075).
+			if (outcomeOf(tool) !== "unknown") commands.set(record.command, record);
 		},
 
 		async compact(request, signal) {
@@ -116,7 +118,7 @@ function commandRecord(tool: ToolOutcome, commands: ReadonlyMap<string, CommandR
 	if (tool.toolName !== "bash" || typeof command !== "string") return undefined;
 	const key = command.replace(/\s+/g, " ").trim().slice(0, 300);
 	const masked = maskedFailure(tool);
-	const ok = !masked && !tool.isError && (tool.exitCode === null || tool.exitCode === 0);
+	const ok = outcomeOf(tool) === "passed";
 	return {
 		command: key,
 		ok,

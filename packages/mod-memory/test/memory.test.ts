@@ -163,6 +163,43 @@ describe("failure detail (D-072)", () => {
 });
 
 describe("memory module", () => {
+	it("learns from a test run behind a pipe by reading its output, and not from one it cannot read (D-075)", async () => {
+		const piped = (output: string, hidden?: "passed" | "failed" | "unknown"): ToolOutcome => ({
+			toolName: "bash",
+			input: { command: "cargo test 2>&1 | tail -5" },
+			isError: false,
+			exitCode: 0,
+			output,
+			...(hidden ? { hidden } : {}),
+		});
+		const failing = "test parse_ini ... FAILED\nerror: test failed, to rerun pass `--lib`";
+		const { memory, t } = setup({}, () => ({
+			lesson: "In lib.rs, clone the value before pushing onto `self.stack`.",
+			applies_when: "pushing while borrowed",
+		}));
+		memory.onUserTurn?.({ text: "make the tests pass", origin: "user" });
+		memory.onToolResult?.(piped(failing));
+		memory.onToolResult?.(edit);
+		// Nothing in the output says how the run ended: no card.
+		memory.onToolResult?.(piped("warning: unused import"));
+		await new Promise((r) => setTimeout(r, 30));
+		expect(t.records).toEqual([]);
+		// The same run cut differently, with the runner's summary in what was kept.
+		memory.onToolResult?.({
+			...piped("test result: ok. 9 passed; 0 failed"),
+			input: { command: "cargo test | tail -2" },
+		});
+		await until(() => t.records.some((r) => r.kind === "exo.memory"));
+		expect(t.records.at(-1)?.data).toMatchObject({ action: "learned" });
+
+		// A later session's piped failure recalls it; the harness's reading counts too.
+		const later = setup();
+		const recalled = await later.memory.rewriteToolResult?.(draft(piped(failing)), signal);
+		expect(recalled?.text).toContain("exo memory");
+		const viaHarness = setup();
+		expect(await viaHarness.memory.rewriteToolResult?.(draft(piped("1 failing", "unknown")), signal)).toBeUndefined();
+	});
+
 	it("learns a grounded lesson from a verified fix and recalls it in a later session", async () => {
 		const { memory, t } = setup({}, () => ({
 			lesson: "In lib.rs, clone the value before pushing onto `self.stack`.",

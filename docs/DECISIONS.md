@@ -1157,7 +1157,7 @@ Open check: Exocortex's injected `custom_message` reaches ninfer as a second con
   - **Edits made from the shell** are not seen (as in D-072), so the notice and the prompt can say less than what was changed. The notice then says nothing about edits; the prompt says none were made with the edit tools.
   - The code shown is the file as it is when the hint is written. A harness that runs tool calls in parallel could land an edit between the run and its result.
 - **Not done.**
-  - **Masked failures in memory.** Memory opens no episode for a piped run (D-072's open risk). It can use `maskedFailure`, but its admission rule needs a decision about a piped pass first. Compaction is done in D-074.
+  - **Masked failures in memory and compaction.** Done in D-074 and D-075.
   - **Saying that a failure got smaller** ("2 of 5 failing tests fixed"). The agent reads that in the output.
   - **A model judging progress** (Gemini's periodic check): as D-069 left it.
   - **Parsing each test runner's summary** to compare failing tests by name. The error lines carry the names for the D-016 toolchains.
@@ -1167,8 +1167,41 @@ Open check: Exocortex's injected `custom_message` reaches ninfer as a second con
 ### D-074 — Compaction: a test run that failed behind a pipe is not listed as succeeded · accepted (2026-10-05; owner's request; follows D-073, amends D-044's tracked facts)
 - **Problem:** the tracked facts put `cargo test 2>&1 | tail -30` under "Commands that last succeeded (no need to re-run unless something changed)" whenever it exited 0, which a piped run does even when its tests fail. After a compaction that line is all the agent has left of the run.
 - **Decision:** a command's last run counts as failed when core's `maskedFailure` (D-073, item 5) says so. It is listed under "Commands whose last run failed" as "errors in the output (exit code hidden by the pipe)", with its first error line.
-- **Not changed:** a piped run with no toolchain error line in what it let through is still listed as succeeded. `tail -5` of a failing run can show only a summary the grammar does not know; the exit code is all there is then.
+- **Not changed (until D-075, which lists such a run under neither heading unless its pass summary is there):** a piped run with no toolchain error line in what it let through is still listed as succeeded. `tail -5` of a failing run can show only a summary the grammar does not know; the exit code is all there is then.
 - **No switch.** Compaction is off by default and nothing has been A/B'd (D-052).
+
+---
+
+### D-075 — A test run behind a pipe is read from its output, by patterns first and a sidecar second · accepted (2026-10-05; owner's design; amends D-049's admission signal, D-072, D-073 item 5 and D-074)
+- **Problem:** `cargo test 2>&1 | tail -30` exits with `tail`'s status. Memory learns from "the command failed, files changed, the command passed" and saw neither end of that for a piped run, so with an agent that pipes its test runs it learned and recalled nothing, silently. D-073 and D-074 read the failing side for triage and compaction.
+- **What others do:** nothing that applies. No memory project read for D-072 uses an exit code as its signal. None of the harnesses sets `pipefail` for the agent's shell; OpenHands' terminal tool tells the model not to (`software-agent-sdk` at `39d34ec`, `openhands-tools/openhands/tools/terminal/descriptions.py`). tokf (`87c93d9`, `docs/rewrites-config.md`) removes a pipe into `grep`, `tail` or `head` before the command runs, which gives the real exit code by changing what the agent asked to run.
+- **The owner's observation:** the agent piped the output and still has to know whether its tests passed. It reads what the pipe let through. So can we.
+- **Decision.**
+  1. **Three answers, not two.** Core's `readHiddenRun`, for a test or build run piped without `pipefail` that exited 0:
+     - `failed`: the output has a toolchain-specific error line (D-073's rule);
+     - `passed`: a test run whose output has its runner's pass summary and no such line: cargo's `test result: ok.`, Go's `ok  pkg  0.2s` and `PASS`, unittest's `OK`, pytest's `N passed` with no failures or errors beside it, CTest's `100% tests passed`;
+     - `unknown`: neither. A build prints nothing on success, and `| grep` or `| head` can leave the result out.
+  2. **A sidecar reads what the patterns cannot** (`run-verdict.v1`, in core's `prompts/`): only for a test run that came out `unknown` with something printed. It answers passed, failed or unknown and quotes the line that shows it. Code checks the answer (D-062): the quote must be a line of the output (a quote under 8 characters must be the whole line), and "passed" is not taken when any line mentions a failure. A failed call, an unknown or an unchecked answer leaves `unknown`.
+  3. **The harness reads once, for every module.** The pi adapter does it when the tool result arrives, before any module's hook, and sets `ToolOutcome.hidden`. Modules ask core's `outcomeOf(tool)`: the exit code when it is the run's own, else that reading. The sidecar call goes under the module name `runs` (so the report's sidecar tokens show it), has a 4 s deadline, and is traced as `exo.run` with its source and quoted line. It runs only while a module is enabled.
+  4. **Unknown changes nothing.** This is what makes the pass side safe:
+     - **memory** opens an episode on `failed`, closes it with a card on `passed`, and ignores `unknown`; recall and credit use the same reading. `cargo test`, `cargo test 2>&1` and `cargo test 2>&1 | tail -30` are one command for fail → pass;
+     - **compaction** lists a run under failed or succeeded by its reading, and an `unknown` one under neither (D-074 listed it as succeeded);
+     - **triage** counts `failed`, as in D-073.
+- **How this sits with earlier entries.**
+  - **D-049 / R5.2, "a pass is external evidence, never the model's opinion".** A pattern match on the runner's own summary is the runner's statement. A sidecar's "passed" is admitted only with the runner's line quoted and no failure anywhere in the output; what is trusted is the line, which code found in the output.
+  - **D-068:** the deadline bounds a hook that holds pi. The call is a few hundred tokens in and a few dozen out.
+  - **D-052:** every module is off by default and nothing has been A/B'd, so no result changes meaning.
+- **Open risks.**
+  - Untested with a real model.
+  - **A summary for one package can pass while another's failure was cut off.** Cargo stops at the first failing crate and Go ends a failing run with `FAIL`, so the end of the output shows it; a runner that prints per-suite summaries and no final one could be misread as passed.
+  - **A card learned behind a pipe is recalled only behind a pipe.** The error signature holds the exit code (0 for a piped failure, the runner's otherwise). An agent that pipes usually keeps doing so.
+  - **The agent waits up to 4 s** on a piped test run the patterns cannot read, each time. Runs of the D-016 toolchains are read by the patterns.
+  - **Parallel tool calls:** a result waiting on the sidecar reaches the modules after one that arrived later.
+  - **The eval's own counts use the patterns only** (`maskedFailure` over the trace), so they are the same with modules on or off; a failure only the sidecar read is not in "Repeated errors".
+- **Not done.**
+  - **Changing the command** (tokf's pipe removal, or adding `pipefail`). It would be the first time Exocortex alters a tool call (D-010).
+  - **The supervisor's evidence** still tells the judge only that the exit code was the pipe's (D-071); it could now say what the output showed.
+  - **A switch.** The patterns cost nothing; the sidecar part needs a configured engine and an enabled module.
 
 ---
 

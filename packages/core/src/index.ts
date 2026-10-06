@@ -67,7 +67,17 @@ export {
 	ungroundedReferences,
 } from "./modules/output.ts";
 export { loadPrompt, type PromptTemplate, renderPrompt } from "./modules/prompts.ts";
-export { maskedFailure, type VerifyingRun, verifyingRun } from "./modules/runs.ts";
+export {
+	type HiddenRunReading,
+	hiddenRun,
+	judgeHiddenRun,
+	maskedFailure,
+	outcomeOf,
+	type RunVerdict,
+	readHiddenRun,
+	type VerifyingRun,
+	verifyingRun,
+} from "./modules/runs.ts";
 export type {
 	CompactionRequest,
 	Dialog,

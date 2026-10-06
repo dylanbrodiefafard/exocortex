@@ -9,9 +9,13 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import {
 	type ExoModule,
+	hiddenRun,
 	type JsonValue,
+	judgeHiddenRun,
 	type ModuleContext,
 	type ModuleFactory,
+	type RunVerdict,
+	readHiddenRun,
 	runShellCommand,
 	type SettleAction,
 	type ToolOutcome,
@@ -43,6 +47,10 @@ const MODULES: Readonly<Record<string, ModuleFactory>> = {
 const SETTLE_BUDGET_MS = 5 * 60_000;
 /** Hard cap on how long tool-result rewrites may hold the agent loop, across all modules. */
 const REWRITE_BUDGET_MS = 20_000;
+/** A sidecar reading a piped test run's output holds the tool result: a short reply to a short prompt. */
+const HIDDEN_RUN_BUDGET_MS = 4_000;
+/** The name the reading's sidecar call and trace event go under: it serves every module. */
+const HIDDEN_RUN_MODULE = "runs";
 /** Hard cap on a module-written compaction summary; pi's default compaction runs after it. */
 const COMPACT_BUDGET_MS = 120_000;
 /** Hard cap on how long modules may hold a new user prompt before the agent starts on it. */
@@ -58,6 +66,7 @@ export interface ModuleHostOptions {
 	/** Overrides the hold-the-loop budgets (tests). */
 	readonly budgetsMs?: {
 		readonly rewrite?: number;
+		readonly hiddenRun?: number;
 		readonly settle?: number;
 		readonly compact?: number;
 		readonly userTurn?: number;
@@ -76,6 +85,7 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 	const { runtime, onError } = options;
 	const factories = options.modules ?? MODULES;
 	const rewriteBudgetMs = options.budgetsMs?.rewrite ?? REWRITE_BUDGET_MS;
+	const hiddenRunBudgetMs = options.budgetsMs?.hiddenRun ?? HIDDEN_RUN_BUDGET_MS;
 	const settleBudgetMs = options.budgetsMs?.settle ?? SETTLE_BUDGET_MS;
 	const compactBudgetMs = options.budgetsMs?.compact ?? COMPACT_BUDGET_MS;
 	const userTurnBudgetMs = options.budgetsMs?.userTurn ?? USER_TURN_BUDGET_MS;
@@ -164,6 +174,38 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 		};
 	}
 
+	/**
+	 * For a test or build run whose exit code a pipe hid, what its output shows (D-075): read once
+	 * here, so every module acts on the same answer. A sidecar is asked only about a test run the
+	 * output grammar cannot read, within its own deadline; modules get `unknown` if it fails.
+	 */
+	async function readHidden(tool: ToolOutcome, toolCallId: string): Promise<RunVerdict | undefined> {
+		if (modules.length === 0 || !hiddenRun(tool)) return undefined;
+		const controller = new AbortController();
+		const budget = setTimeout(() => controller.abort(), hiddenRunBudgetMs);
+		try {
+			if (readHiddenRun(tool) === "unknown" && runtime.pool) progress("Reading the test run's result…");
+			const reading = await judgeHiddenRun(
+				tool,
+				{ pool: runtime.pool, module: HIDDEN_RUN_MODULE, timeoutMs: hiddenRunBudgetMs },
+				controller.signal,
+			);
+			if (!reading) return undefined;
+			runtime.traceSession?.append({
+				kind: "exo.run",
+				module: HIDDEN_RUN_MODULE,
+				synthetic: true,
+				data: { toolCallId, ...reading },
+			});
+			return reading.verdict;
+		} catch (error) {
+			onError("modules.readHidden", error);
+			return undefined;
+		} finally {
+			clearTimeout(budget);
+		}
+	}
+
 	function each(where: string, fn: (module: ExoModule) => void): void {
 		for (const module of modules) {
 			try {
@@ -212,16 +254,20 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 	});
 
 	pi.on("tool_result", async (event, ctx) => {
-		const outcome: ToolOutcome = {
+		const reported: ToolOutcome = {
 			toolName: event.toolName,
 			input: toObject(event.input),
 			isError: event.isError,
 			exitCode: exitCodeOf(event.structuredContent),
 			output: textOf(event.content),
 		};
-		each("onToolResult", (m) => m.onToolResult?.(outcome));
 		try {
-			return await whileHolding(ctx, () => rewrite(event, outcome));
+			return await whileHolding(ctx, async () => {
+				const hidden = await readHidden(reported, event.toolCallId);
+				const outcome: ToolOutcome = hidden ? { ...reported, hidden } : reported;
+				each("onToolResult", (m) => m.onToolResult?.(outcome));
+				return rewrite(event, outcome);
+			});
 		} catch (error) {
 			onError("modules.tool_result", error);
 			return undefined;
