@@ -1,16 +1,24 @@
 import type { RecurringError, TraceMetrics } from "./metrics.ts";
-import type { RunRecord } from "./run.ts";
+import { invalidReason, type RunRecord } from "./records.ts";
 import {
-	minimumDetectableEffect,
-	type PairedChange,
-	type PairedComparison,
-	pairedComparison,
-	pairedRelativeChange,
+	holm,
+	MIN_TASKS_FOR_INTERVAL,
+	meanOf,
+	type PairedDifference,
+	type PairedRatio,
+	pairedDifference,
+	pairedRatio,
+	pairRuns,
+	type TaskValue,
+	wilson,
 } from "./stats.ts";
 
 export interface ConfigSummary {
 	readonly config: string;
+	/** Valid runs: every rate and mean below is over these. */
 	readonly runs: number;
+	/** Runs that say nothing about the agent (setup, crash, harness or model-server failure), left out (D-079). */
+	readonly invalid: number;
 	readonly successes: number;
 	readonly successRate: number;
 	readonly meanTurns: number | null;
@@ -33,22 +41,34 @@ export interface ConfigSummary {
 	 * supervisor error is a false "complete" (research §1c). Null without such runs.
 	 */
 	readonly completePrecision: number | null;
-	/** Runs whose last verdict was `complete`. */
+	/** Runs whose last verdict was `complete`, and how many of those passed their check. */
 	readonly judgedComplete: number;
+	readonly completeCorrect: number;
 	/** Per-run mean of every token spent: main input, cached and output, plus sidecars (research R7.3). */
 	readonly meanTotalTokens: number | null;
-	/** Runs where the agent changed or deleted fixture tests (restored before the check). */
+	/** Runs where the agent changed fixture tests or protected build files (put back before the check). */
 	readonly tampered: number;
+	/** Runs whose added test files were set aside before the check. */
+	readonly setAside: number;
+	/** Runs whose check exited 0 but ran fewer tests than the reference solution's: scored as failures. */
+	readonly tooFewTests: number;
+	readonly checkTimeouts: number;
 	/** Passing runs with no verification after the last edit, or 3+ identical failed commands (R7.6). */
 	readonly luckyPasses: number;
 	/** Of failing runs with a last verdict, the share the supervisor did not call complete. */
 	readonly failureRecall: number | null;
 }
 
-export function summarize(records: readonly RunRecord[]): ConfigSummary[] {
-	const configs = [...new Set(records.map((r) => r.config))];
+/**
+ * One summary per config. `order` is the run's config order (`run.json`): configs run in a
+ * shuffled order, so the order records appear in no longer says which one is the baseline.
+ */
+export function summarize(records: readonly RunRecord[], order: readonly string[] = []): ConfigSummary[] {
+	const present = new Set(records.map((r) => r.config));
+	const configs = [...new Set([...order.filter((config) => present.has(config)), ...present])];
 	return configs.map((config) => {
-		const runs = records.filter((r) => r.config === config);
+		const all = records.filter((r) => r.config === config);
+		const runs = all.filter((r) => invalidReason(r) === null);
 		const withMetrics = runs.flatMap((r) => (r.metrics ? [r.metrics] : []));
 		const totalPrompt = sum(withMetrics.map((m) => m.inputTokens + m.cachedTokens));
 		const totalErrors = sum(withMetrics.map((m) => m.toolErrors));
@@ -57,6 +77,7 @@ export function summarize(records: readonly RunRecord[]): ConfigSummary[] {
 		return {
 			config,
 			runs: runs.length,
+			invalid: all.length - runs.length,
 			successes,
 			successRate: runs.length > 0 ? successes / runs.length : 0,
 			meanTurns: mean(withMetrics.map((m) => m.turns)),
@@ -76,7 +97,10 @@ export function summarize(records: readonly RunRecord[]): ConfigSummary[] {
 			sidecarFailures: sum(withMetrics.map((m) => m.sidecarFailures)),
 			abnormal: runs.filter((r) => r.outcome !== "settled").length,
 			meanTotalTokens: mean(withMetrics.map(totalTokens)),
-			tampered: runs.filter((r) => (r.tamperedTests?.length ?? 0) > 0).length,
+			tampered: runs.filter((r) => (r.tamperedTests?.length ?? 0) + (r.tamperedFiles?.length ?? 0) > 0).length,
+			setAside: runs.filter((r) => (r.setAsideTests?.length ?? 0) > 0).length,
+			tooFewTests: runs.filter((r) => r.tooFewTests === true).length,
+			checkTimeouts: runs.filter((r) => r.checkTimedOut).length,
 			luckyPasses: runs.filter(
 				(r) =>
 					r.success && r.metrics && (r.metrics.verifiedAfterLastEdit === false || r.metrics.maxRepeatedFailures >= 3),
@@ -92,25 +116,29 @@ function verdictQuality(runs: readonly RunRecord[]) {
 	const failing = judged.filter((r) => !r.success);
 	return {
 		judgedComplete: complete.length,
+		completeCorrect: complete.filter((r) => r.success).length,
 		completePrecision: complete.length > 0 ? complete.filter((r) => r.success).length / complete.length : null,
 		failureRecall:
 			failing.length > 0 ? failing.filter((r) => r.metrics?.lastVerdict !== "complete").length / failing.length : null,
 	};
 }
 
-/** Markdown report: one row per config, then a task × config pass matrix. */
-export function renderMarkdown(records: readonly RunRecord[], title: string): string {
-	const summaries = summarize(records);
+/**
+ * Markdown report: one row per config, then a task × config pass matrix. The first config of
+ * `order` (else the first seen) is the baseline every other one is paired against.
+ */
+export function renderMarkdown(records: readonly RunRecord[], title: string, order: readonly string[] = []): string {
+	const summaries = summarize(records, order);
 	const lines = [
 		`# ${title}`,
 		"",
-		"| config | success | turns | input tok | cached tok | output tok | cache hit | prefix kept | median wall | repeated err | injections | continuations | sidecar tok | total tok | sidecar fail | verdicts c/i/f/u | abnormal | tampered | lucky passes |",
-		"|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+		"| config | success | turns | input tok | cached tok | output tok | cache hit | prefix kept | median wall | repeated err | injections | continuations | sidecar tok | total tok | sidecar fail | verdicts c/i/f/u | abnormal | invalid | tampered | lucky passes |",
+		"|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
 		...summaries
 			.map((s) =>
 				[
 					s.config,
-					`${s.successes}/${s.runs} (${pct(s.successRate)})`,
+					s.runs > 0 ? `${s.successes}/${s.runs} (${pct(s.successRate)})` : "0/0",
 					fixed(s.meanTurns, 1),
 					fixed(s.meanInputTokens, 0),
 					fixed(s.meanCachedTokens, 0),
@@ -126,13 +154,14 @@ export function renderMarkdown(records: readonly RunRecord[], title: string): st
 					String(s.sidecarFailures),
 					s.verdicts,
 					String(s.abnormal),
+					String(s.invalid),
 					String(s.tampered),
 					String(s.luckyPasses),
 				].join(" | "),
 			)
 			.map((row) => `| ${row} |`),
 		"",
-		"Token columns are per-run means of main-model usage; *sidecar tok* is the per-run mean of Exocortex's own calls. *total tok* adds main and sidecar tokens, the cost to weigh against success. *abnormal* counts runs that hit max turns, timed out or crashed. *tampered* counts runs that changed or deleted fixture tests (restored before the check, so they could not pass that way). *lucky passes* are passing runs that never verified after their last edit or retried one failing command 3+ times.",
+		"Token columns are per-run means of main-model usage; *sidecar tok* is the per-run mean of Exocortex's own calls. *total tok* adds main and sidecar tokens, the cost to weigh against success. *abnormal* counts runs that hit max turns or timed out. *invalid* counts runs where the harness or the model server failed (setup, a crash, a harness error, or a provider error before any tool call), after one retry: they are left out of every other column, and out of both configs in the paired statistics. *tampered* counts runs that changed or deleted fixture tests or protected build files (put back before the check, so they could not pass that way). *lucky passes* are passing runs that never verified after their last edit or retried one failing command 3+ times.",
 		"",
 		"## Per task",
 		"",
@@ -141,18 +170,22 @@ export function renderMarkdown(records: readonly RunRecord[], title: string): st
 	lines.push(`| task | ${configs.join(" | ")} |`, `|---|${configs.map(() => "---").join("|")}|`);
 	for (const task of [...new Set(records.map((r) => r.taskId))]) {
 		const cells = configs.map((config) => {
-			const runs = records.filter((r) => r.taskId === task && r.config === config);
-			return `${runs.filter((r) => r.success).length}/${runs.length}`;
+			const all = records.filter((r) => r.taskId === task && r.config === config);
+			const runs = all.filter((r) => invalidReason(r) === null);
+			const invalid = all.length - runs.length;
+			return `${runs.filter((r) => r.success).length}/${runs.length}${invalid > 0 ? ` (+${invalid} invalid)` : ""}`;
 		});
 		lines.push(`| ${task} | ${cells.join(" | ")} |`);
 	}
+	const valid = records.filter((r) => invalidReason(r) === null);
 	lines.push(
-		...verdictSection(summaries),
-		...recurringSection(records, configs),
-		...loopSection(records, configs),
-		...trimmerSection(records, configs),
-		...contextSection(records, configs),
-		...repeatSection(records, summaries),
+		...guardSection(summaries),
+		...verdictSection(records, summaries),
+		...recurringSection(valid, configs),
+		...loopSection(valid, configs),
+		...trimmerSection(valid, configs),
+		...contextSection(valid, configs),
+		...repeatSection(records, valid, summaries),
 		...pairedSection(records, summaries),
 	);
 	return `${lines.join("\n")}\n`;
@@ -163,8 +196,24 @@ function totalTokens(m: TraceMetrics): number {
 	return m.inputTokens + m.cachedTokens + m.outputTokens + m.sidecarTokens;
 }
 
+/** Metrics of a config's valid runs. */
 function metricsOf(records: readonly RunRecord[], config: string): TraceMetrics[] {
-	return records.flatMap((r) => (r.config === config && r.metrics ? [r.metrics] : []));
+	return records.flatMap((r) => (r.config === config && r.metrics && invalidReason(r) === null ? [r.metrics] : []));
+}
+
+/** What the check guard did (D-079), shown only when it did something. */
+function guardSection(summaries: readonly ConfigSummary[]): string[] {
+	if (summaries.every((s) => s.setAside + s.tooFewTests + s.checkTimeouts === 0)) return [];
+	return [
+		"",
+		"## Check guard",
+		"",
+		"| config | runs with added tests set aside | passed with too few tests | check timeouts |",
+		"|---|---|---|---|",
+		...summaries.map((s) => `| ${s.config} | ${s.setAside} | ${s.tooFewTests} | ${s.checkTimeouts} |`),
+		"",
+		"Test files the agent added are set aside before the check, so a wrong one cannot fail a correct solution and none can replace a hidden test; the count is normal behaviour, not tampering. *Passed with too few tests* are runs whose check exited 0 after running fewer tests than the reference solution does: they are scored as failures. A check that times out twice is scored as a failure too, since a hang is the solution's doing. Look at a run's `tamperedFiles` in `results.jsonl` when a config fails more with the guard than without: a solution that needed a build-file change the reference solution did not make is failed by it.",
+	];
 }
 
 /**
@@ -323,12 +372,17 @@ function contextSection(records: readonly RunRecord[], configs: readonly string[
 /**
  * Success by repeat index: the learning curve for modules that learn across runs (memory), with
  * what each config spent, so the comparison can be read at matched budgets (research R5.4, D-058).
+ * `valid` is `records` without the invalid runs; the paired numbers need both.
  */
-function repeatSection(records: readonly RunRecord[], summaries: readonly ConfigSummary[]): string[] {
-	const repeats = [...new Set(records.map((r) => r.repeat))].sort((a, b) => a - b);
+function repeatSection(
+	records: readonly RunRecord[],
+	valid: readonly RunRecord[],
+	summaries: readonly ConfigSummary[],
+): string[] {
+	const repeats = [...new Set(valid.map((r) => r.repeat))].sort((a, b) => a - b);
 	if (repeats.length < 2) return [];
 	const cell = (config: string, repeat: number) => {
-		const runs = records.filter((r) => r.config === config && r.repeat === repeat);
+		const runs = valid.filter((r) => r.config === config && r.repeat === repeat);
 		return `${runs.filter((r) => r.success).length}/${runs.length}`;
 	};
 	return [
@@ -339,26 +393,28 @@ function repeatSection(records: readonly RunRecord[], summaries: readonly Config
 		`|---|${repeats.map(() => "---").join("|")}|`,
 		...summaries.map((s) => `| ${s.config} | ${repeats.map((r) => cell(s.config, r)).join(" | ")} |`),
 		"",
-		"Repeats run in order (all tasks for r1, then r2, …), so a module that learns, like memory, can only help from r2 on; a rise over r1 that the baseline does not show is its effect on the same tasks (an upper bound, research §5c).",
-		...budgetSection(records, summaries, repeats),
+		"Repeats run in order (all tasks for r1, then r2, …), so a module that learns, like memory, can only help from r2 on; a rise over r1 that the baseline does not show is its effect on the same tasks (an upper bound, research §5c). One repeat column is one run per task: read it as a trend, not as a test.",
+		...budgetSection(records, valid, summaries, repeats),
 	];
 }
 
-/** Total tokens per config, side by side and by repeat, with what the run count can detect. */
+const totalOf: TaskValue = meanOf((r) => (r.metrics ? totalTokens(r.metrics) : null));
+
+/** Total tokens per config, side by side and by repeat, with what the tasks can detect. */
 function budgetSection(
 	records: readonly RunRecord[],
+	valid: readonly RunRecord[],
 	summaries: readonly ConfigSummary[],
 	repeats: readonly number[],
 ): string[] {
 	const [baseline] = summaries;
 	if (!baseline) return [];
-	const total = (r: RunRecord) => (r.metrics ? totalTokens(r.metrics) : null);
-	const byRepeat = (repeat: number) => records.filter((r) => r.repeat === repeat);
-	const modules = [...new Set(records.flatMap((r) => Object.keys(r.metrics?.sidecarTokensByModule ?? {})))].sort();
+	const byRepeat = (repeat: number) => valid.filter((r) => r.repeat === repeat);
+	const modules = [...new Set(valid.flatMap((r) => Object.keys(r.metrics?.sidecarTokensByModule ?? {})))].sort();
 	const rows = summaries.map((s) => {
-		const metrics = metricsOf(records, s.config);
+		const metrics = metricsOf(valid, s.config);
 		const spent = sum(metrics.map(totalTokens));
-		const delta = s === baseline ? null : pairedRelativeChange(records, baseline.config, s.config, total);
+		const delta = s === baseline ? null : pairedRatio(records, baseline.config, s.config, totalOf);
 		return [
 			s.config,
 			fixed(mean(metrics.map((m) => m.inputTokens + m.cachedTokens + m.outputTokens)), 0),
@@ -366,13 +422,11 @@ function budgetSection(
 			fixed(s.meanTotalTokens, 0),
 			...repeats.map((repeat) => fixed(mean(metricsOf(byRepeat(repeat), s.config).map(totalTokens)), 0)),
 			s.successes > 0 && metrics.length > 0 ? fixed(spent / s.successes, 0) : "—",
-			...tokenChange(delta),
+			delta ? change(delta.change) : "—",
+			delta ? interval(delta.ci, change) : "—",
+			delta?.detectable == null ? "—" : `±${Math.round(delta.detectable * 100)}%`,
 		];
 	});
-	const perRepeat = Math.min(
-		...repeats.map((repeat) => byRepeat(repeat).filter((r) => r.config === baseline.config).length),
-	);
-	const pooled = Math.min(0.95, Math.max(0.05, records.filter((r) => r.success).length / records.length));
 	const header = [
 		"config",
 		"main tok",
@@ -392,70 +446,138 @@ function budgetSection(
 		`|${header.map(() => "---").join("|")}|`,
 		...rows.map((row) => `| ${row.join(" | ")} |`),
 		"",
-		`Per-run means. *main tok* is everything the main model read and wrote (input, cached and output), which includes any text a module injected, such as memory's recalled cards; the sidecar columns are each module's own calls; *total tok* is their sum. *tok per pass* is all tokens spent divided by passing runs. *Δ total* is the mean per-task relative change against the baseline, with a task-level bootstrap CI; *detectable Δ* is the smallest mean change these tasks could show (α = 0.05, 80% power), so a CI inside it that spans zero means "no difference this run could see", not "no difference". For success, one repeat column has ${perRepeat} runs per config and can only detect differences of about ${Math.round(minimumDetectableEffect(pooled, perRepeat) * 100)} points; all ${repeats.length} repeats together (${baseline.runs} runs) about ${Math.round(minimumDetectableEffect(pooled, baseline.runs) * 100)} points. Read a learning module at matched budgets (research R5.4, D-055): it must not lose success, and any gain has to outweigh the extra tokens, because a baseline given the same budget often catches up.`,
+		'Per-run means. *main tok* is everything the main model read and wrote (input, cached and output, and pi\'s own compaction calls), which includes any text a module injected, such as memory\'s recalled cards; the sidecar columns are each module\'s own calls; *total tok* is their sum. *tok per pass* is all tokens spent divided by passing runs. *Δ total* is the typical per-task change against the baseline (the geometric mean of the per-task ratios), with the interval from the same paired test as Δ success below; *detectable Δ* is the smallest change these tasks would show 80% of the time (α = 0.05), so an interval that spans zero inside it means "no difference this run could see", not "no difference". For what the run can say about success, read *detectable Δ* in the paired table below. Read a learning module at matched budgets (research R5.4, D-055): it must not lose success, and any gain has to outweigh the extra tokens, because a baseline given the same budget often catches up.',
 	];
 }
 
-function tokenChange(delta: PairedChange | null): string[] {
-	if (!delta) return ["—", "—", "—"];
-	return [
-		change(delta.mean),
-		`[${change(delta.ci[0])}, ${change(delta.ci[1])}]`,
-		delta.detectable === null ? "—" : `±${Math.round(delta.detectable * 100)}%`,
-	];
-}
+const precisionOf: TaskValue = (runs) => {
+	const complete = runs.filter((r) => r.metrics?.lastVerdict === "complete");
+	return complete.length > 0 ? complete.filter((r) => r.success).length / complete.length : null;
+};
 
 /** Supervisor verdict quality against the hidden checks, for configs that produced verdicts. */
-function verdictSection(summaries: readonly ConfigSummary[]): string[] {
+function verdictSection(records: readonly RunRecord[], summaries: readonly ConfigSummary[]): string[] {
 	const judged = summaries.filter((s) => s.completePrecision !== null || s.failureRecall !== null);
-	if (judged.length === 0) return [];
+	const [baseline] = summaries;
+	if (judged.length === 0 || !baseline) return [];
 	return [
 		"",
 		"## Supervisor verdicts vs hidden checks",
 		"",
-		"| config | judged complete | precision of complete | failures caught |",
-		"|---|---|---|---|",
-		...judged.map(
-			(s) =>
-				`| ${s.config} | ${s.judgedComplete} | ${s.completePrecision === null ? "—" : pct(s.completePrecision)} | ${s.failureRecall === null ? "—" : pct(s.failureRecall)} |`,
-		),
+		`| config | judged complete | precision of complete | 95% interval | failures caught | Δ precision vs \`${baseline.config}\` | 95% CI | p |`,
+		"|---|---|---|---|---|---|---|---|",
+		...judged.map((s) => {
+			const delta = s === baseline ? null : pairedDifference(records, baseline.config, s.config, precisionOf);
+			return `| ${[
+				s.config,
+				s.judgedComplete,
+				s.completePrecision === null ? "—" : pct(s.completePrecision),
+				interval(wilson(s.completeCorrect, s.judgedComplete), pct, "—"),
+				s.failureRecall === null ? "—" : pct(s.failureRecall),
+				delta ? points(delta.mean) : "—",
+				delta ? interval(delta.ci, points) : "—",
+				delta ? delta.p.toFixed(3) : "—",
+			].join(" | ")} |`;
+		}),
 		"",
-		"*Precision of complete*: of runs whose last verdict was `complete`, the share whose check passed (a false `complete` sends the user away from broken work). *Failures caught*: of failing runs with a verdict, the share not called complete.",
+		"*Precision of complete*: of runs whose last verdict was `complete`, the share whose check passed (a false `complete` sends the user away from broken work). Its interval is a Wilson interval over runs, which treats repeats of one task as independent, so it is somewhat too narrow. *Failures caught*: of failing runs with a verdict, the share not called complete. *Δ precision* is the mean per-task difference in precision, in points, over tasks where both configs called at least one run complete, with the paired test's interval and p-value.",
 	];
 }
 
-/** Each config against the first one (the baseline), task by task, with the run counts' power. */
+const successOf: TaskValue = (runs) => runs.filter((r) => r.success).length / runs.length;
+const repeatedErrorRateOf: TaskValue = (runs) => {
+	const errors = sum(runs.map((r) => r.metrics?.toolErrors ?? 0));
+	return errors > 0 ? sum(runs.map((r) => r.metrics?.repeatedToolErrors ?? 0)) / errors : null;
+};
+
+/** Each config against the first one (the baseline), task by task, with what the tasks can detect. */
 function pairedSection(records: readonly RunRecord[], summaries: readonly ConfigSummary[]): string[] {
 	const [baseline, ...treatments] = summaries;
 	if (!baseline || treatments.length === 0) return [];
-	const comparisons = treatments.map((t) => pairedComparison(records, baseline.config, t.config));
-	// Pooled rate, kept off 0 and 1 where the normal approximation says nothing.
-	const pooled = records.filter((r) => r.success).length / records.length;
-	const mde = minimumDetectableEffect(Math.min(0.95, Math.max(0.05, pooled)), baseline.runs);
+	const difference = (value: TaskValue) =>
+		treatments.map((t) => pairedDifference(records, baseline.config, t.config, value));
+	const ratio = (value: TaskValue) => treatments.map((t) => pairedRatio(records, baseline.config, t.config, value));
+	const success = difference(successOf);
+	const adjusted = holm(success.map((c) => c?.p ?? 1));
+	const turns = ratio(meanOf((r) => r.metrics?.turns ?? null));
+	const input = ratio(meanOf((r) => r.metrics?.inputTokens ?? null));
+	const wall = ratio(meanOf((r) => r.wallClockMs / 1000));
+	const repeated = difference(repeatedErrorRateOf);
+	const dropped = treatments.flatMap((t, i) => {
+		const notes = [
+			blocks(pairRuns(records, baseline.config, t.config).droppedBlocks),
+			noRatio("turns", turns[i]),
+			noRatio("input tokens", input[i]),
+		].filter((note) => note !== "");
+		return notes.length > 0 ? [`\`${t.config}\`: ${notes.join("; ")}.`] : [];
+	});
 	return [
 		"",
 		`## Paired by task vs \`${baseline.config}\``,
 		"",
-		"| config | tasks | Δ success | 95% CI | wins/losses/ties | sign test p | Δ turns | Δ input tok | Δ wall |",
-		"|---|---|---|---|---|---|---|---|---|",
-		...comparisons.map((c) => `| ${pairedRow(c)} |`),
+		"| config | tasks | Δ success | 95% CI | p | Holm p | detectable Δ | wins/losses/ties |",
+		"|---|---|---|---|---|---|---|---|",
+		...treatments.map((t, i) => `| ${successRow(t.config, success[i] ?? null, adjusted[i] ?? 1)} |`),
 		"",
-		`Δ success is the mean over tasks of the per-task success-rate difference, in points; the CI is a task-level bootstrap. Δ turns, input tokens and wall-clock are mean per-task relative changes. With ${baseline.runs} runs per config at a ${pct(pooled)} pooled success rate, an unpaired comparison can only detect differences of about ${Math.round(mde * 100)} points (α = 0.05, 80% power): treat smaller differences, and any per-slice result, as descriptive (D-045).`,
+		"| config | Δ turns | Δ input tok | Δ wall | Δ repeated-error rate |",
+		"|---|---|---|---|---|",
+		...treatments.map(
+			(t, i) =>
+				`| ${[
+					t.config,
+					ratioCell(turns[i] ?? null),
+					ratioCell(input[i] ?? null),
+					ratioCell(wall[i] ?? null),
+					differenceCell(repeated[i] ?? null),
+				].join(" | ")} |`,
+		),
+		"",
+		`The unit is the task: each task's runs are averaged per config, and repeats of a task are not counted as independent evidence. Δ success is the mean over tasks of the per-task success-rate difference, in points. Its interval and p-value come from the exact sign-flip test on those differences (D-079); with fewer than ${MIN_TASKS_FOR_INTERVAL} tasks no 95% interval exists and the smallest possible p is above 0.05, so the table says *n too small*. *Holm p* adjusts for testing ${treatments.length} config${treatments.length === 1 ? "" : "s"} against the baseline: use it when asking "did any of these help". *Detectable Δ* is the smallest true difference these tasks would show 80% of the time (α = 0.05), computed from how much the per-task differences vary; an interval that spans zero inside it means "nothing this run could see". It is itself an estimate, and a rough one with few tasks. Δ turns, input tokens and wall-clock are typical per-task relative changes (geometric mean of the per-task ratios) and Δ repeated-error rate is in points, each with the same test's 95% interval in brackets. A (task, repeat) block with an invalid run in either config is left out of both. Treat any per-slice result as descriptive (D-045).`,
+		...(dropped.length > 0 ? ["", `Left out: ${dropped.join(" ")}`] : []),
 	];
 }
 
-function pairedRow(c: PairedComparison): string {
+function blocks(count: number): string {
+	return count > 0 ? `${count} (task, repeat) block${count === 1 ? "" : "s"} with an invalid run` : "";
+}
+
+function noRatio(name: string, ratio: PairedRatio | null | undefined): string {
+	const count = ratio?.droppedTasks ?? 0;
+	return count > 0 ? `${count} task${count === 1 ? "" : "s"} with no ${name} in one config` : "";
+}
+
+function successRow(config: string, c: PairedDifference | null, holmP: number): string {
+	if (!c) return [config, "0", "—", "—", "—", "—", "—", "—"].join(" | ");
 	return [
-		c.treatment,
+		config,
 		String(c.tasks),
-		points(c.meanDelta),
-		`[${points(c.ci[0])}, ${points(c.ci[1])}]`,
+		points(c.mean),
+		interval(c.ci, points),
+		c.p.toFixed(3),
+		holmP.toFixed(3),
+		c.detectable === null
+			? c.tasks < MIN_TASKS_FOR_INTERVAL
+				? "n too small"
+				: "—"
+			: `±${Math.round(c.detectable * 100)}`,
 		`${c.wins}/${c.losses}/${c.ties}`,
-		c.signTestP.toFixed(2),
-		change(c.turnsChange),
-		change(c.inputTokensChange),
-		change(c.wallClockChange),
 	].join(" | ");
+}
+
+function ratioCell(c: PairedRatio | null): string {
+	return c ? `${change(c.change)} ${interval(c.ci, change)}` : "—";
+}
+
+function differenceCell(c: PairedDifference | null): string {
+	return c ? `${points(c.mean)} ${interval(c.ci, points)}` : "—";
+}
+
+function interval(
+	ci: readonly [number, number] | null,
+	format: (value: number) => string,
+	missing = "n too small",
+): string {
+	return ci ? `[${format(ci[0])}, ${format(ci[1])}]` : missing;
 }
 
 function points(delta: number): string {
@@ -463,8 +585,7 @@ function points(delta: number): string {
 	return `${value > 0 ? "+" : ""}${value}`;
 }
 
-function change(value: number | null): string {
-	if (value === null) return "—";
+function change(value: number): string {
 	const rounded = Math.round(value * 100);
 	return `${rounded > 0 ? "+" : ""}${rounded}%`;
 }

@@ -86,6 +86,8 @@ describe("computeTraceMetrics", () => {
 			failedCompactions: 0,
 			errorStops: 0,
 			lengthStops: 0,
+			lastStopReason: null,
+			compactionTokens: 0,
 			compactionReplays: 0,
 			trimmedOutputs: 0,
 			trimmedRereads: 0,
@@ -367,6 +369,46 @@ describe("computeTraceMetrics", () => {
 			call("read", { path: "src/lib.rs" }),
 		]);
 		expect(metrics).toMatchObject({ trimmedOutputs: 3, trimmedRereads: 1 });
+	});
+
+	it("adds pi's own compaction calls to the main tokens, which no turn carries (D-079)", () => {
+		const turn = event("turn.end", { stopReason: "stop", usage: { input: 1_000, cacheRead: 200, output: 50 } });
+		const without = computeTraceMetrics([turn]);
+		expect(without).toMatchObject({ inputTokens: 1_000, cachedTokens: 200, outputTokens: 50, compactionTokens: 0 });
+		const metrics = computeTraceMetrics([
+			turn,
+			// Pi summarised the session itself: the usage is on the compaction entry only.
+			event("compaction", {
+				reason: "threshold",
+				fromExtension: false,
+				entry: { type: "compaction", summary: "…", usage: { input: 9_000, cacheRead: 0, output: 700 } },
+			}),
+			// Exocortex's compaction module supplied this one: its calls are sidecar calls, counted there.
+			event("compaction", {
+				reason: "threshold",
+				fromExtension: true,
+				entry: { type: "compaction", summary: "…", usage: { input: 5_000, cacheRead: 0, output: 500 } },
+			}),
+			// An older pi, or a summary with no usage reported.
+			event("compaction", { reason: "manual", fromExtension: false, entry: { type: "compaction", summary: "…" } }),
+		]);
+		expect(metrics).toMatchObject({
+			turns: 1,
+			inputTokens: 10_000,
+			cachedTokens: 200,
+			outputTokens: 750,
+			compactionTokens: 9_700,
+			compactions: 3,
+		});
+	});
+
+	it("remembers how the last turn ended", () => {
+		expect(computeTraceMetrics([]).lastStopReason).toBeNull();
+		const stops = (...reasons: unknown[]) =>
+			computeTraceMetrics(reasons.map((stopReason) => event("turn.end", { stopReason }))).lastStopReason;
+		expect(stops("toolUse", "error")).toBe("error");
+		expect(stops("error", "stop")).toBe("stop");
+		expect(stops("stop", undefined)).toBeNull();
 	});
 
 	it("handles an empty trace", () => {

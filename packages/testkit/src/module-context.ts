@@ -53,9 +53,16 @@ export function createTestModuleContext(options: {
 	const states: JsonValue[] = [];
 	const { reply } = options;
 	const client: InferenceClient | undefined = reply && {
-		async chat(request) {
+		async chat(request, signal) {
 			requests.push(request);
-			const value = await reply(request, requests.length - 1);
+			// A real client stops waiting when its signal fires; a fake that does not would let a
+			// module's timeout and cancellation paths go untested.
+			const aborted = new Promise<never>((_, reject) => {
+				const fail = () => reject(new InferenceError("aborted", "request aborted"));
+				if (signal?.aborted) fail();
+				else signal?.addEventListener("abort", fail, { once: true });
+			});
+			const value = await Promise.race([reply(request, requests.length - 1), aborted]);
 			if (value instanceof Error) throw new InferenceError("http", value.message);
 			return {
 				text: typeof value === "string" ? value : JSON.stringify(value),

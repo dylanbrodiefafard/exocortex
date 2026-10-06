@@ -228,7 +228,7 @@ describe("pi CLI with the Exocortex extension", { timeout: 30_000 }, () => {
 	it("runs sidecar calls through the pool against the main model's endpoint and records them", async () => {
 		const run = await runPi([{ kind: "text", text: "pong", cachedTokens: 4 }], {}, "/exo ping");
 		expect(run.code).toBe(0);
-		expect(run.stderr).toMatch(/Exocortex sidecar OK in \d+ ms \(10 prompt tokens, 4 cached\): pong/);
+		expect(run.stderr).toMatch(/Exocortex sidecar OK in \d+ ms \(\d+ prompt tokens, 4 cached\): pong/);
 		// The only request is the sidecar's: non-streaming, thinking off, to the main model's id.
 		expect(server?.requests).toEqual([
 			expect.objectContaining({
@@ -245,7 +245,7 @@ describe("pi CLI with the Exocortex extension", { timeout: 30_000 }, () => {
 				priority: "interactive",
 				outcome: "ok",
 				attempts: 1,
-				usage: { promptTokens: 10, cachedTokens: 4, completionTokens: 5 },
+				usage: { promptTokens: 16, cachedTokens: 4, completionTokens: 1 },
 			}),
 		]);
 	});

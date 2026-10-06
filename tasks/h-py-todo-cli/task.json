@@ -6,5 +6,6 @@
 	"maxTurns": 40,
 	"timeoutSec": 1200,
 	"checkTimeoutSec": 120,
-	"tags": ["hard", "spec-compliance", "python"]
+	"tags": ["hard", "spec-compliance", "python"],
+	"minTests": 33
 }

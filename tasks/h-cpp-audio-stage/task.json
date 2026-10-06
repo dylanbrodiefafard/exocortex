@@ -6,5 +6,6 @@
 	"maxTurns": 50,
 	"timeoutSec": 1500,
 	"checkTimeoutSec": 180,
-	"tags": ["hard", "navigation", "cpp", "uncalibrated"]
+	"tags": ["hard", "navigation", "cpp", "uncalibrated"],
+	"minTests": 51
 }

@@ -13,6 +13,8 @@ export interface PiRpcOptions {
 	readonly env: Readonly<Record<string, string>>;
 	/** pi's stderr is appended here. */
 	readonly stderrPath: string;
+	/** How long an abort and a close wait for pi before killing it. Default 5 s. */
+	readonly graceMs?: number;
 }
 
 export interface PromptLimits {
@@ -55,8 +57,10 @@ export class PiRpcProcess {
 	private buffer = "";
 	private nextId = 0;
 	private exited: string | undefined;
+	private readonly graceMs: number;
 
 	constructor(options: PiRpcOptions) {
+		this.graceMs = options.graceMs ?? ABORT_GRACE_MS;
 		this.stderr = createWriteStream(options.stderrPath, { flags: "a" });
 		this.child = spawn(process.execPath, [options.cliPath, "--mode", "rpc", ...options.args], {
 			cwd: options.cwd,
@@ -65,6 +69,9 @@ export class PiRpcProcess {
 			detached: true,
 		});
 		this.child.stderr.pipe(this.stderr);
+		// Writing to a pi that has died raises EPIPE on the stream; without a listener that is an
+		// uncaught exception that takes the whole eval down. The exit handler reports the death.
+		this.child.stdin.on("error", () => {});
 		this.child.stdout.on("data", (chunk: Buffer) => this.onStdout(chunk));
 		this.child.on("exit", (code, signal) => {
 			this.exited = `pi exited (code=${code} signal=${signal})`;
@@ -125,13 +132,21 @@ export class PiRpcProcess {
 		const uiRequests: UiRequest[] = [];
 		let turns = 0;
 
+		const silent = { outcome: "crashed" as const, error: "pi did not answer the prompt within the time limit" };
+		let accepted = false;
+		let stop: (result: { outcome: RunOutcome; error?: string }) => void = () => {};
 		const done = new Promise<{ outcome: RunOutcome; error?: string }>((resolve) => {
-			const timer = setTimeout(() => resolve({ outcome: "timeout" }), limits.timeoutMs);
+			const timer = setTimeout(() => finish(accepted ? { outcome: "timeout" } : silent), limits.timeoutMs);
+			let atLimit = false;
 			const listener = (record: Record<string, unknown>) => {
 				const type = record["type"];
 				if (type === "turn_end") {
 					turns += 1;
-					if (turns >= limits.maxTurns) finish({ outcome: "max_turns" });
+					// The limit is on turns the agent uses, not on finishing: an agent whose last allowed
+					// turn is its final answer settled. Only a further turn is over the limit.
+					if (turns >= limits.maxTurns) atLimit = true;
+				} else if (type === "turn_start" && atLimit) {
+					finish({ outcome: "max_turns" });
 				} else if (type === "agent_settled") {
 					finish({ outcome: "settled" });
 				} else if (type === "process_exit") {
@@ -145,14 +160,23 @@ export class PiRpcProcess {
 				this.listeners.delete(listener);
 				resolve(result);
 			};
+			stop = finish;
 			this.listeners.add(listener);
 		});
 
-		const response = await this.send({ type: "prompt", message });
-		const result =
-			response["success"] === true
-				? await done
-				: { outcome: "crashed" as const, error: `prompt rejected: ${String(response["error"])}` };
+		// The time limit covers this wait too: a pi that never answers must not hang the suite.
+		const response = await this.send({ type: "prompt", message }, limits.timeoutMs);
+		accepted = response["success"] === true;
+		if (response["timedOut"] === true) {
+			killGroup(this.child.pid);
+			stop(silent);
+		} else if (!accepted) {
+			stop({ outcome: "crashed", error: `prompt rejected: ${String(response["error"])}` });
+		} else if ((response["data"] as { disposition?: unknown } | undefined)?.disposition === "handled") {
+			// An extension consumed the input, so no run started and no `agent_settled` will come.
+			stop({ outcome: "settled" });
+		}
+		const result = await done;
 		if (result.outcome === "max_turns" || result.outcome === "timeout") await this.abort();
 		return {
 			outcome: result.outcome,
@@ -168,7 +192,7 @@ export class PiRpcProcess {
 		if (!this.exited) {
 			const exited = new Promise<void>((resolve) => this.child.once("exit", () => resolve()));
 			this.child.stdin.end();
-			const timeout = new Promise<void>((resolve) => setTimeout(resolve, ABORT_GRACE_MS).unref());
+			const timeout = new Promise<void>((resolve) => setTimeout(resolve, this.graceMs).unref());
 			await Promise.race([exited, timeout]);
 		}
 		killGroup(this.child.pid);
@@ -187,9 +211,11 @@ export class PiRpcProcess {
 			setTimeout(() => {
 				this.listeners.delete(listener);
 				resolve();
-			}, ABORT_GRACE_MS).unref();
+			}, this.graceMs).unref();
 		});
-		await this.send({ type: "abort" });
+		// A pi that does not even acknowledge the abort is stuck: kill it now rather than at close.
+		const response = await this.send({ type: "abort" }, this.graceMs);
+		if (response["timedOut"] === true) killGroup(this.child.pid);
 		await settled;
 	}
 
@@ -202,17 +228,25 @@ export class PiRpcProcess {
 		sink.push({ method, payload: record });
 	}
 
-	private send(command: Record<string, unknown>): Promise<Record<string, unknown>> {
+	/** Sends a command and waits for its response, for at most `timeoutMs` (`timedOut: true` after that). */
+	private send(command: Record<string, unknown>, timeoutMs: number): Promise<Record<string, unknown>> {
 		if (this.exited) return Promise.resolve({ type: "response", success: false, error: this.exited });
 		const id = `eval-${++this.nextId}`;
 		return new Promise((resolve) => {
-			this.pending.set(id, resolve);
+			const timer = setTimeout(() => {
+				this.pending.delete(id);
+				resolve({ type: "response", success: false, timedOut: true, error: `no response within ${timeoutMs} ms` });
+			}, timeoutMs);
+			this.pending.set(id, (record) => {
+				clearTimeout(timer);
+				resolve(record);
+			});
 			this.write({ ...command, id });
 		});
 	}
 
 	private write(record: Record<string, unknown>): void {
-		if (!this.exited) this.child.stdin.write(`${JSON.stringify(record)}\n`);
+		if (!this.exited && this.child.stdin.writable) this.child.stdin.write(`${JSON.stringify(record)}\n`);
 	}
 
 	private onStdout(chunk: Buffer): void {

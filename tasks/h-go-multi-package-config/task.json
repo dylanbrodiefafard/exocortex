@@ -7,5 +7,6 @@
 	"timeoutSec": 1500,
 	"checkTimeoutSec": 180,
 	"tags": ["hard", "navigation", "go"],
-	"protectTests": false
+	"protectTests": false,
+	"minTests": 6
 }

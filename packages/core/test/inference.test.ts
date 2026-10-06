@@ -89,7 +89,8 @@ describe("createOpenAIClient", () => {
 		expect(response).toEqual({
 			text: "hello",
 			finishReason: "stop",
-			usage: { promptTokens: 10, completionTokens: 5, cachedTokens: 7 },
+			// The fake reports usage in proportion to the request and the reply (about 4 characters a token).
+			usage: { promptTokens: 8, completionTokens: 2, cachedTokens: 7 },
 		});
 		expect(server?.requests[0]).toMatchObject({ model: "m", max_tokens: 5, stream: false });
 	});

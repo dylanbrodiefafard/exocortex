@@ -6,9 +6,21 @@ Before starting, set `pool.maxConcurrent` / `pool.reservedForMain` in `~/.exocor
 
 If you run an embeddings server (D-062), set `embeddings.baseUrl` and `embeddings.model` there too and confirm with `/exo ping`. The eval picks it up from the same file. It only affects configs with memory on.
 
-**Cost.** The hard tier's median run was 68 s (D-037). Budget about 2 minutes per run to allow for the tail, so 100 runs take about 3–4 hours. Several configs can share one batch (`--config a,b,c`). They then share the baseline runs, and the report pairs every config against the first.
+**Cost.** The hard tier's median run was 68 s (D-037). Budget about 2 minutes per run to allow for the tail, so 100 runs take about 3–4 hours. Several configs can share one batch (`--config a,b,c`). They then share the baseline runs, and the report pairs every config against the first one named. Within each task and repeat the configs run in a shuffled order, so no config always goes first; the seed is in `eval-runs/<stamp>/run.json` (`--seed <n>` fixes it).
 
-**Reading results.** Use the report's "Paired by task" section, not the raw success column. It prints the smallest difference the run count can detect. Below that, treat results as descriptive. Re-render any slice with `npm run eval -- --report eval-runs/<stamp> --tags <slice>`.
+**If a run is interrupted,** continue it with the same arguments plus `--resume eval-runs/<stamp>`. Runs already in `results.jsonl` are kept.
+
+**Reading results (D-079).** Use the report's "Paired by task" section, not the raw success column.
+
+- **The task is the unit.** Each task's runs are averaged per config, and the comparison is over tasks. Five repeats of 7 tasks are 7 observations, not 35: repeats make each task's number less noisy, they do not add tasks.
+- **Δ success, its interval and p** come from an exact paired test on the per-task differences. A 95% interval that leaves zero out is a result. With fewer than 6 tasks the table prints *n too small*: no interval exists, and no outcome could reach p < 0.05.
+- **Detectable Δ** is the smallest true difference these tasks would show 80% of the time, computed from how much the per-task differences vary in this run. An interval that spans zero and lies inside ±detectable Δ means "nothing this run could see", not "no difference". The 7-task slices can only show large effects (D-045): expect ±30 points or worse.
+- **Holm p** is for a batch with several treatments (step 2 has six). Use it for "did any option help"; the plain p answers "did this one option, chosen in advance, help".
+- **Cost columns** (Δ turns, input tokens, wall-clock, total tokens) are typical per-task relative changes with the same test's interval in brackets. Tasks with a zero on one side have no ratio and are listed under the table.
+- **Invalid runs** (a crashed pi, a harness error, a failed setup, a model server that errored before the agent did anything) are retried once, then counted in the *invalid* column and left out of everything else. In the paired numbers the same task and repeat is left out of both configs. More than a few invalid runs means the run should be repeated, not read.
+- **The check guard** restores tests and build files, sets aside tests the agent added, and fails a check that ran too few tests (EVAL_TASKS.md). The *tampered* column and the "Check guard" section show how often it acted.
+
+Re-render any slice with `npm run eval -- --report eval-runs/<stamp> --tags <slice>`.
 
 ## 0. Calibrate the new fixtures (do first)
 
@@ -18,6 +30,7 @@ npm run eval -- --model ninfer/coding --tags uncalibrated --config all-off --rep
 
 - **Keep** tasks between 1/3 and 2/3. Rework or drop tasks at 0/3 or 3/3: they carry no signal (EVAL_TASKS.md). Then remove the `uncalibrated` tag.
 - In the first calibration, 6 of 12 hard tasks scored 3/3 (D-037). Consider making those harder, or retagging them `regression` and running them less often.
+- **Calibrate the already-calibrated hard tasks again too** (`--tags hard`). The check guard is stricter than the one they were calibrated under (D-079), so a task's baseline rate may have moved. While reading the result, look at `tamperedFiles` and `setAsideTests` in `results.jsonl` for failing runs: a run that failed only because the guard restored a `Makefile` it had a good reason to change points at a fixture to fix (give the task its own `protect` list), not at the agent.
 
 ## 1. Phase 3 acceptance: supervisor vs baseline
 
@@ -78,7 +91,7 @@ npm run eval -- --model ninfer/coding --tags error-recovery --config all-off,tri
      ```sh
      npm run eval -- --model ninfer32k/coding --tags hard --config all-off,compaction --repeat 3
      ```
-  3. **Primary:** success on runs with at least one compaction: *success with compaction* in the report's "Context pressure" section (D-059).
+  3. **Primary:** success on runs with at least one compaction: *success with compaction* in the report's "Context pressure" section (D-059). The token columns now include what pi's own summaries cost in the `all-off` row (D-079); before, that row looked cheaper than it was.
   4. **Also read:** *replays after compaction* (D-061, research R4.4): the fact-anchored summary should lower it. And *failed runs under context pressure* in the `all-off` row. That count is the evidence D-053 asks for before retro-masking is reconsidered. If *error stops* is above zero with no overflow compactions, check `logs/*.stderr.log`: ninfer's overflow error may not match pi's patterns.
 - **Phase 4 acceptance (brief §8, amended by D-045):**
 
@@ -96,8 +109,8 @@ npm run eval -- --model ninfer/coding --tags hard --config all-off,memory,memory
 
 - **What `memory` now does (D-072):** a card is one problem (the error's signature plus the names in the failure), so a task is shown its own earlier fix and not another task's. The first error of a fix is kept when the error changes on the way to the pass, and the note tells the agent it is a past fix to check.
 - **Primary:** the "Success by repeat" table. Memory can only help from r2 on, so look for a rise over r1 that `all-off` doesn't show.
-- **Also read:** the "Token budget" table under it (D-058): total tokens per config and per repeat (main + every sidecar, memory's own column included), tokens per pass, and Δ total against `all-off` with its CI. This is the budget-matched comparison (research R5.4). The paragraph below the table states the smallest success difference the run could detect.
-- **Expect a small effect (D-055).** Verified experience moved held-out solvers by 1–4.5 points in VibeMemBench, and `--repeat 3` cannot detect that. Read this run as a harm check plus the learning curve. It passes when success does not drop and Δ total tokens is not above zero by more than its *detectable Δ*. A benefit claim needs more repeats or cross-task fixtures. Then inspect the cards with `sqlite3 eval-runs/<stamp>/memory-memory.db 'select scope, detail, lesson, seen, injected, helped, hurt from cards'`.
+- **Also read:** the "Token budget" table under it (D-058): total tokens per config and per repeat (main + every sidecar, memory's own column included), tokens per pass, and Δ total against `all-off` with its CI. This is the budget-matched comparison (research R5.4). What the run can say about success is the *detectable Δ* column of the paired table.
+- **Expect a small effect (D-055).** Verified experience moved held-out solvers by 1–4.5 points in VibeMemBench, and 28 tasks cannot detect that at any number of repeats. Read this run as a harm check plus the learning curve. It passes when success does not drop and Δ total tokens is not above zero by more than its *detectable Δ*. A benefit claim needs more repeats or cross-task fixtures. Then inspect the cards with `sqlite3 eval-runs/<stamp>/memory-memory.db 'select scope, detail, lesson, seen, injected, helped, hurt from cards'`.
 - **Check that recall happened at all.** `npm run trace -- stats --db eval-runs/<stamp>/trace.db` counts memory's `learned`, `recalled` and `credited` events across the run's sessions (all configs together; only the memory configs produce them). If r2 and r3 show `learned` but few `recalled`, the agent's first failure did not match its card: look at whether it fails on a different first test (D-072's open risks), or pipes its test runs in a way nothing could read. Piped runs are now read from their output (D-075): `select data from events where kind = 'exo.run'` in the trace shows each reading and whether a sidecar made it, and many `unknown` ones mean memory had nothing to learn from. A flat learning curve with no recalls says nothing about whether cards help.
 - **`helped` and `hurt` now mean something per card (D-072):** helped is "the command it was shown for went on to pass", hurt is "its problem kept coming back". A card with `injected` above `helped + hurt` was shown and the command was not run again.
 - **With embeddings on (D-062):** `minSimilarity` (0.85) was chosen without a real embedding model. After the run, look at the `recalled` events for cards pulled in by similarity that have nothing to do with the error; raise the threshold if there are any.

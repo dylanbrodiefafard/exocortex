@@ -6,5 +6,6 @@
 	"maxTurns": 40,
 	"timeoutSec": 1200,
 	"checkTimeoutSec": 180,
-	"tags": ["hard", "noisy-output", "cpp"]
+	"tags": ["hard", "noisy-output", "cpp"],
+	"minTests": 25
 }

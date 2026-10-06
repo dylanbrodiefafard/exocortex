@@ -1,7 +1,26 @@
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
+
+/**
+ * Files that decide what the check runs, put back before it (D-079): the build and test-runner
+ * configuration of the four toolchains. A name without `/` matches in any directory.
+ */
+const DEFAULT_PROTECT: readonly string[] = [
+	"Makefile",
+	"GNUmakefile",
+	"makefile",
+	"CMakeLists.txt",
+	"Cargo.toml",
+	"go.mod",
+	"go.work",
+	"conftest.py",
+	"pytest.ini",
+	"pyproject.toml",
+	"setup.cfg",
+	"tox.ini",
+];
 
 const TaskSpecSchema = Type.Object(
 	{
@@ -30,6 +49,18 @@ const TaskSpecSchema = Type.Object(
 		 * tasks that ask the agent to change existing tests.
 		 */
 		protectTests: Type.Boolean({ default: true }),
+		/**
+		 * Build and runner files restored before the check like the tests are (D-079): a name
+		 * (`Makefile`, any directory) or a repo-relative path (`sub/Makefile`). A file the reference
+		 * solution changes is never restored. `[]` turns it off.
+		 */
+		protect: Type.Array(Type.String({ minLength: 1 }), { default: [...DEFAULT_PROTECT] }),
+		/**
+		 * Tests the check must run and pass. A check that exits 0 after fewer is a failure: something
+		 * stopped the tests from running. Written by `--validate --record-tests` from the reference
+		 * solution; lower it by hand when a correct solution may remove tests the fixture ships.
+		 */
+		minTests: Type.Optional(Type.Integer({ minimum: 1 })),
 	},
 	{ additionalProperties: false },
 );
@@ -47,6 +78,8 @@ export interface Task {
 	 * the check runs, so acceptance tests the agent never saw can score the result.
 	 */
 	readonly hiddenDir: string | undefined;
+	/** Repo-relative paths `solution.patch` adds, changes, removes or renames: the check guard leaves them alone. */
+	readonly solutionPaths: ReadonlySet<string>;
 }
 
 /**
@@ -92,7 +125,31 @@ export function loadTask(dir: string): Task {
 		repoDir,
 		solutionPatch: existsSync(patchPath) ? patchPath : undefined,
 		hiddenDir: existsSync(hiddenDir) ? hiddenDir : undefined,
+		solutionPaths: existsSync(patchPath) ? patchedPaths(readFileSync(patchPath, "utf8")) : new Set(),
 	};
+}
+
+/** The paths a unified diff touches, from its `--- a/…` and `+++ b/…` headers and rename lines. */
+function patchedPaths(patch: string): Set<string> {
+	const paths = new Set<string>();
+	for (const match of patch.matchAll(/^(?:--- a\/|\+\+\+ b\/|rename from |rename to )(.+?)\t?$/gm)) {
+		if (match[1]) paths.add(match[1]);
+	}
+	return paths;
+}
+
+/**
+ * Writes `minTests` into the task's `task.json` by editing the text, so the rest of the file,
+ * its formatting included, stays exactly as its author left it.
+ */
+export function recordMinTests(task: Task, minTests: number): void {
+	const path = join(task.dir, "task.json");
+	const text = readFileSync(path, "utf8");
+	const existing = /("minTests"\s*:\s*)\d+/;
+	const updated = existing.test(text)
+		? text.replace(existing, `$1${minTests}`)
+		: text.replace(/\s*\}\s*$/, `,\n\t"minTests": ${minTests}\n}\n`);
+	writeFileSync(path, updated);
 }
 
 function globToRegExp(glob: string): RegExp {

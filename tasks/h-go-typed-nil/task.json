@@ -6,5 +6,6 @@
 	"maxTurns": 40,
 	"timeoutSec": 1200,
 	"checkTimeoutSec": 180,
-	"tags": ["hard", "error-recovery", "go", "uncalibrated"]
+	"tags": ["hard", "error-recovery", "go", "uncalibrated"],
+	"minTests": 3
 }

@@ -6,5 +6,6 @@
 	"maxTurns": 40,
 	"timeoutSec": 1200,
 	"checkTimeoutSec": 180,
-	"tags": ["hard", "algorithmic", "rust"]
+	"tags": ["hard", "algorithmic", "rust"],
+	"minTests": 41
 }

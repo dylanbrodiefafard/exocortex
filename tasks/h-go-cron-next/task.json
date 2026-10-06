@@ -6,5 +6,6 @@
 	"maxTurns": 45,
 	"timeoutSec": 1200,
 	"checkTimeoutSec": 180,
-	"tags": ["hard", "spec-compliance", "go", "uncalibrated"]
+	"tags": ["hard", "spec-compliance", "go", "uncalibrated"],
+	"minTests": 1
 }

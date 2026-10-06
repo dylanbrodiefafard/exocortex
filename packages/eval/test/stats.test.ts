@@ -1,8 +1,18 @@
 import { describe, expect, it } from "vitest";
 import { computeTraceMetrics } from "../src/metrics.ts";
-import { renderMarkdown } from "../src/report.ts";
-import type { RunRecord } from "../src/run.ts";
-import { minimumDetectableEffect, pairedComparison, pairedRelativeChange, signTest } from "../src/stats.ts";
+import { mulberry32 } from "../src/random.ts";
+import type { RunRecord } from "../src/records.ts";
+import {
+	detectableDifference,
+	holm,
+	meanOf,
+	pairedDifference,
+	pairedRatio,
+	pairRuns,
+	signFlip,
+	studentTQuantile,
+	wilson,
+} from "../src/stats.ts";
 
 function run(taskId: string, config: string, success: boolean, extra: Partial<RunRecord> = {}): RunRecord {
 	return {
@@ -22,31 +32,254 @@ function run(taskId: string, config: string, success: boolean, extra: Partial<Ru
 	};
 }
 
-describe("signTest", () => {
-	it("matches exact binomial tails", () => {
-		expect(signTest(0, 0)).toBe(1);
-		expect(signTest(5, 0)).toBeCloseTo(0.0625);
-		expect(signTest(8, 2)).toBeCloseTo(0.109375);
-		expect(signTest(3, 3)).toBe(1);
+const successOf = (runs: readonly RunRecord[]) => runs.filter((r) => r.success).length / runs.length;
+
+/** Standard normal draws (Box–Muller) from a seeded uniform generator. */
+function normalFrom(random: () => number): () => number {
+	return () => Math.sqrt(-2 * Math.log(1 - random())) * Math.cos(2 * Math.PI * random());
+}
+
+/** The percentile bootstrap the report used before D-079, kept here to show what it got wrong. */
+function percentileBootstrap(values: readonly number[], random: () => number): [number, number] {
+	const resamples = 2_000;
+	const means: number[] = [];
+	for (let i = 0; i < resamples; i++) {
+		let total = 0;
+		for (let j = 0; j < values.length; j++) total += values[Math.floor(random() * values.length)] ?? 0;
+		means.push(total / values.length);
+	}
+	means.sort((a, b) => a - b);
+	return [means[Math.floor(resamples * 0.025)] ?? 0, means[Math.ceil(resamples * 0.975) - 1] ?? 0];
+}
+
+/** Per-task success-rate differences when the two configs are the same: each task has its own pass rate. */
+function nullDeltas(tasks: number, repeats: number, random: () => number): number[] {
+	const passes = (p: number) => {
+		let k = 0;
+		for (let i = 0; i < repeats; i++) if (random() < p) k += 1;
+		return k;
+	};
+	return Array.from({ length: tasks }, () => {
+		const p = 0.15 + 0.7 * random();
+		return (passes(p) - passes(p)) / repeats;
+	});
+}
+
+const excludesZero = (ci: readonly [number, number] | null) => ci !== null && (ci[0] > 1e-12 || ci[1] < -1e-12);
+
+describe("studentTQuantile", () => {
+	it("matches the printed t table", () => {
+		expect(studentTQuantile(0.975, 1)).toBeCloseTo(12.706, 2);
+		expect(studentTQuantile(0.975, 2)).toBeCloseTo(4.303, 3);
+		expect(studentTQuantile(0.975, 5)).toBeCloseTo(2.571, 3);
+		expect(studentTQuantile(0.975, 10)).toBeCloseTo(2.228, 3);
+		expect(studentTQuantile(0.975, 29)).toBeCloseTo(2.045, 3);
+		expect(studentTQuantile(0.8, 5)).toBeCloseTo(0.92, 3);
+		expect(studentTQuantile(0.8, 11)).toBeCloseTo(0.876, 3);
+		expect(studentTQuantile(0.975, 1000)).toBeCloseTo(1.962, 3);
 	});
 });
 
-describe("minimumDetectableEffect", () => {
-	it("reproduces the research survey's table (p = 0.64)", () => {
-		expect(Math.round(minimumDetectableEffect(0.64, 15) * 100)).toBe(49);
-		expect(Math.round(minimumDetectableEffect(0.64, 60) * 100)).toBe(25);
-		expect(Math.round(minimumDetectableEffect(0.64, 300) * 100)).toBe(11);
-		expect(minimumDetectableEffect(0.5, 0)).toBe(1);
+describe("signFlip", () => {
+	it("matches p-values worked out by hand", () => {
+		// ±1 ±2 ±3: only +6 and −6 are as extreme as the observed 6, out of 8.
+		expect(signFlip([1, 2, 3]).p).toBeCloseTo(2 / 8);
+		// ±3 ±1 ±2 against the observed 4: {4, 6, −4, −6} of 8.
+		expect(signFlip([3, -1, 2]).p).toBeCloseTo(4 / 8);
+		// Five wins and no loss: the sign test's 2 / 32.
+		expect(signFlip([1, 1, 1, 1, 1]).p).toBeCloseTo(0.0625);
+		expect(signFlip([0.5, -0.5]).p).toBe(1);
+		expect(signFlip([0, 0, 0, 0, 0, 0, 0])).toEqual({ p: 1, ci: [0, 0] });
+		expect(signFlip([])).toEqual({ p: 1, ci: null });
+	});
+
+	it("gives no interval below six tasks, where none exists at 95%", () => {
+		for (const deltas of [[1], [1, 2], [1, 2, 3, 4, 5]]) expect(signFlip(deltas).ci).toBeNull();
+		// The smallest p five tasks can reach is 2 / 32, above 0.05.
+		expect(signFlip([9, 9, 9, 9, 9]).p).toBeGreaterThan(0.05);
+	});
+
+	it("gives the interval of subset means worked out by hand", () => {
+		// Six tasks: 64 sign assignments, k = floor(0.025 × 64) = 1, so the extremes of the subset
+		// means, which are the smallest and largest difference.
+		expect(signFlip([1, 2, 3, 4, 5, 6])).toEqual({ p: 2 / 64, ci: [1, 6] });
+		// Seven tasks: k = 3. The three smallest subset means of 1..7 are 1, 1.5 ({1,2}) and 2.
+		expect(signFlip([1, 2, 3, 4, 5, 6, 7])).toEqual({ p: 2 / 128, ci: [2, 6] });
+	});
+
+	it("rejects exactly when the interval leaves zero out", () => {
+		const random = mulberry32(3);
+		const normal = normalFrom(random);
+		for (let i = 0; i < 300; i++) {
+			const n = 6 + (i % 6);
+			const deltas = Array.from({ length: n }, () => 0.6 + normal());
+			const { p, ci } = signFlip(deltas);
+			expect(p <= 0.05).toBe(excludesZero(ci));
+		}
+	});
+
+	it("is not thrown by sums that differ only in the last bits", () => {
+		// 0.1 + 0.2 − 0.3 is not zero in floating point; the tie must still count as a tie.
+		expect(signFlip([0.1, 0.2, -0.3]).p).toBe(1);
+		expect(signFlip([1 / 3, 1 / 3, -2 / 3, 0, 0, 0]).ci).toEqual([-2 / 3, 1 / 3]);
+	});
+
+	it("is reproducible for a seed above the exact limit, and seeds agree closely", () => {
+		const random = mulberry32(11);
+		const deltas = Array.from({ length: 24 }, () => 0.3 + normalFrom(random)());
+		const a = signFlip(deltas, 7);
+		expect(signFlip(deltas, 7)).toEqual(a);
+		const b = signFlip(deltas, 8);
+		expect(b.ci?.[0]).toBeCloseTo(a.ci?.[0] ?? 0, 1);
+		expect(b.ci?.[1]).toBeCloseTo(a.ci?.[1] ?? 0, 1);
+		expect(Math.abs(a.p - b.p)).toBeLessThan(0.01);
+	});
+
+	it("keeps its false-positive rate at or under 5% when the configs do not differ", { timeout: 60_000 }, () => {
+		const random = mulberry32(42);
+		for (const [tasks, repeats, simulations] of [
+			[6, 3, 2_000],
+			[8, 3, 2_000],
+			[12, 5, 2_000],
+			[20, 3, 300],
+			[28, 5, 300],
+		] as const) {
+			let rejected = 0;
+			for (let s = 0; s < simulations; s++) {
+				if (excludesZero(signFlip(nullDeltas(tasks, repeats, random), s + 1).ci)) rejected += 1;
+			}
+			// Three standard errors of slack over the nominal 5%.
+			const slack = 3 * Math.sqrt((0.05 * 0.95) / simulations);
+			expect(rejected / simulations, `${tasks} tasks × ${repeats} repeats`).toBeLessThanOrEqual(0.05 + slack);
+		}
+	});
+
+	it("is where the old percentile bootstrap went wrong: twice the stated error rate at six tasks", {
+		timeout: 60_000,
+	}, () => {
+		const random = mulberry32(42);
+		let rejected = 0;
+		const simulations = 1_500;
+		for (let s = 0; s < simulations; s++) {
+			if (excludesZero(percentileBootstrap(nullDeltas(6, 3, random), random))) rejected += 1;
+		}
+		expect(rejected / simulations).toBeGreaterThan(0.09);
+	});
+
+	it("covers a true effect about as often as it says, not far more", { timeout: 60_000 }, () => {
+		const random = mulberry32(5);
+		const normal = normalFrom(random);
+		const simulations = 3_000;
+		let covered = 0;
+		for (let s = 0; s < simulations; s++) {
+			const ci = signFlip(Array.from({ length: 8 }, () => 0.3 + normal())).ci;
+			if (ci && ci[0] <= 0.3 && ci[1] >= 0.3) covered += 1;
+		}
+		// Exact coverage at eight tasks is 1 − 12/256 = 95.3%.
+		expect(covered / simulations).toBeGreaterThan(0.94);
+		expect(covered / simulations).toBeLessThan(0.97);
 	});
 });
 
-describe("pairedComparison", () => {
+describe("detectableDifference", () => {
+	it("is (t(0.975) + t(0.80)) × sd / √tasks", () => {
+		// 12 tasks, 11 df: (2.201 + 0.876) / √12 = 0.888.
+		expect(detectableDifference(1, 12)).toBeCloseTo(0.888, 3);
+		expect(detectableDifference(0.25, 12)).toBeCloseTo(0.222, 3);
+		// 28 tasks, 27 df: (2.052 + 0.855) / √28 = 0.549.
+		expect(detectableDifference(1, 28)).toBeCloseTo(0.549, 3);
+	});
+
+	it("uses the all-same-sign rule at six tasks and says nothing below that or without spread", () => {
+		// Φ(1.793)^6 = 0.8.
+		expect(detectableDifference(1, 6)).toBeCloseTo(1.793, 3);
+		expect(detectableDifference(1, 5)).toBeNull();
+		expect(detectableDifference(0, 12)).toBeNull();
+	});
+
+	it("is detected about 80% of the time by the test it describes", { timeout: 60_000 }, () => {
+		const random = mulberry32(9);
+		const normal = normalFrom(random);
+		for (const tasks of [6, 8, 12]) {
+			const effect = detectableDifference(1, tasks) ?? 0;
+			const simulations = 2_000;
+			let detected = 0;
+			for (let s = 0; s < simulations; s++) {
+				if (signFlip(Array.from({ length: tasks }, () => effect + normal())).p <= 0.05) detected += 1;
+			}
+			expect(detected / simulations, `${tasks} tasks`).toBeGreaterThan(0.74);
+			expect(detected / simulations, `${tasks} tasks`).toBeLessThan(0.86);
+		}
+	});
+});
+
+describe("holm", () => {
+	it("steps down from the smallest p-value and never lets a later one fall below an earlier", () => {
+		// Sorted 0.01, 0.03, 0.04 → 3 × 0.01, 2 × 0.03, max(0.06, 1 × 0.04).
+		const adjusted = holm([0.01, 0.04, 0.03]);
+		expect(adjusted[0]).toBeCloseTo(0.03);
+		expect(adjusted[1]).toBeCloseTo(0.06);
+		expect(adjusted[2]).toBeCloseTo(0.06);
+		expect(holm([0.5, 0.6])).toEqual([1, 1]);
+		expect(holm([0.04])).toEqual([0.04]);
+		expect(holm([])).toEqual([]);
+	});
+});
+
+describe("wilson", () => {
+	it("matches the textbook interval", () => {
+		const [low, high] = wilson(8, 10) ?? [0, 0];
+		expect(low).toBeCloseTo(0.4902, 3);
+		expect(high).toBeCloseTo(0.9433, 3);
+		// Never degenerate at 0/n or n/n, unlike a normal-approximation interval.
+		expect(wilson(5, 5)?.[0]).toBeCloseTo(0.5655, 3);
+		expect(wilson(5, 5)?.[1]).toBe(1);
+		expect(wilson(0, 0)).toBeNull();
+	});
+});
+
+describe("pairRuns", () => {
+	it("drops a (task, repeat) block from both configs when either run was invalid", () => {
+		const records = [
+			run("a", "off", true, { repeat: 1 }),
+			run("a", "on", false, { repeat: 1 }),
+			// Repeat 2 crashed under `on`: the baseline's pass in that block must not count either.
+			run("a", "off", true, { repeat: 2 }),
+			run("a", "on", false, { repeat: 2, outcome: "crashed" }),
+			run("a", "off", false, { repeat: 3 }),
+			run("a", "on", true, { repeat: 3 }),
+			// Only one config ran this block: not a pair, and not a dropped one.
+			run("b", "off", true, { repeat: 1 }),
+			run("c", "other", true, { repeat: 1 }),
+		];
+		const pairing = pairRuns(records, "off", "on");
+		expect(pairing.droppedBlocks).toBe(1);
+		expect(pairing.tasks).toHaveLength(1);
+		expect(pairing.tasks[0]?.baseline.map((r) => r.repeat)).toEqual([1, 3]);
+		expect(pairing.tasks[0]?.treatment.map((r) => r.repeat)).toEqual([1, 3]);
+		// Without the block rule the baseline would read 2/3 against 1/2; with it both are 1/2.
+		expect(pairedDifference(records, "off", "on", successOf)).toMatchObject({ tasks: 1, mean: 0, droppedBlocks: 1 });
+	});
+
+	it("treats a provider error before any tool call as invalid, and a later one as a failure", () => {
+		const errored = (toolCalls: number) => ({ ...computeTraceMetrics([]), toolCalls, lastStopReason: "error" });
+		const records = [
+			run("a", "off", true),
+			run("a", "on", false, { metrics: errored(0) }),
+			run("b", "off", true),
+			run("b", "on", false, { metrics: errored(4) }),
+		];
+		expect(pairRuns(records, "off", "on")).toMatchObject({ droppedBlocks: 1, tasks: [{ task: "b" }] });
+	});
+});
+
+describe("pairedDifference", () => {
 	const records = [
 		// task a: 1/2 → 2/2 (win); task b: 0/1 → 0/1 (tie); task c: 1/1 → 0/1 (loss); task d only in baseline
 		run("a", "off", true),
 		run("a", "off", false),
-		run("a", "on", true, { wallClockMs: 5_000 }),
-		run("a", "on", true, { wallClockMs: 5_000 }),
+		run("a", "on", true),
+		run("a", "on", true),
 		run("b", "off", false),
 		run("b", "on", false),
 		run("c", "off", true),
@@ -54,45 +287,54 @@ describe("pairedComparison", () => {
 		run("d", "off", true),
 	];
 
-	it("compares per-task success rates on shared tasks only", () => {
-		const c = pairedComparison(records, "off", "on");
-		expect(c).toMatchObject({ baseline: "off", treatment: "on", tasks: 3, wins: 1, losses: 1, ties: 1 });
-		expect(c.meanDelta).toBeCloseTo((0.5 + 0 - 1) / 3);
-		expect(c.signTestP).toBe(1);
-		expect(c.ci[0]).toBeLessThanOrEqual(c.meanDelta);
-		expect(c.ci[1]).toBeGreaterThanOrEqual(c.meanDelta);
-		expect(c.wallClockChange).toBeCloseTo((-0.5 + 0 + 0) / 3);
-		expect(c.turnsChange).toBeNull();
+	it("compares per-task values on shared tasks only", () => {
+		const c = pairedDifference(records, "off", "on", successOf);
+		expect(c).toMatchObject({ tasks: 3, wins: 1, losses: 1, ties: 1, droppedTasks: 0, droppedBlocks: 0 });
+		expect(c?.mean).toBeCloseTo((0.5 + 0 - 1) / 3);
+		// ±0.5 ± 0 ± 1 against −0.5: every assignment but the two ±1.5 ones is as extreme.
+		expect(c?.p).toBe(1);
+		expect(c?.ci).toBeNull();
+		expect(c?.detectable).toBeNull();
 	});
 
-	it("is reproducible for a seed", () => {
-		expect(pairedComparison(records, "off", "on", 7).ci).toEqual(pairedComparison(records, "off", "on", 7).ci);
-	});
-
-	it("handles configs with nothing in common", () => {
-		const c = pairedComparison([run("a", "off", true), run("b", "on", true)], "off", "on");
-		expect(c).toMatchObject({ tasks: 0, meanDelta: 0, ci: [0, 0], signTestP: 1 });
-	});
-
-	it("uses metrics when present for turns and tokens", () => {
-		const metrics = (turns: number, inputTokens: number) => ({ turns, inputTokens }) as unknown as RunRecord["metrics"];
-		const c = pairedComparison(
-			[run("a", "off", true, { metrics: metrics(10, 1000) }), run("a", "on", true, { metrics: metrics(8, 600) })],
+	it("is null for configs with nothing in common, and leaves out tasks without a value", () => {
+		expect(pairedDifference([run("a", "off", true), run("b", "on", true)], "off", "on", successOf)).toBeNull();
+		const turns = meanOf((r) => r.metrics?.turns ?? null);
+		const withTurns = (taskId: string, config: string, value: number) =>
+			run(taskId, config, true, { metrics: { ...computeTraceMetrics([]), turns: value } });
+		const c = pairedDifference(
+			[withTurns("a", "off", 10), withTurns("a", "on", 8), run("b", "off", true), withTurns("b", "on", 5)],
 			"off",
 			"on",
+			turns,
 		);
-		expect(c.turnsChange).toBeCloseTo(-0.2);
-		expect(c.inputTokensChange).toBeCloseTo(-0.4);
+		expect(c).toMatchObject({ tasks: 1, mean: -2, droppedTasks: 1 });
+	});
+
+	it("gives an interval and a detectable size from six tasks on", () => {
+		// Six tasks, differences 1, 1, 1, 1, 0, 0 in success rate.
+		const records6 = ["a", "b", "c", "d", "e", "f"].flatMap((task, i) => [
+			run(task, "off", i >= 4),
+			run(task, "on", true),
+		]);
+		const c = pairedDifference(records6, "off", "on", successOf);
+		expect(c).toMatchObject({ tasks: 6, wins: 4, losses: 0, ties: 2 });
+		expect(c?.mean).toBeCloseTo(4 / 6);
+		expect(c?.ci).toEqual([0, 1]);
+		// One-sided: 1 + (subsets of the two zeros, 3 of them, with mean ≤ 0) of 64; doubled.
+		expect(c?.p).toBeCloseTo((2 * 4) / 64);
+		// sd of (1,1,1,1,0,0) is 0.5164; 1.793 × sd.
+		expect(c?.detectable).toBeCloseTo(0.926, 3);
 	});
 });
 
-describe("pairedRelativeChange", () => {
-	const tokens = (r: RunRecord) => r.metrics?.inputTokens ?? null;
+describe("pairedRatio", () => {
+	const tokens = meanOf((r) => r.metrics?.inputTokens ?? null);
 	const spent = (taskId: string, config: string, inputTokens: number) =>
 		run(taskId, config, true, { metrics: { ...computeTraceMetrics([]), inputTokens } });
 
-	it("averages per-task relative changes and says what it could detect", () => {
-		const change = pairedRelativeChange(
+	it("is the geometric mean of the per-task ratios, and counts the tasks it could not use", () => {
+		const change = pairedRatio(
 			[
 				spent("a", "off", 100),
 				spent("a", "off", 300),
@@ -108,228 +350,59 @@ describe("pairedRelativeChange", () => {
 			"on",
 			tokens,
 		);
-		// a: 200 → 220 (+10%), b: +30%; c has a zero baseline and d no baseline data.
-		expect(change?.tasks).toBe(2);
-		expect(change?.mean).toBeCloseTo(0.2);
-		expect(change?.ci[0]).toBeGreaterThanOrEqual(0.1 - 1e-9);
-		expect(change?.ci[1]).toBeLessThanOrEqual(0.3 + 1e-9);
-		// sd of (0.1, 0.3) is 0.1414; 2.8 × sd / √2 = 0.28.
-		expect(change?.detectable).toBeCloseTo(0.28);
+		// a: 200 → 220 (×1.1), b: ×1.3; c has a zero baseline and d no baseline data.
+		expect(change).toMatchObject({ tasks: 2, droppedTasks: 2, ci: null, detectable: null });
+		expect(change?.change).toBeCloseTo(Math.sqrt(1.1 * 1.3) - 1);
 	});
 
-	it("is null without shared tasks, and has no detectable size for one task", () => {
-		expect(pairedRelativeChange([spent("a", "off", 100)], "off", "on", tokens)).toBeNull();
-		expect(pairedRelativeChange([spent("a", "off", 100), spent("a", "on", 50)], "off", "on", tokens)).toMatchObject({
-			mean: -0.5,
-			detectable: null,
-		});
-	});
-});
-
-describe("report", () => {
-	it("adds a paired section against the first config", () => {
-		const markdown = renderMarkdown(
-			[run("a", "off", false), run("a", "on", true), run("b", "off", false), run("b", "on", true)],
-			"t",
-		);
-		expect(markdown).toContain("## Paired by task vs `off`");
-		expect(markdown).toContain("| on | 2 | +100 | [+100, +100] | 2/0/0 | 0.50 | — | — | 0% |");
-		expect(markdown).toContain("can only detect differences of about 100 points");
+	it("reads halving on one task and doubling on another as no change", () => {
+		const records = [spent("a", "off", 100), spent("a", "on", 50), spent("b", "off", 100), spent("b", "on", 200)];
+		expect(pairedRatio(records, "off", "on", tokens)?.change).toBeCloseTo(0);
+		// The mean of the plain ratios, which the report used before, reads the same data as +25%.
+		expect((0.5 - 1 + (2 - 1)) / 2).toBe(0.25);
 	});
 
-	it("reports verdict quality against the hidden checks", () => {
-		const judged = (taskId: string, success: boolean, lastVerdict: string) =>
-			run(taskId, "sup", success, {
-				metrics: { ...computeTraceMetrics([]), lastVerdict: lastVerdict as "complete" | "incomplete" },
-			});
-		const markdown = renderMarkdown(
-			[
-				judged("a", true, "complete"),
-				judged("b", false, "complete"),
-				judged("c", false, "incomplete"),
-				run("d", "sup", false),
-			],
-			"t",
-		);
-		expect(markdown).toContain("| sup | 2 | 50% | 50% |");
+	it("is null without shared tasks", () => {
+		expect(pairedRatio([spent("a", "off", 100)], "off", "on", tokens)).toBeNull();
+		expect(pairedRatio([spent("a", "off", 0), spent("a", "on", 5)], "off", "on", tokens)).toBeNull();
 	});
 
-	it("counts tampered runs, lucky passes and total tokens", () => {
-		const metrics = (verifiedAfterLastEdit: boolean | null, maxRepeatedFailures: number) => ({
-			...computeTraceMetrics([]),
-			inputTokens: 100,
-			outputTokens: 10,
-			sidecarTokens: 40,
-			verifiedAfterLastEdit,
-			maxRepeatedFailures,
-		});
-		const markdown = renderMarkdown(
-			[
-				run("a", "x", true, { metrics: metrics(false, 0), tamperedTests: ["tests/t.py"] }),
-				run("b", "x", true, { metrics: metrics(true, 3) }),
-				run("c", "x", true, { metrics: metrics(true, 0) }),
-				run("d", "x", false, { metrics: metrics(false, 5) }),
-			],
-			"t",
-		);
-		expect(markdown).toMatch(/\| 150 \| 0 \| 0\/0\/0\/0 \| 0 \| 1 \| 2 \|/);
+	it("is centred on no change when the configs do not differ, where a mean of ratios is not", () => {
+		const random = mulberry32(21);
+		const normal = normalFrom(random);
+		const simulations = 400;
+		let logScale = 0;
+		let meanOfRatios = 0;
+		let rejected = 0;
+		for (let s = 0; s < simulations; s++) {
+			const records = Array.from({ length: 10 }, (_, task) => [
+				spent(`t${task}`, "off", 1_000 * Math.exp(0.5 * normal())),
+				spent(`t${task}`, "on", 1_000 * Math.exp(0.5 * normal())),
+			]).flat();
+			const ratio = pairedRatio(records, "off", "on", tokens);
+			logScale += Math.log1p(ratio?.change ?? 0) / simulations;
+			if (excludesZero(ratio?.ci ?? null)) rejected += 1;
+			const pairs = Array.from({ length: 10 }, (_, task) => records.filter((r) => r.taskId === `t${task}`));
+			meanOfRatios +=
+				pairs.reduce((sum, [b, t]) => sum + (tokens(t ? [t] : []) ?? 0) / (tokens(b ? [b] : []) ?? 1) - 1, 0) /
+				10 /
+				simulations;
+		}
+		expect(Math.abs(logScale)).toBeLessThan(0.04);
+		expect(meanOfRatios).toBeGreaterThan(0.15);
+		expect(rejected / simulations).toBeLessThanOrEqual(0.05 + 3 * Math.sqrt((0.05 * 0.95) / simulations));
 	});
 
-	it("shows success by repeat when there are repeats", () => {
-		const markdown = renderMarkdown(
-			[
-				run("a", "off", false, { repeat: 1 }),
-				run("a", "off", false, { repeat: 2 }),
-				run("a", "memory", false, { repeat: 1 }),
-				run("a", "memory", true, { repeat: 2 }),
-			],
-			"t",
-		);
-		expect(markdown).toContain("| config | r1 | r2 |");
-		expect(markdown).toContain("| memory | 0/1 | 1/1 |");
-	});
-
-	it("puts each config's total tokens side by side next to success by repeat (D-058)", () => {
-		const spent = (taskId: string, config: string, repeat: number, inputTokens: number, memory = 0) =>
-			run(taskId, config, config === "memory", {
-				repeat,
-				metrics: {
-					...computeTraceMetrics([]),
-					inputTokens,
-					outputTokens: 100,
-					sidecarTokens: memory,
-					sidecarTokensByModule: memory > 0 ? { memory } : {},
-				},
-			});
-		const markdown = renderMarkdown(
-			[
-				spent("a", "all-off", 1, 900),
-				spent("b", "all-off", 1, 1900),
-				spent("a", "all-off", 2, 900),
-				spent("b", "all-off", 2, 1900),
-				spent("a", "memory", 1, 900, 200),
-				spent("b", "memory", 1, 1900, 200),
-				spent("a", "memory", 2, 700),
-				spent("b", "memory", 2, 1500),
-			],
-			"t",
-		);
-		expect(markdown).toContain("### Token budget");
-		expect(markdown).toContain(
-			"| config | main tok | memory sidecar tok | total tok | total r1 | total r2 | tok per pass | Δ total vs `all-off` | 95% CI | detectable Δ |",
-		);
-		expect(markdown).toContain("| all-off | 1500 | 0 | 1500 | 1500 | 1500 | — | — | — | — |");
-		// a: 1000 → 1000 (0%), b: 2000 → 1900 (−5%); mean −2.5%, which rounds to −2%.
-		expect(markdown).toMatch(
-			/\| memory \| 1350 \| 100 \| 1450 \| 1700 \| 1200 \| 1450 \| -2% \| \[-5%, 0%\] \| ±7% \|/,
-		);
-		expect(markdown).toContain(
-			"one repeat column has 2 runs per config and can only detect differences of about 100 points",
-		);
-		expect(markdown).toContain("all 2 repeats together (4 runs) about 99 points");
-	});
-
-	it("shows which triage hint preceded the end of each repeated error (D-057)", () => {
-		const errors = (
-			config: string,
-			recurringErrors: NonNullable<ReturnType<typeof computeTraceMetrics>["recurringErrors"]>,
-		) => run("a", config, true, { metrics: { ...computeTraceMetrics([]), recurringErrors } });
-		const markdown = renderMarkdown(
-			[
-				errors("all-off", [
-					{ occurrences: 2, hints: 0, after: "stopped", fixed: true },
-					{ occurrences: 3, hints: 0, after: "recurred", fixed: false },
-					{ occurrences: 5, hints: 0, after: "recurred", fixed: false },
-				]),
-				errors("triage", [
-					{ occurrences: 2, hints: 1, after: "stopped", fixed: true },
-					{ occurrences: 2, hints: 1, after: "stopped", fixed: false },
-					{ occurrences: 3, hints: 2, after: "stopped", fixed: true },
-					{ occurrences: 4, hints: 2, after: "recurred", fixed: false },
-					{ occurrences: 2, hints: 1, after: "ended", fixed: false },
-					{ occurrences: 2, hints: 0, after: "stopped", fixed: false },
-				]),
-			],
-			"t",
-		);
-		expect(markdown).toContain("| all-off | 3 | 1/3 (33%) | 2 | 1/2 (50%) |");
-		expect(markdown).toContain("| triage | 6 | 4/6 (67%) | 2 | 1/2 (50%) |");
-		expect(markdown).toContain("### Which hint preceded the end of the error");
-		expect(markdown).toContain("| triage | 5 | 2 | 1 | 2 | 1 | 1 | 1 | 1 |");
-		expect(markdown).not.toMatch(/\| all-off \| 0 \| 0 \|/);
-	});
-
-	it("leaves the hint table out when no config gave hints, and the section out without repeats", () => {
-		const errors = run("a", "all-off", true, {
-			metrics: {
-				...computeTraceMetrics([]),
-				recurringErrors: [{ occurrences: 2, hints: 0, after: "stopped", fixed: true }],
-			},
-		});
-		expect(renderMarkdown([errors], "t")).toContain("## Repeated errors");
-		expect(renderMarkdown([errors], "t")).not.toContain("Which hint");
-		expect(renderMarkdown([run("a", "all-off", true)], "t")).not.toContain("## Repeated errors");
-	});
-
-	it("shows loops without progress and the calls made inside them per config (D-069)", () => {
-		const looped = (taskId: string, config: string, success: boolean, stuckLoops: number, stuckLoopCalls: number) =>
-			run(taskId, config, success, { metrics: { ...computeTraceMetrics([]), stuckLoops, stuckLoopCalls } });
-		const markdown = renderMarkdown(
-			[
-				looped("a", "all-off", false, 2, 9),
-				looped("b", "all-off", true, 0, 0),
-				looped("a", "triage", true, 1, 1),
-				looped("b", "triage", true, 0, 0),
-			],
-			"t",
-		);
-		expect(markdown).toContain("| all-off | 1/2 | 0/1 | 2 | 9 | 4.5 |");
-		expect(markdown).toContain("| triage | 1/2 | 1/1 | 1 | 1 | 1.0 |");
-	});
-
-	it("counts compactions, overflows and the failures that came with them (D-059)", () => {
-		const pressure = (
-			taskId: string,
-			config: string,
-			success: boolean,
-			extra: Partial<ReturnType<typeof computeTraceMetrics>>,
-		) => run(taskId, config, success, { metrics: { ...computeTraceMetrics([]), ...extra } });
-		const markdown = renderMarkdown(
-			[
-				pressure("a", "all-off", true, {}),
-				pressure("b", "all-off", false, { compactions: 2, overflowCompactions: 1 }),
-				pressure("c", "all-off", false, { failedCompactions: 1, overflowCompactions: 1, errorStops: 2 }),
-				pressure("a", "compaction", true, { compactions: 1, lengthStops: 1 }),
-				pressure("b", "compaction", true, { compactions: 1, compactionReplays: 1 }),
-				run("c", "compaction", false),
-			],
-			"t",
-		);
-		expect(markdown).toContain("## Context pressure");
-		expect(markdown).toContain("## Stuck loops\n\nNo run repeated a call");
-		expect(markdown).toContain("| all-off | 1/3 | 0/1 | 1/2 | 0/2 | 2 | 1 | 2 | 0 | 2 |");
-		expect(markdown).toContain("| compaction | 2/2 | 2/2 | — | 1/2 | 0 | 0 | 0 | 1 | 0 |");
-	});
-
-	it("says so when nothing compacted, and points at provider errors", () => {
-		expect(renderMarkdown([run("a", "off", true)], "t")).toContain(
-			"No run compacted or overflowed its context window.\n",
-		);
-		const errored = run("a", "off", false, { metrics: { ...computeTraceMetrics([]), errorStops: 3 } });
-		expect(renderMarkdown([errored], "t")).toContain("3 turns ended in a provider error");
-	});
-
-	it("shows how often trimmed outputs were read back", () => {
-		const trimmed = (config: string, trimmedOutputs: number, trimmedRereads: number) =>
-			run("a", config, true, { metrics: { ...computeTraceMetrics([]), trimmedOutputs, trimmedRereads } });
-		const markdown = renderMarkdown([trimmed("all-off", 0, 0), trimmed("trimmer", 8, 2)], "t");
-		expect(markdown).toContain("## Trimmed outputs");
-		expect(markdown).toContain("| trimmer | 8 | 2 (25%) |");
-		expect(markdown).not.toContain("| all-off | 0 |");
-		expect(renderMarkdown([trimmed("all-off", 0, 0)], "t")).not.toContain("## Trimmed outputs");
-	});
-
-	it("omits it for a single config", () => {
-		expect(renderMarkdown([run("a", "off", true)], "t")).not.toContain("Paired");
+	it("gives an interval in the same units from six tasks on", () => {
+		// Every task spends 20% less: the interval is the point.
+		const records = ["a", "b", "c", "d", "e", "f"].flatMap((task, i) => [
+			spent(task, "off", 1_000 * (i + 1)),
+			spent(task, "on", 800 * (i + 1)),
+		]);
+		const ratio = pairedRatio(records, "off", "on", tokens);
+		expect(ratio?.change).toBeCloseTo(-0.2);
+		expect(ratio?.ci?.[0]).toBeCloseTo(-0.2);
+		expect(ratio?.ci?.[1]).toBeCloseTo(-0.2);
+		expect(ratio?.p).toBeCloseTo(2 / 64);
 	});
 });

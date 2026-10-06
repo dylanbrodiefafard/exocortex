@@ -6,5 +6,6 @@
 	"maxTurns": 45,
 	"timeoutSec": 1200,
 	"checkTimeoutSec": 180,
-	"tags": ["hard", "spec-compliance", "rust", "uncalibrated"]
+	"tags": ["hard", "spec-compliance", "rust", "uncalibrated"],
+	"minTests": 32
 }

@@ -646,3 +646,25 @@ Read in the installed 1.0.2 build under `node_modules/@earendil-works/`. Paths a
 - **Partly, for tool-result rewrites.** They carry no flag on the message; mark them in merged `details.exo` or keep an `appendEntry` ledger keyed by `toolCallId`.
 - **Not, for `input` transforms of user text.** Avoid them, or record them in the ledger.
 - **For the model:** wrap injected text in a recognizable tag, because the LLM sees custom messages as plain user text.
+
+---
+
+## Compaction: where the summariser's usage goes (D-079)
+
+Verified in `node_modules/@earendil-works/pi-coding-agent/dist/core/` (1.0.2) for the eval's token counts.
+
+- **The summary is a direct model call, not a turn.** `completeSummarization` calls `completeSimple` (or the agent's stream function and takes `.result()`), with `cacheRetention: "none"` (`compaction/compaction.js:477-489`). No `turn_start`, `turn_end` or `message_end` is emitted for it, so the usage a `turn_end` carries (the turn's assistant message, `trace-recorder.ts` in the adapter) never includes it.
+- **Its usage is returned, and stored on the compaction entry.**
+  - `generateSummaryWithUsage` returns `{text, usage: response.usage}` (`compaction/compaction.js:511-538`).
+  - `compact()` returns `usage: summaryUsage`; for a split turn that is the history summary's usage and the turn-prefix summary's combined (`:686-720`).
+  - Auto-compaction passes it to `sessionManager.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, fromExtension, usage)` (`agent-session.js:2480-2488`); manual compaction does the same (`:2189-2199`).
+  - `appendCompaction` writes it as `entry.usage` (`session-manager.js:880-895`; `CompactionEntry.usage?: Usage`, `session-manager.d.ts:45-58`).
+- **`session_compact` hands the saved entry to extensions** as `compactionEntry` (`agent-session.js:2205-2212`, `:2494-2501`), so the trace's `compaction` event, which records the whole entry, has `data.entry.usage` as `{input, output, cacheRead, cacheWrite, totalTokens, cost}`.
+- **A summary an extension supplies** carries whatever `usage` the extension returned, or none (`agent-session.js:2470-2477`). Exocortex's compaction module returns none: its calls are sidecar calls.
+- **A failed compaction's usage is lost.** `session_compact_failed` has no usage field (`agent-session.js:649-652`; payload in §9), so tokens spent on a summary that was then discarded are not counted anywhere.
+- **What the eval does:** `computeTraceMetrics` adds `data.entry.usage` of every `compaction` event with `fromExtension !== true` to the main input, cached and output tokens, and reports the sum as `compactionTokens`.
+
+## RPC: a prompt that starts no run (D-079)
+
+- **Every session event reaches stdout in RPC mode,** `turn_start` included: `session.subscribe((event) => output(toJsonEvent(event)))` (`dist/modes/rpc/rpc-mode.js:265-270`); the loop emits `turn_start` before each turn (`pi-agent-core/dist/agent-loop.js:51`, `:69`, `:113`). The eval's driver uses a `turn_start` after the last allowed `turn_end` as the sign that the agent went over its turn limit.
+- **A prompt whose response has `data.disposition === "handled"` starts no run,** so no `agent_settled` follows (`dist/modes/rpc/rpc-client.js:130-137`). The driver settles at once on it.

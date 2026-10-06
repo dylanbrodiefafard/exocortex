@@ -6,5 +6,6 @@
 	"maxTurns": 40,
 	"timeoutSec": 1200,
 	"checkTimeoutSec": 180,
-	"tags": ["hard", "noisy-output", "rust", "uncalibrated"]
+	"tags": ["hard", "noisy-output", "rust", "uncalibrated"],
+	"minTests": 765
 }

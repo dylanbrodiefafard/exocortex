@@ -50,16 +50,20 @@ export interface LoadTestReport {
 		readonly maxRunningObserved: number;
 		readonly slots: number;
 	};
-	/** loaded / alone − 1, for p50 and p95 of main time-to-first-token and total latency. */
+	/**
+	 * loaded / alone − 1, for p50 and p95 of main time-to-first-token and total latency. Null when
+	 * no sidecar call completed: the "loaded" phase then ran without load and measured nothing.
+	 */
 	readonly regression: {
 		readonly ttftP50: number;
 		readonly ttftP95: number;
 		readonly totalP50: number;
 		readonly totalP95: number;
-	};
+	} | null;
 }
 
 const PRIORITIES: readonly SidecarPriority[] = ["interactive", "critical"];
+const FAILED_CALL_PAUSE_MS = 25;
 
 /**
  * Brief §8 Phase 2 acceptance: measures main-agent latency alone, then while the sidecar pool is
@@ -91,10 +95,17 @@ export async function runLoadTest(options: LoadTestOptions): Promise<LoadTestRep
 	pool.setMainActive(true);
 	log(`phase 2/2: ${options.mainRequests} main requests with ${options.sidecarBacklog} sidecars kept in flight`);
 	const load = keepSaturated(pool, options);
-	const loaded = await mainPhase(options, context);
-	const sidecarResults = await load.stop();
+	let loaded: PhaseSummary;
+	let sidecarResults: Awaited<ReturnType<typeof load.stop>>;
+	try {
+		loaded = await mainPhase(options, context);
+	} finally {
+		// Also when a main request throws: the loop below would otherwise keep submitting sidecar
+		// calls for ever and the process would never exit.
+		sidecarResults = await load.stop();
+		pool.close();
+	}
 	const stats = pool.stats();
-	pool.close();
 
 	const ok = sidecarResults.filter((r) => r.ok);
 	return {
@@ -110,12 +121,15 @@ export async function runLoadTest(options: LoadTestOptions): Promise<LoadTestRep
 			maxRunningObserved: stats.maxRunningObserved,
 			slots: options.maxConcurrent - options.reservedForMain,
 		},
-		regression: {
-			ttftP50: ratio(loaded.ttftP50, alone.ttftP50),
-			ttftP95: ratio(loaded.ttftP95, alone.ttftP95),
-			totalP50: ratio(loaded.totalP50, alone.totalP50),
-			totalP95: ratio(loaded.totalP95, alone.totalP95),
-		},
+		regression:
+			ok.length === 0
+				? null
+				: {
+						ttftP50: ratio(loaded.ttftP50, alone.ttftP50),
+						ttftP95: ratio(loaded.ttftP95, alone.ttftP95),
+						totalP50: ratio(loaded.totalP50, alone.totalP50),
+						totalP95: ratio(loaded.totalP95, alone.totalP95),
+					},
 	};
 }
 
@@ -232,8 +246,10 @@ function keepSaturated(pool: SidecarPool, options: LoadTestOptions) {
 					thinking: false,
 				},
 			})
-			.then((result) => {
+			.then(async (result) => {
 				results.push(result);
+				// A call that fails at once (engine down) must not turn this into a busy loop.
+				if (!result.ok) await new Promise((resolve) => setTimeout(resolve, FAILED_CALL_PAUSE_MS));
 				inFlight.delete(promise);
 				submit();
 			});
@@ -285,8 +301,16 @@ export function renderLoadTestMarkdown(report: LoadTestReport, title: string): s
 		"|---|---|---|---|---|---|---|",
 		row("alone", report.alone),
 		row("with sidecar load", report.loaded),
-		`| **regression** | ${pct(report.regression.ttftP50)} | ${pct(report.regression.ttftP95)} | ${pct(report.regression.totalP50)} | ${pct(report.regression.totalP95)} | | |`,
+		report.regression
+			? `| **regression** | ${pct(report.regression.ttftP50)} | ${pct(report.regression.ttftP95)} | ${pct(report.regression.totalP50)} | ${pct(report.regression.totalP95)} | | |`
+			: "| **regression** | not measured | | | | | |",
 		"",
+		...(report.regression
+			? []
+			: [
+					`**The load phase failed: none of the ${report.sidecars.failed} sidecar calls completed, so the main agent ran without load.** The "with sidecar load" row is not a measurement. Check the engine and the pool settings, then run again.`,
+					"",
+				]),
 		`Sidecars: ${report.sidecars.completed} completed, ${report.sidecars.failed} failed, p50 latency ${ms(report.sidecars.latencyP50)}, max running ${report.sidecars.maxRunningObserved} of ${report.sidecars.slots} slots.`,
 		"",
 	].join("\n");

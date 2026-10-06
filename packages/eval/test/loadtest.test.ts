@@ -38,6 +38,65 @@ describe("runLoadTest against a fake engine", { timeout: 30_000 }, () => {
 	});
 });
 
+describe("runLoadTest when the engine misbehaves", { timeout: 30_000 }, () => {
+	const options = (baseUrl: string) => ({
+		target: { baseUrl, model: "m", apiKey: undefined, features: ENGINE_PROFILES.generic },
+		maxConcurrent: 4,
+		reservedForMain: 1,
+		mainRequests: 3,
+		mainContextTokens: 200,
+		mainMaxTokens: 16,
+		sidecarBacklog: 6,
+		sidecarPromptTokens: 50,
+		sidecarMaxTokens: 8,
+		sidecarTimeoutMs: 5_000,
+	});
+
+	it("reports a load phase in which every sidecar failed as failed, not as no regression", async () => {
+		// Main requests stream; sidecar calls do not. Only the sidecars fail.
+		const server = await startFakeOpenAIServer([], {
+			respond: (body) =>
+				(body as { stream?: boolean }).stream
+					? { kind: "text", text: "1 2 3", delayMs: 10 }
+					: { kind: "error", status: 500, message: "no slot" },
+		});
+		try {
+			const report = await runLoadTest(options(server.baseUrl));
+			expect(report.sidecars.completed).toBe(0);
+			expect(report.sidecars.failed).toBeGreaterThan(0);
+			// Before D-079 this printed a regression of about 0%: a pass.
+			expect(report.regression).toBeNull();
+			const markdown = renderLoadTestMarkdown(report, "t");
+			expect(markdown).toContain("| **regression** | not measured |");
+			expect(markdown).toContain("The load phase failed");
+		} finally {
+			await server.close();
+		}
+	});
+
+	it("stops the sidecar load and rejects when a main request fails, instead of running for ever", async () => {
+		let mainRequests = 0;
+		const server = await startFakeOpenAIServer([], {
+			respond: (body) => {
+				if (!(body as { stream?: boolean }).stream) return { kind: "text", text: "ok", delayMs: 5 };
+				mainRequests += 1;
+				// The warm-up and the three unloaded requests pass; the first loaded one fails.
+				return mainRequests <= 4 ? { kind: "text", text: "1 2 3" } : { kind: "error", status: 500, message: "down" };
+			},
+		});
+		try {
+			await expect(runLoadTest(options(server.baseUrl))).rejects.toThrow("main request failed: HTTP 500");
+			// The saturating loop stopped: nothing is submitted any more.
+			const seen = server.requests.length;
+			await new Promise((resolve) => setTimeout(resolve, 150));
+			expect(server.requests.length).toBe(seen);
+			expect(server.inFlight).toBe(0);
+		} finally {
+			await server.close();
+		}
+	});
+});
+
 describe("percentile", () => {
 	it("uses nearest-rank", () => {
 		expect(percentile([5, 1, 3, 2, 4], 0.5)).toBe(3);

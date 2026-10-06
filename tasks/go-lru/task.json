@@ -5,5 +5,6 @@
 	"check": "go test ./...",
 	"maxTurns": 25,
 	"timeoutSec": 600,
-	"tags": ["smoke", "bugfix"]
+	"tags": ["smoke", "bugfix"],
+	"minTests": 1
 }

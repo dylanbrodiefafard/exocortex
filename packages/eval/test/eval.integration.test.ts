@@ -8,8 +8,9 @@ import {
 	startFakeOpenAIServer,
 } from "@exocortex/testkit";
 import { afterEach, describe, expect, it } from "vitest";
+import type { RunRecord } from "../src/records.ts";
 import { renderMarkdown } from "../src/report.ts";
-import { type RunRecord, runEval } from "../src/run.ts";
+import { runEval } from "../src/run.ts";
 import { loadTask, type Task } from "../src/task.ts";
 
 const REPO = join(import.meta.dirname, "..", "..", "..");
@@ -107,6 +108,31 @@ describe("runEval with the real pi CLI and a scripted model", { timeout: 60_000 
 		});
 		expect(records[0]).toMatchObject({ outcome: "max_turns", success: false });
 		expect(records[0]?.metrics?.turns).toBeGreaterThanOrEqual(3);
+	});
+
+	it("settles, not max_turns, when the agent finishes on its last allowed turn", async () => {
+		const patch = TASK.solutionPatch ?? "";
+		const exact: Task = { ...TASK, spec: { ...TASK.spec, maxTurns: 2 } };
+		const { records } = await evalWith(
+			[
+				{ kind: "tool_calls", calls: [{ name: "bash", arguments: { command: `git apply ${patch}` } }] },
+				{ kind: "text", text: "Fixed." },
+			],
+			exact,
+		);
+		expect(records[0]).toMatchObject({ outcome: "settled", success: true });
+		expect(records[0]?.metrics?.turns).toBe(2);
+	});
+
+	it("marks a run invalid when the model server fails before the agent does anything", async () => {
+		const { records, runDir } = await evalWith([], TASK, { kind: "error", status: 503, message: "model is loading" });
+		// Retried once, then recorded as invalid: not as py-pagination failing.
+		expect(records[0]).toMatchObject({ label: "py-pagination--all-off--r1--retry", success: false, attempts: 2 });
+		expect(records[0]?.metrics).toMatchObject({ toolCalls: 0, lastStopReason: "error" });
+		const markdown = renderMarkdown(records, "test");
+		expect(markdown).toContain("| all-off | 0/0 |");
+		expect(markdown).toContain("| py-pagination | 0/0 (+1 invalid) |");
+		expect(readFileSync(join(runDir, "invalid-attempts.jsonl"), "utf8").trim().split("\n")).toHaveLength(1);
 	});
 
 	it("supervisor suggest mode: the harness accepts the suggestion and the task gets finished", async () => {

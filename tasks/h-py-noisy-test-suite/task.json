@@ -6,5 +6,6 @@
 	"maxTurns": 40,
 	"timeoutSec": 1200,
 	"checkTimeoutSec": 120,
-	"tags": ["hard", "noisy-output", "python"]
+	"tags": ["hard", "noisy-output", "python"],
+	"minTests": 300
 }

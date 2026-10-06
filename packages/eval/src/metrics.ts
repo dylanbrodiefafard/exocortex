@@ -58,6 +58,13 @@ export interface TraceMetrics {
 	readonly errorStops?: number;
 	/** Turns cut off by the output limit (`stopReason: "length"`). */
 	readonly lengthStops?: number;
+	/** How the run's last turn ended; `"error"` with no tool call marks a run the model server failed (D-079). */
+	readonly lastStopReason?: string | null;
+	/**
+	 * Tokens pi's own compaction summaries cost, already included in the three main-token counts.
+	 * They are not turns, so `turn.end` never carries them (PI_API_NOTES "Compaction: where the summariser's usage goes", D-079).
+	 */
+	readonly compactionTokens?: number;
 	/** Compactions after which one of the agent's next two commands re-ran one that had already passed (R4.4). */
 	readonly compactionReplays?: number;
 	/** Tool outputs the trimmer shortened, and how many of their saved full outputs the agent read back (R2.1). */
@@ -106,12 +113,28 @@ export function computeTraceMetrics(
 	let cachedTokens = 0;
 	let outputTokens = 0;
 	let turns = 0;
+	let lastStopReason: string | null = null;
 	for (const event of events.filter((e) => e.kind === "turn.end")) {
 		turns += 1;
 		const usage = record(record(event.data)["usage"]);
 		inputTokens += number(usage["input"]);
 		cachedTokens += number(usage["cacheRead"]);
 		outputTokens += number(usage["output"]);
+		const stopReason = record(event.data)["stopReason"];
+		lastStopReason = typeof stopReason === "string" ? stopReason : null;
+	}
+	// Pi's summariser is a direct model call, not a turn: its usage reaches only the compaction
+	// entry. Without it a baseline that compacts looks cheaper than it was. A summary an extension
+	// supplied (Exocortex's compaction module) was paid for as sidecar calls, counted elsewhere.
+	let compactionTokens = 0;
+	for (const event of events.filter((e) => e.kind === "compaction")) {
+		const data = record(event.data);
+		if (data["fromExtension"] === true) continue;
+		const usage = record(record(data["entry"])["usage"]);
+		inputTokens += number(usage["input"]);
+		cachedTokens += number(usage["cacheRead"]);
+		outputTokens += number(usage["output"]);
+		compactionTokens += number(usage["input"]) + number(usage["cacheRead"]) + number(usage["output"]);
 	}
 
 	const requests = events
@@ -167,6 +190,8 @@ export function computeTraceMetrics(
 		failedCompactions: events.filter((e) => e.kind === "compaction.failed").length,
 		errorStops: stops(events, "error"),
 		lengthStops: stops(events, "length"),
+		lastStopReason,
+		compactionTokens,
 		compactionReplays: compactionReplays(events),
 		...trimmerRereads(events),
 		...stuckLoops(events),

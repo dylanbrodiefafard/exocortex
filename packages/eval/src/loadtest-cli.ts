@@ -89,7 +89,8 @@ async function main(): Promise<number> {
 	writeFileSync(join(dir, "report.json"), JSON.stringify(report, null, 2));
 	writeFileSync(join(dir, "summary.md"), markdown);
 	process.stdout.write(`\n${markdown}\nWrote ${join(dir, "summary.md")}\n`);
-	return 0;
+	// No sidecar completed: the report says so, and the exit code must not read as a pass.
+	return report.regression ? 0 : 1;
 }
 
 main().then(

@@ -1306,6 +1306,61 @@ Open check: Exocortex's injected `custom_message` reaches ninfer as a second con
 
 ---
 
+### D-079 — Eval rigor, second pass: one exact paired test, a check guard, invalid runs · accepted (2026-10-06; hardening stream C; amends D-045's statistics, D-048, D-058 and D-059's token counts)
+- **Context:** the audit's items C1–C12 (HARDENING_PLAN.md). All twelve reproduced. The report's numbers decide which modules are switched on (AB_PLAN), so each one that could mislead quietly was treated as worse than a crash.
+- **Statistics (C1, C4, C5, C6).** One procedure now gives every interval and p-value in the report: the **sign-flip test on the mean of the per-task differences**, with the interval from inverting it (the ordered means of all non-empty subsets of the differences, Hartigan's typical values).
+  - **Why this one:** it is exact for any number of tasks and assumes only that swapping the two configs on a task is as likely either way. The design has 3–30 tasks and differences that are a few discrete values with many ties, which is where both a bootstrap and a t-interval are at their worst.
+  - **What it replaced:** the seeded percentile bootstrap (D-045). At 6 tasks × 3 repeats with no real difference its "95%" interval left zero out 12.5% of the time in simulation, and 9.5% at 8 tasks. The new interval: 0.2% and 1.1% (it is conservative when many differences tie, never the other way).
+  - **Below 6 tasks** the report prints *n too small*: the smallest p-value n tasks can give is 2 / 2^n, above 0.05 until n = 6, so no 95% interval exists. The p-value is still printed.
+  - **Up to 16 tasks** all 2^n sign assignments are enumerated; above that 49,999 are sampled with a seeded generator, so a report is reproducible.
+  - **Smallest detectable difference (C1):** `(t(0.975) + t(0.80)) × sd(per-task differences) / √tasks`, with t quantiles for `tasks − 1` degrees of freedom, printed per comparison. The audit proposed z in place of t; at 8 tasks z understates it by 14%. Checked by simulation against the test itself: within 5% from 7 tasks up. At exactly 6 tasks the test rejects only when all six differences share a sign, so the exact value `1.793 × sd` is used (the t formula is 26% too small there). The old figure (D-045's unpaired formula over runs) counted repeats as independent and gave one number for any two data sets with the same run count; it is gone from the report.
+  - **Several treatments (C4):** a Holm-adjusted p beside the plain one.
+  - **Precision of `complete` (C4):** a Wilson interval over runs, and the per-task difference against the baseline through the same paired test. The Wilson interval treats repeats of one task as independent and says so.
+  - **Cost changes (C6):** tokens, turns and wall-clock are now the **geometric mean of the per-task ratios** (the mean log ratio), with the same test's interval. A mean of ratios reads halving on one task and doubling on another as +25%; in simulation under no difference it averaged +29% where the log ratio averaged +2% (and is exactly centred on the log scale). The log ratio is symmetric under swapping the configs, which the sign-flip test needs and a plain ratio does not give. Tasks with a zero on either side have no ratio: they are counted and named under the table.
+  - **Repeated-error rate and input tokens (C4)** go through the same functions, the rate as a difference in points.
+  - **Pairing** is by (task, repeat) block: a block counts only when both configs ran it and neither run was invalid.
+  - **The sign test is gone** from the report (D-045 listed it). One pre-stated test per comparison; wins/losses/ties are still printed.
+  - **How it was checked** (all in `stats.test.ts`): p-values and intervals against cases worked by hand; `p ≤ 0.05` exactly when the interval leaves zero out; false-positive rate under the null at 6, 8, 12, 20 and 28 tasks; coverage of a true effect at 8 tasks (95.3% expected, not merely "at least"); power at the stated detectable difference; t quantiles against the printed table; Holm and Wilson against textbook values.
+- **Check guard (C2; extends D-048's tamper guard).**
+  - **Build and runner files are restored like tests.** A per-task `protect` list, by default `Makefile`, `GNUmakefile`, `makefile`, `CMakeLists.txt`, `Cargo.toml`, `go.mod`, `go.work`, `conftest.py`, `pytest.ini`, `pyproject.toml`, `setup.cfg`, `tox.ini`, in any directory. The audit's list plus `GNUmakefile`/`makefile` (make prefers them to `Makefile`), `go.work`, `setup.cfg` and `tox.ini`. One the agent adds is set aside.
+  - **A file the reference solution changes or adds is never touched.** No shipped solution touches a protected file today.
+  - **Test files the agent added are moved out of the workspace** before the check and recorded (`setAsideTests`). Not moved: Rust files under `src/` (they are modules; removing one breaks the crate), and anything under `build/`, `target/`, `node_modules/`, `__pycache__/` and virtualenv or cache directories.
+  - **A test-count floor.** `--validate --record-tests` writes the number of tests the solution's check runs and passes to `task.json` as `minTests`; a check that exits 0 below it is scored as a failure and reported. The count comes from the runner's summary (cargo, unittest, pytest, `go test`, CTest, TAP, `N tests, 0 failures`). 30 of 34 tasks have a floor; four C++ tasks print nothing countable. Three floors are set below the solution's count by hand, because a correct solution may remove tests that are not in test files: `h-rust-css-colors` (15 in-crate unit tests and a doc-test), `h-rust-template-lifetimes` (2 in-crate tests), `h-rust-text-table` (a doc-test).
+  - **The check's whole output is kept** (up to 8 MB, was the last 4 KB), since the count is read from it.
+  - **Validation scores the solution exactly as a run is scored,** guard and floor included, and all 34 tasks pass with their solution and fail without it.
+- **Invalid runs (C3).** A run is invalid when setup failed, pi crashed or never answered, the harness itself failed (C8), or the run's last turn was a provider error and the agent never called a tool. It is retried once under a new label; the first attempt goes to `invalid-attempts.jsonl`. A run still invalid has its own report column, is left out of every rate and mean, and takes its (task, repeat) block out of both configs in the paired numbers.
+- **Harness (C8, C9, C10).**
+  - Everything after the agent stops is wrapped: an exception becomes `outcome: "harness_error"` and the suite goes on. The workspace is removed after the record is written. A test file replaced by a directory no longer throws.
+  - `--resume <dir>` skips runs already in `results.jsonl`; a torn last line is skipped with a warning, and closed with a newline so the next record does not join it.
+  - The RPC driver's time limit covers its own waits: a pi that never answers the prompt is killed and reported as crashed; an unanswered abort is killed after the grace period; a write to a dead pi is harmless.
+  - **`max_turns` means a turn past the limit started** (the next `turn_start`), not that the last allowed turn ended. An agent that finishes on its last turn has settled. The audit proposed a short timed wait; a supervisor's settle hook can take longer than any short wait, and the event says it exactly.
+  - A prompt an extension handled (`disposition: "handled"`) settles at once (PI_API_NOTES).
+  - **Config order is shuffled per (task, repeat)** from a seed in `run.json` (`--seed`); the report takes the baseline from `run.json`, not from which record came first.
+  - **Module state is per config:** memory's `dbPath` under the run directory and the trimmer's `saveDir` under the work root, set even when the config names its own. The run logs when the global config is missing or ignored.
+- **Tokens (C7).** Pi's own compaction summary is a direct model call: it never reaches `turn_end`, and its usage is stored on the compaction entry (verified, PI_API_NOTES). The trace already records that entry, so `computeTraceMetrics` adds it to the main token counts, and no adapter change was needed. Before this an `all-off` run that compacted looked cheaper than it was, which favoured the baseline in D-059's compaction comparison.
+- **Testkit (C11).** The fake server reports usage in proportion to the request and reply, sends a stream's usage chunk only when asked, numbers tool calls uniquely across requests, and has reply kinds `length`, `reasoning`, `overflow` and `drop_midstream` and an opt-in `strict` mode for role order. The test module context honours the call's abort signal.
+- **Load test (C12).** The saturating loop is stopped in a `finally`; a failed sidecar call pauses before the next; a loaded phase in which no sidecar completed has `regression: null`, says so, and exits 1.
+- **Deviations from the audit's proposals.**
+  - **A check timeout is not an invalid run.** A hang is usually the solution's own doing, and dropping those blocks would hide a module that causes hangs. The check is run once more; a second timeout is a failure, counted in the "Check guard" section.
+  - **No bootstrap anywhere** (C6 offered one): one test for everything is simpler to reason about and is exact.
+  - **The trimmer's `saveDir` is under the work root, not the run directory:** the agent is shown those paths, and the run directory is inside the repo, next to `tasks/`.
+- **Changed outside the eval:** two tests asserted the fake server's old fixed usage (10 prompt, 5 completion): `packages/core/test/inference.test.ts` and `packages/pi-adapter/test/pi-cli.integration.test.ts`. Their expected numbers were updated; nothing else.
+- **Not done.**
+  - **A cluster-aware interval for precision of `complete`.** The paired difference is the number to decide on.
+  - **Detecting an invalid run from a provider error after tool calls.** It may be the agent's doing (D-059), so it stays a failure.
+  - **Usage of a failed compaction:** pi does not expose it.
+  - **The "lucky pass" logic and the close grace** are left for stream E (E1, E2).
+- **Open risks.**
+  - **The guard can fail a correct solution** that needed a build-file change the reference solution did not make. Three fixtures list their sources by name in the `Makefile` (`h-cpp-build-log`, `h-cpp-ledger`, `h-cpp-netcalc`): an agent that adds a source file there is failed. `tamperedFiles` in `results.jsonl` shows it. The fix is in the fixture (a wildcard), which this stream does not own.
+  - **Setting aside agent-added tests can break a build** when non-test code depends on a file in a test-looking path (`spec/`, `test/`). No shipped solution does.
+  - **Go's floor is weak:** without `-v`, `go test` prints no count, so the floor is the number of passing packages.
+  - **Baselines may move.** Fixtures calibrated under D-048's guard should be calibrated again (AB_PLAN step 0).
+  - **The detectable difference is an estimate** from 6–30 differences and assumes they are roughly normal. With many ties the real power is lower.
+  - **A config block without `enabled` is a config problem today,** and one problem turns the trace off, so the eval writes `enabled: false` into the memory and trimmer blocks it adds. Stream D's D7 makes `enabled` optional.
+  - **Usage is a default change in the shared fake:** a test in another stream that asserts 10 and 5 will fail on merge and needs its numbers updated.
+
+---
+
 ## Open questions (carried from brief §10, updated)
 
 1. ~~Resolved by D-029.~~ Exact pi mechanism for injecting into the current user turn without altering prior messages. *(Phase 0)*

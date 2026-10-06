@@ -1,5 +1,5 @@
-import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { dirname, join, relative } from "node:path";
+import { cpSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync } from "node:fs";
+import { basename, dirname, join, relative } from "node:path";
 import { type CommandOutput, isTestPath, runProcess, runShellCommand } from "@exocortex/core";
 import type { Task } from "./task.ts";
 
@@ -10,6 +10,12 @@ const GIT_ENV = {
 	GIT_COMMITTER_NAME: "exo-eval",
 	GIT_COMMITTER_EMAIL: "exo-eval@localhost",
 };
+/**
+ * How much of a check's output is kept. The test count is read from it, so it has to hold the
+ * whole output, not a tail: the largest fixture check (`go test -v` over 6000 subtests) prints
+ * half a megabyte, and a count taken from a cut-off output would change with every extra line.
+ */
+const CHECK_TAIL_CHARS = 8_000_000;
 
 /**
  * Copies the task's fixture repo into `workdir` and commits it as the baseline, so the agent's
@@ -34,30 +40,102 @@ export function applyHiddenOverlay(task: Task, workdir: string): void {
 	if (task.hiddenDir) cpSync(task.hiddenDir, workdir, { recursive: true, force: true });
 }
 
+export interface GuardResult {
+	/** Fixture test files the agent had changed or removed, now restored. */
+	readonly tamperedTests: string[];
+	/** Protected build and runner files the agent had changed, removed or added, now restored or set aside. */
+	readonly tamperedFiles: string[];
+	/** Test files the agent added, moved to the aside directory. */
+	readonly setAsideTests: string[];
+}
+
+/** Directories the agent's tools fill and no check reads tests from. */
+const SKIPPED_DIRS = new Set([
+	".git",
+	"target",
+	"build",
+	"node_modules",
+	"__pycache__",
+	".venv",
+	"venv",
+	".pytest_cache",
+	".mypy_cache",
+]);
+
 /**
- * Tamper guard (research R7.4): puts the fixture's original test files back before the check,
- * so editing, skipping or deleting tests cannot make a run pass. Returns the files the agent had
- * changed or removed. New test files the agent added are left alone.
+ * Check guard (research R7.4, D-048, D-079): makes the check test the agent's work and nothing
+ * else. Before the hidden overlay and the check it
+ * - restores the fixture's test files (unless `protectTests` is off), so editing, skipping or
+ *   deleting a test cannot pass;
+ * - restores the task's `protect` files (build and runner configuration), so a rewritten `test`
+ *   target or `autotests = false` cannot pass, and sets aside ones the agent added (a new
+ *   `conftest.py`, a nested `go.mod`);
+ * - moves test files the agent added into `asideDir`, so a wrong one cannot fail a correct
+ *   solution, one that collides with a hidden test cannot break the build, and a `TestMain` that
+ *   exits 0 cannot stand in for the tests.
+ *
+ * A path the reference solution itself touches is left alone (tests excepted: a solution that
+ * edits protected tests is a fixture bug `--validate` reports), so the guard can never fail the
+ * solution. Rust files under `src/` are left too: they are modules of the crate, and removing one
+ * breaks the build.
  */
-export function restoreProtectedTests(task: Task, workdir: string): string[] {
-	const tampered: string[] = [];
-	for (const file of listFiles(task.repoDir)) {
+export function applyCheckGuard(task: Task, workdir: string, asideDir: string): GuardResult {
+	const result: GuardResult = { tamperedTests: [], tamperedFiles: [], setAsideTests: [] };
+	const names = new Set(task.spec.protect.filter((entry) => !entry.includes("/")));
+	const paths = new Set(task.spec.protect.filter((entry) => entry.includes("/")));
+	const protectedFile = (path: string) =>
+		(names.has(basename(path)) || paths.has(path)) && !task.solutionPaths.has(path);
+	const protectedTest = (path: string) => task.spec.protectTests && isTestPath(path);
+
+	const fixture = new Set<string>();
+	for (const file of listFiles(task.repoDir, new Set())) {
 		const path = relative(task.repoDir, file);
-		if (!isTestPath(path)) continue;
+		fixture.add(path);
+		const test = protectedTest(path);
+		if (!test && !protectedFile(path)) continue;
 		const target = join(workdir, path);
-		const original = readFileSync(file);
-		if (existsSync(target) && readFileSync(target).equals(original)) continue;
-		tampered.push(path);
+		if (sameFile(target, readFileSync(file))) continue;
+		(test ? result.tamperedTests : result.tamperedFiles).push(path);
+		rmSync(target, { recursive: true, force: true });
 		mkdirSync(dirname(target), { recursive: true });
 		cpSync(file, target, { force: true });
 	}
-	return tampered;
+
+	for (const file of listFiles(workdir, SKIPPED_DIRS)) {
+		const path = relative(workdir, file);
+		if (fixture.has(path) || task.solutionPaths.has(path)) continue;
+		const test = protectedTest(path) && !inCrateRust(path);
+		if (!test && !protectedFile(path)) continue;
+		(test ? result.setAsideTests : result.tamperedFiles).push(path);
+		const target = join(asideDir, path);
+		mkdirSync(dirname(target), { recursive: true });
+		rmSync(target, { recursive: true, force: true });
+		renameSync(file, target);
+	}
+	return result;
 }
 
-function listFiles(dir: string): string[] {
+/** A Rust file compiled into the crate (`mod tests;`), as opposed to an integration test under `tests/`. */
+function inCrateRust(path: string): boolean {
+	return path.endsWith(".rs") && /(^|\/)src\//.test(path);
+}
+
+/** Whether `path` is a regular file (or a link to one) with exactly these bytes. */
+function sameFile(path: string, expected: Buffer): boolean {
+	try {
+		return readFileSync(path).equals(expected);
+	} catch {
+		// Missing, a directory, or a dangling link: not the fixture's file.
+		return false;
+	}
+}
+
+/** Every file under `dir`, not following links, and not entering directories named in `skip`. */
+function listFiles(dir: string, skip: ReadonlySet<string>): string[] {
 	return readdirSync(dir).flatMap((name) => {
 		const path = join(dir, name);
-		return statSync(path).isDirectory() ? listFiles(path) : [path];
+		if (!lstatSync(path).isDirectory()) return [path];
+		return skip.has(name) ? [] : listFiles(path, skip);
 	});
 }
 
@@ -71,6 +149,11 @@ export async function applyPatch(workdir: string, patchPath: string): Promise<vo
 
 export function runShell(command: string, cwd: string, timeoutMs: number): Promise<CommandResult> {
 	return runShellCommand(command, { cwd, timeoutMs });
+}
+
+/** Runs a task's check, keeping enough output to count the tests it ran. */
+export function runCheck(command: string, cwd: string, timeoutMs: number): Promise<CommandResult> {
+	return runShellCommand(command, { cwd, timeoutMs, tailChars: CHECK_TAIL_CHARS });
 }
 
 function runCommand(

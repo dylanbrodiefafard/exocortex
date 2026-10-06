@@ -7,5 +7,6 @@
 	"maxTurns": 45,
 	"timeoutSec": 1500,
 	"checkTimeoutSec": 120,
-	"tags": ["hard", "noisy-output", "python", "uncalibrated"]
+	"tags": ["hard", "noisy-output", "python", "uncalibrated"],
+	"minTests": 22
 }
