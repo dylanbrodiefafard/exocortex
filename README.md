@@ -181,9 +181,9 @@ Config is JSONC, read from three places:
 |---|---|
 | `~/.exocortex/config.jsonc` | Your settings, for every project |
 | `EXO_CONFIG=<path>` | Replaces that file |
-| `<repo>/.exocortex/config.jsonc` | Per project: may set `enabled` and `modules` only |
+| `<repo>/.exocortex/config.jsonc` | Per project: switches modules on or off and tunes them |
 
-A project's file comes with the repository, so it can switch modules on or off and tune them, and nothing more. `engine`, `embeddings`, `pool` and `trace` there are ignored and reported: where sidecar calls go, and with which API key, is yours to decide. Look at a cloned repository's `.exocortex/config.jsonc` before you work in it, as you would its scripts: a module's settings can name commands to run (the supervisor's `checks`).
+A project's file comes with the repository, so it is not yours until you have read it. It can switch Exocortex and its modules on or off and tune them. It cannot say where anything goes, what is run or where files are written: `engine`, `embeddings`, `pool`, `trace`, the supervisor's `checks`, memory's `dbPath` and the trimmer's `saveDir` count only in your own file. If a project's file sets one of them, Exocortex leaves it out, tells you which, and carries on.
 
 When you quit pi, Exocortex waits up to 2 seconds for background work to finish (a lesson memory is still writing). `EXO_SHUTDOWN_DRAIN_MS=<ms>` changes that; `0` turns the wait off.
 

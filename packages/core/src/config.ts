@@ -130,13 +130,23 @@ const ExoConfigSchema = Type.Object(
 export type ExoConfig = Static<typeof ExoConfigSchema>;
 
 /**
- * What a project's own file (`<cwd>/.exocortex/config.jsonc`) may set (D-080). The file arrives
- * with a cloned repository, so it is not the user's word: it may switch Exocortex and modules on or
- * off and tune them, and nothing else. Where sidecar calls and embeddings go (and with which
- * key), where the trace is written and how many slots sidecars take stay with the user's file.
+ * Who a setting belongs to (D-087). A project's own file (`<cwd>/.exocortex/config.jsonc`) arrives
+ * with a cloned repository, so it is not the user's word. It may switch Exocortex and modules on
+ * or off and tune them. Settings that say where things go, what is run or where files are
+ * written belong to the user's file alone:
+ * - here: everything but `enabled` and `modules`;
+ * - in a module: the settings its schema marks with {@link USER_ONLY}.
  */
 const PROJECT_KEYS: ReadonlySet<string> = new Set(["enabled", "modules"]);
-const USER_ONLY_KEYS = Object.keys(ExoConfigSchema.properties).filter((key) => !PROJECT_KEYS.has(key));
+const USER_ONLY_KEYS: ReadonlySet<string> = new Set(
+	Object.keys(ExoConfigSchema.properties).filter((key) => !PROJECT_KEYS.has(key)),
+);
+
+/**
+ * Schema option for a module setting only the user's own file may set: a command to run, a path
+ * to write to. `Type.Array(Type.String(), { ...USER_ONLY })`.
+ */
+export const USER_ONLY = { userOnly: true } as const;
 
 export interface ConfigSource {
 	readonly path: string;
@@ -149,6 +159,11 @@ export interface LoadedConfig {
 	readonly sources: readonly ConfigSource[];
 	/** Problems found. Any problem disables Exocortex (`config.enabled = false`): fail closed. */
 	readonly problems: readonly string[];
+	/**
+	 * Settings in the project's file that were left out because they are the user's to set. Not
+	 * problems: someone else's file cannot switch Exocortex off this way, only fail to steer it.
+	 */
+	readonly ignored: readonly string[];
 }
 
 /** The modules that exist, by id, each with the schema of its own settings (`undefined`: any settings). */
@@ -175,8 +190,8 @@ const PROJECT_CONFIG_RELATIVE = join(".exocortex", "config.jsonc");
 /**
  * Loads config from defaults, then the user's file (`~/.exocortex/config.jsonc`, or `EXO_CONFIG`
  * when set), then the project's file `<cwd>/.exocortex/config.jsonc`. Objects merge deeply; later
- * files win. The project's file may set only `enabled` and `modules` (D-080); anything else in it
- * is reported and ignored. Never throws.
+ * files win. The project's file may set only what is not the user's alone (D-087); the rest of
+ * it is left out and listed in `ignored`. Never throws.
  */
 export function loadConfig(options: LoadConfigOptions): LoadedConfig {
 	const env = options.env ?? process.env;
@@ -192,6 +207,7 @@ export function loadConfig(options: LoadConfigOptions): LoadedConfig {
 	];
 
 	const problems: string[] = [];
+	const ignored: string[] = [];
 	const sources: ConfigSource[] = [];
 	let merged: Record<string, unknown> = {};
 	for (const { path, project } of files) {
@@ -202,12 +218,12 @@ export function loadConfig(options: LoadConfigOptions): LoadedConfig {
 			continue;
 		}
 		const parsed = parseConfigText(text, path, problems);
-		if (parsed) merged = deepMerge(merged, project ? withoutUserOnlyKeys(parsed, path, userPath, problems) : parsed);
+		if (parsed) merged = deepMerge(merged, project ? projectSettings(parsed, options.modules, ignored) : parsed);
 	}
 	// A relative path resolves against the directory of the file that set it, and only the user's
 	// file can set one.
 	const config = validate(merged, home, dirname(userPath), options.modules, problems);
-	return { config: problems.length > 0 ? { ...config, enabled: false } : config, sources, problems };
+	return { config: problems.length > 0 ? { ...config, enabled: false } : config, sources, problems, ignored };
 }
 
 /** The merged settings as a config with defaults filled in; all defaults when they do not fit the schema. */
@@ -261,24 +277,47 @@ function checkValues(config: ExoConfig, problems: string[]): void {
 	}
 }
 
-/** Drops, and reports, the keys a project's file has no say over. */
-function withoutUserOnlyKeys(
+/** A project file's settings without the ones that are the user's alone; those are named in `ignored`. */
+function projectSettings(
 	parsed: Record<string, unknown>,
-	path: string,
-	userPath: string,
-	problems: string[],
+	modules: ModuleSettingsSchemas | undefined,
+	ignored: string[],
 ): Record<string, unknown> {
 	const allowed: Record<string, unknown> = {};
 	for (const [key, value] of Object.entries(parsed)) {
-		if (USER_ONLY_KEYS.includes(key)) {
-			problems.push(
-				`${path}: "${key}" is ignored: a project's config may set only "enabled" and "modules". Move it to ${userPath}`,
-			);
-		} else {
-			allowed[key] = value;
-		}
+		if (USER_ONLY_KEYS.has(key)) ignored.push(key);
+		else if (key === "modules" && isPlainObject(value)) allowed[key] = projectModules(value, modules ?? {}, ignored);
+		else allowed[key] = value;
 	}
 	return allowed;
+}
+
+function projectModules(
+	entries: Record<string, unknown>,
+	known: ModuleSettingsSchemas,
+	ignored: string[],
+): Record<string, unknown> {
+	const allowed: Record<string, unknown> = {};
+	for (const [id, settings] of Object.entries(entries)) {
+		const userOnly = userOnlySettings(known[id]);
+		if (!isPlainObject(settings) || userOnly.size === 0) {
+			allowed[id] = settings;
+			continue;
+		}
+		const kept: Record<string, unknown> = {};
+		for (const [key, value] of Object.entries(settings)) {
+			if (userOnly.has(key)) ignored.push(`modules.${id}.${key}`);
+			else kept[key] = value;
+		}
+		allowed[id] = kept;
+	}
+	return allowed;
+}
+
+/** The settings a module's schema marks {@link USER_ONLY}. */
+function userOnlySettings(schema: TSchema | undefined): ReadonlySet<string> {
+	const properties = (schema as { properties?: Record<string, { userOnly?: unknown }> } | undefined)?.properties ?? {};
+	return new Set(Object.keys(properties).filter((key) => properties[key]?.userOnly === true));
 }
 
 /** Checks `modules` against the modules that exist and each one's own settings schema. */

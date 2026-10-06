@@ -1,3 +1,4 @@
+import { USER_ONLY } from "@exocortex/core";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 
@@ -7,8 +8,8 @@ export const SettingsSchema = Type.Object(
 		mode: Type.Union([Type.Literal("suggest"), Type.Literal("auto")], { default: "suggest" }),
 		/** Continuations (accepted suggestions or auto) per task before the supervisor stays quiet. */
 		maxContinuations: Type.Integer({ minimum: 0, default: 3 }),
-		/** Check commands to run as evidence at settle, e.g. ["npm test"] (D-011). */
-		checks: Type.Array(Type.String({ minLength: 1 }), { default: [] }),
+		/** Check commands to run as evidence at settle, e.g. ["npm test"] (D-011). The user's to set: they are run (D-087). */
+		checks: Type.Array(Type.String({ minLength: 1 }), { default: [], ...USER_ONLY }),
 		/** Also run the test and build commands the user's request names in a code span (D-011; the rule is in `checks.ts`, D-084). */
 		runPromptChecks: Type.Boolean({ default: true }),
 		checkTimeoutMs: Type.Integer({ minimum: 1000, default: 120_000 }),

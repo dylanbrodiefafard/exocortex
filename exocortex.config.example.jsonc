@@ -1,8 +1,9 @@
 // Exocortex configuration (JSONC). Copy to ~/.exocortex/config.jsonc. EXO_CONFIG=<path> replaces
-// that file. A project's own <repo>/.exocortex/config.jsonc may set only "enabled" and "modules":
-// "trace", "engine", "pool" and "embeddings" there are ignored and reported (D-080). Unknown keys,
-// modules or module settings, and invalid values, disable Exocortex entirely (fail closed) and pi
-// shows a warning.
+// that file. A project's own <repo>/.exocortex/config.jsonc may switch Exocortex and modules on or
+// off and tune them. "trace", "engine", "pool", "embeddings", the supervisor's "checks", memory's
+// "dbPath" and the trimmer's "saveDir" count only in your own file: set in a project's file they
+// are left out and pi tells you which (D-087). Unknown keys, modules or module settings, and
+// invalid values, disable Exocortex entirely (fail closed) and pi shows a warning.
 {
 	// Master kill switch.
 	"enabled": true,

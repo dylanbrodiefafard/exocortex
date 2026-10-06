@@ -1708,6 +1708,20 @@ Open check: Exocortex's injected `custom_message` reaches ninfer as a second con
 
 ---
 
+### D-087 — A setting belongs to the user or can be shared; a project's file sets only the shared ones · accepted (2026-10-06; owner's call; amends D-080's project-file rule and D-033 for that file)
+- **Context:** D-080 stopped a project's `.exocortex/config.jsonc` from setting `engine`, `embeddings`, `trace` and `pool`, and reported those keys as problems, which switches Exocortex off (D-033). Two things were left. A project's file could still set the supervisor's `checks`, which are shell commands run when the agent stops, and two write locations: memory's `dbPath` and the trimmer's `saveDir`. And a cloned repository could switch Exocortex off for whoever opened it, just by carrying a key it had no say over. Nothing is released, so there is no existing config to stay compatible with.
+- **Decision:** every setting has one owner.
+  - **The user's alone:** where things go, what is run, where files are written. In core that is every top-level key but `enabled` and `modules`. In a module it is the settings its schema marks with core's `USER_ONLY`: the supervisor's `checks`, memory's `dbPath`, the trimmer's `saveDir`. A new setting of that kind is marked the same way, in the module's schema, next to the setting.
+  - **Shared:** everything else. A project's file may switch Exocortex and modules on or off and tune them.
+  - **A user's setting in a project's file is left out, not a problem.** `loadConfig` lists it in `ignored`, the adapter tells the user once at session start which settings were left out, and Exocortex stays on. The user's own value, if any, stands.
+  - **Everything else in D-033 holds:** a key nobody knows, a module or setting that does not exist, or a refused value is a problem in either file and switches Exocortex off.
+  - A file named by `EXO_CONFIG` is the user's file wherever it is (D-080).
+- **Also:** the eval no longer writes `enabled: false` into the module blocks it adds; `enabled` has been optional since D-080.
+- **Consequences:** a team that wants shared check commands puts them in its own instructions or each user's file. `mode: "auto"` for the supervisor stays shareable: it changes how often the agent continues, not what is run.
+- **Open risk:** a project's file can still switch a module on. With the supervisor on and `runPromptChecks` at its default, the commands that run are the ones the user's own message names (D-084), not the project's.
+
+---
+
 ## Open questions (carried from brief §10, updated)
 
 1. ~~Resolved by D-029.~~ Exact pi mechanism for injecting into the current user turn without altering prior messages. *(Phase 0)*

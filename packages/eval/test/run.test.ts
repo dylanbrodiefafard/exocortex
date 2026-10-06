@@ -146,8 +146,8 @@ describe("runEval", { timeout: 30_000 }, () => {
 				trace: Record<string, unknown>;
 			};
 		expect(read("a").modules).toEqual({
-			memory: { enabled: false, dbPath: join(runDir, "memory-a.db") },
-			trimmer: { enabled: false, saveDir: join(tmp, "work", ".exo-trimmer", "a") },
+			memory: { dbPath: join(runDir, "memory-a.db") },
+			trimmer: { saveDir: join(tmp, "work", ".exo-trimmer", "a") },
 		});
 		expect(read("b").modules).toEqual({
 			memory: { enabled: true, dbPath: join(runDir, "memory-b.db") },

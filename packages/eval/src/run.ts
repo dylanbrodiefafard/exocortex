@@ -476,12 +476,10 @@ function isolatedModules(
 	workRoot: string,
 	name: string,
 ): Record<string, unknown> {
-	// `enabled` is spelled out: a module block without it is a config problem, and a config with a
-	// problem turns the trace off with everything else.
 	return {
 		...modules,
-		memory: { enabled: false, ...object(modules["memory"]), dbPath: join(runDir, `memory-${name}.db`) },
-		trimmer: { enabled: false, ...object(modules["trimmer"]), saveDir: join(workRoot, TRIMMER_DIR, name) },
+		memory: { ...object(modules["memory"]), dbPath: join(runDir, `memory-${name}.db`) },
+		trimmer: { ...object(modules["trimmer"]), saveDir: join(workRoot, TRIMMER_DIR, name) },
 	};
 }
 

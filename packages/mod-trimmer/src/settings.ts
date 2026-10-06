@@ -1,3 +1,4 @@
+import { USER_ONLY } from "@exocortex/core";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 
@@ -64,9 +65,10 @@ export const SettingsSchema = Type.Object(
 		thinking: Type.Boolean({ default: false }),
 		/**
 		 * Where full outputs are saved when the harness did not save one; default: OS temp dir. Each
-		 * session gets its own `session-<id>` directory under it, removed when the process exits.
+		 * session gets its own `session-<id>` directory under it, removed when the process exits. The
+		 * user's to set (D-087).
 		 */
-		saveDir: Type.Optional(Type.String({ minLength: 1 })),
+		saveDir: Type.Optional(Type.String({ minLength: 1, ...USER_ONLY })),
 	},
 	{ additionalProperties: true },
 );

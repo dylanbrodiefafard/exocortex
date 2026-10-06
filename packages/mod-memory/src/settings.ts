@@ -1,12 +1,13 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { USER_ONLY } from "@exocortex/core";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 
 export const SettingsSchema = Type.Object(
 	{
-		/** Card store; one per machine, cards scoped by repo (D-018). Default ~/.exocortex/memory.db. */
-		dbPath: Type.Optional(Type.String({ minLength: 1 })),
+		/** Card store; one per machine, cards scoped by repo (D-018). Default ~/.exocortex/memory.db. The user's to set (D-087). */
+		dbPath: Type.Optional(Type.String({ minLength: 1, ...USER_ONLY })),
 		/** Learn cards from verified error→fix pairs in this session. */
 		learn: Type.Boolean({ default: true }),
 		/** Inject matching cards into failing tool results. */

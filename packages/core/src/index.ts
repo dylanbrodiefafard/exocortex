@@ -5,6 +5,7 @@ export {
 	type LoadedConfig,
 	loadConfig,
 	type ModuleSettingsSchemas,
+	USER_ONLY,
 } from "./config.ts";
 export { createDebugLog, type DebugFields, type DebugLog, type DebugLogOptions, type DebugValue } from "./debug-log.ts";
 export { type ChatRequestFingerprint, canonicalJson, fingerprintChatRequest, sharedPrefix } from "./fingerprint.ts";

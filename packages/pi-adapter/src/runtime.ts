@@ -93,7 +93,7 @@ export function createRuntime(options: RuntimeOptions): Runtime {
 			} catch (error) {
 				options.onError("config", error);
 				loaded = loadConfig({ cwd, env: options.env, readFile: () => undefined });
-				loaded = { ...loaded, config: { ...loaded.config, enabled: false }, problems: [String(error)] };
+				loaded = { ...loaded, config: { ...loaded.config, enabled: false }, problems: [String(error)], ignored: [] };
 			}
 			openStore(loaded.config);
 			return loaded;
