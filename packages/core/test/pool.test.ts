@@ -37,7 +37,7 @@ const POOL: ExoConfig["pool"] = {
 interface PendingCall {
 	readonly request: ChatRequest;
 	readonly signal: AbortSignal | undefined;
-	reply(text?: string, tokens?: number): void;
+	reply(text?: string, tokens?: number, finishReason?: string): void;
 	fail(error: Error): void;
 }
 
@@ -53,10 +53,10 @@ function manualClient() {
 				pending.push({
 					request,
 					signal,
-					reply: (text = "ok", tokens = 10) =>
+					reply: (text = "ok", tokens = 10, finishReason = "stop") =>
 						resolve({
 							text,
-							finishReason: "stop",
+							finishReason,
 							usage: { promptTokens: tokens, completionTokens: 0, cachedTokens: null },
 						}),
 					fail: reject,
@@ -84,6 +84,7 @@ function makePool(
 }
 
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function call(module: string, priority: SidecarPriority = "interactive", text = module) {
 	return { module, priority, request: { messages: [{ role: "user", content: text }], maxTokens: 64 } } as const;
@@ -217,6 +218,232 @@ describe("sidecar pool failure handling (never rejects)", () => {
 		await flush();
 		pending[0]?.reply('{"n": 3}');
 		expect(await result).toMatchObject({ ok: true, value: { n: 3 } });
+	});
+});
+
+describe("held background calls (D3)", () => {
+	it("does not run a held call's deadline while the main agent is active", async () => {
+		const { pool, pending, started } = makePool();
+		pool.setMainActive(true);
+		const bg = pool.run({ ...call("bg", "background"), timeoutMs: 40 });
+		await sleep(120);
+		expect(pool.stats().queued.background).toBe(1);
+		pool.setMainActive(false);
+		await flush();
+		expect(started).toHaveLength(1);
+		pending[0]?.reply();
+		const result = await bg;
+		expect(result).toMatchObject({ ok: true, outcome: "ok" });
+		expect(result.queueMs).toBeGreaterThanOrEqual(100);
+	});
+
+	it("applies the deadline as soon as the call is free to start", async () => {
+		const { pool, pending, records } = makePool();
+		pool.setMainActive(true);
+		const bg = pool.run({ ...call("bg", "background"), timeoutMs: 40 });
+		await sleep(80);
+		pool.setMainActive(false);
+		await flush();
+		// It runs, the engine never answers, and the 40 ms count from when it stopped being held.
+		const released = performance.now();
+		expect(await bg).toMatchObject({ ok: false, outcome: "timeout" });
+		expect(performance.now() - released).toBeLessThan(500);
+		expect(pending[0]?.signal?.aborted).toBe(true);
+		expect(records.map((r) => r.outcome)).toEqual(["timeout"]);
+	});
+
+	it("stops the clock again when the main agent resumes before a slot was free", async () => {
+		const { pool, pending } = makePool({ maxConcurrent: 3, reservedForMain: 2 });
+		const busy = pool.run(call("busy", "interactive"));
+		const bg = pool.run({ ...call("bg", "background"), timeoutMs: 80 });
+		await sleep(20); // free to start, but the only slot is taken: the deadline runs
+		pool.setMainActive(true);
+		await sleep(150); // held: it does not
+		expect(pool.stats().queued.background).toBe(1);
+		pool.setMainActive(false);
+		pending[0]?.reply();
+		await flush();
+		pending[1]?.reply();
+		expect((await busy).ok && (await bg).ok).toBe(true);
+	});
+
+	it("still times out a background call that is queued but not held", async () => {
+		const { pool } = makePool({ maxConcurrent: 3, reservedForMain: 2 });
+		void pool.run(call("busy", "interactive"));
+		expect(await pool.run({ ...call("bg", "background"), timeoutMs: 30 })).toMatchObject({
+			outcome: "timeout",
+			latencyMs: 0,
+		});
+		pool.close();
+	});
+
+	it("gives up on a call held longer than maxHoldMs, with its own outcome", async () => {
+		const { pool, started, records } = makePool({ maxHoldMs: 40 });
+		pool.setMainActive(true);
+		const held = await pool.run({ ...call("bg", "background"), timeoutMs: 5_000 });
+		expect(held).toMatchObject({ ok: false, outcome: "expired_held", latencyMs: 0 });
+		expect(held.queueMs).toBeGreaterThanOrEqual(30);
+		expect(started).toEqual([]);
+		expect(records.map((r) => r.outcome)).toEqual(["expired_held"]);
+		expect(pool.stats().outcomes.expired_held).toBe(1);
+	});
+
+	it("holds nothing when backgroundWhenIdleOnly is off", async () => {
+		const { pool, started } = makePool({ backgroundWhenIdleOnly: false, maxHoldMs: 1 });
+		pool.setMainActive(true);
+		void pool.run(call("bg", "background"));
+		await sleep(20);
+		expect(started).toHaveLength(1);
+		pool.close();
+	});
+});
+
+describe("drain (D4)", () => {
+	it("lets queued and running background calls finish, even while the main agent is active", async () => {
+		const { pool, pending, started } = makePool();
+		pool.setMainActive(true);
+		const calls = ["a", "b", "c"].map((name) => pool.run(call(name, "background")));
+		await flush();
+		expect(started).toEqual([]);
+
+		const drained = pool.drain(2_000);
+		await flush();
+		expect(started).toHaveLength(2); // both slots, though main is still active
+		pending[0]?.reply();
+		pending[1]?.reply();
+		await flush();
+		expect(started).toHaveLength(3);
+		pending[2]?.reply();
+		expect(await drained).toEqual({ settled: 3, remaining: 0 });
+		expect((await Promise.all(calls)).every((r) => r.ok)).toBe(true);
+	});
+
+	it("waits no longer than asked, cancels nothing, and holds background work again afterwards", async () => {
+		const { pool, started } = makePool({ maxConcurrent: 3, reservedForMain: 2 });
+		const running = pool.run(call("slow", "background"));
+		pool.setMainActive(true);
+		const queued = pool.run(call("queued", "background"));
+		const began = performance.now();
+		expect(await pool.drain(40)).toEqual({ settled: 0, remaining: 2 });
+		expect(performance.now() - began).toBeLessThan(500);
+		expect(pool.stats()).toMatchObject({ running: 1, queued: { background: 1 } });
+		expect(started).toHaveLength(1);
+
+		pool.close();
+		expect(await running).toMatchObject({ outcome: "closed" });
+		expect(await queued).toMatchObject({ outcome: "closed" });
+		expect(await pool.drain(1_000)).toEqual({ settled: 0, remaining: 0 });
+	});
+
+	it("resolves at once when no background call is pending, whatever else is running", async () => {
+		const { pool, pending } = makePool();
+		const fg = pool.run(call("fg", "interactive"));
+		expect(await pool.drain(60_000)).toEqual({ settled: 0, remaining: 0 });
+		pending[0]?.reply();
+		expect((await fg).ok).toBe(true);
+	});
+
+	it("also waits for background calls submitted while draining", async () => {
+		const { pool, pending } = makePool();
+		const first = pool.run(call("distill", "background"));
+		const drained = pool.drain(2_000);
+		await flush();
+		// A module chaining a second call from the first one's result.
+		const second = first.then(() => pool.run(call("embed", "background")));
+		pending[0]?.reply();
+		await flush();
+		await flush();
+		pending[1]?.reply();
+		expect(await drained).toEqual({ settled: 2, remaining: 0 });
+		expect((await second).ok).toBe(true);
+	});
+});
+
+describe("pool accounting (D9)", () => {
+	it("keeps the usage of a structured call whose repair turn times out", async () => {
+		const { pool, pending, records } = makePool();
+		const result = pool.run({ ...call("json"), schema: Type.Object({ n: Type.Number() }), timeoutMs: 60 });
+		await flush();
+		pending[0]?.reply("not json", 30);
+		expect(await result).toMatchObject({ ok: false, outcome: "timeout", usage: { promptTokens: 30 } });
+		expect(pending).toHaveLength(2);
+		expect(records[0]).toMatchObject({ attempts: 1, usage: { promptTokens: 30 } });
+		expect(pool.stats().sessionTokensUsed).toBe(30);
+	});
+
+	it("checks the token budget again when a queued call's turn comes", async () => {
+		const { pool, pending, started } = makePool({ sessionTokenBudget: 25, maxConcurrent: 3, reservedForMain: 2 });
+		const a = pool.run(call("a"));
+		const b = pool.run(call("b"));
+		await flush();
+		pending[0]?.reply("x", 30);
+		expect((await a).ok).toBe(true);
+		expect(await b).toMatchObject({ ok: false, outcome: "rejected_budget", latencyMs: 0 });
+		expect(started).toHaveLength(1);
+	});
+
+	it("records the max_tokens that was sent, after the module's clamp", async () => {
+		const { pool, pending, records } = makePool({}, { maxTokensPerCall: 16, maxCallsPerTurn: 1 });
+		const first = pool.run(call("m"));
+		await flush();
+		expect(pending[0]?.request.maxTokens).toBe(16);
+		pending[0]?.reply();
+		await first;
+		await pool.run(call("m")); // over the turn cap
+		expect(records.map((r) => [r.outcome, r.maxTokens])).toEqual([
+			["ok", 16],
+			["rejected_turn_cap", 16],
+		]);
+	});
+
+	it("says when a text reply was cut off at max_tokens", async () => {
+		const { pool, pending, records } = makePool();
+		const cut = pool.run(call("text"));
+		const whole = pool.run(call("text"));
+		await flush();
+		pending[0]?.reply("The cause is", 10, "length");
+		pending[1]?.reply("The cause is a typo.");
+		expect(await cut).toMatchObject({ ok: true, value: "The cause is", finishReason: "length" });
+		expect(await whole).toMatchObject({ ok: true, finishReason: "stop" });
+		expect(records.map((r) => [r.outcome, r.error])).toEqual([
+			["ok", expect.stringMatching(/cut off at max_tokens/)],
+			["ok", null],
+		]);
+	});
+
+	it("reports a structured reply cut off at max_tokens as truncated, without a repair turn", async () => {
+		const { pool, pending, started, records } = makePool();
+		const result = pool.run({ ...call("json"), schema: Type.Object({ n: Type.Number() }) });
+		await flush();
+		pending[0]?.reply('<think>I should count the {"n":', 4096, "length");
+		expect(await result).toMatchObject({ ok: false, outcome: "truncated", usage: { promptTokens: 4096 } });
+		await flush();
+		expect(started).toHaveLength(1);
+		expect(records[0]).toMatchObject({ outcome: "truncated", attempts: 1 });
+		expect(pool.stats().outcomes.truncated).toBe(1);
+	});
+
+	it("resolves, never throws, when the limits callback or the recorder throws", async () => {
+		const c = manualClient();
+		let broken = true;
+		const pool = createSidecarPool({
+			client: c.client,
+			target: TARGET,
+			config: POOL,
+			moduleLimits: () => {
+				if (broken) throw new Error("limits exploded");
+				return DEFAULT_MODULE_LIMITS;
+			},
+			onRecord: () => {
+				throw new Error("recorder exploded");
+			},
+		});
+		expect(await pool.run(call("m"))).toMatchObject({ ok: false, outcome: "error" });
+		broken = false;
+		const fine = pool.run({ ...call("m"), timeoutMs: Number.POSITIVE_INFINITY });
+		await flush();
+		c.pending[0]?.reply();
+		expect((await fine).ok).toBe(true);
 	});
 });
 

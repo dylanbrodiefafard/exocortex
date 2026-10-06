@@ -2,6 +2,7 @@ import { appendFileSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createDebugLog, type DebugFields, type DebugLog } from "@exocortex/core";
 import { registerExoCommand } from "./command.ts";
+import { MODULE_SETTINGS } from "./module-settings.ts";
 import { registerModuleHost } from "./modules.ts";
 import { HIGH_FREQUENCY_EVENTS, PI_EVENT_NAMES, type PiEventName } from "./pi-events.ts";
 import { createRuntime } from "./runtime.ts";
@@ -57,7 +58,7 @@ export default function exocortex(pi: ExtensionAPI): void {
 	};
 	const onError = (where: string, error: unknown): void => emit("exo.error", () => ({ where, error: String(error) }));
 
-	const runtime = createRuntime({ env, onError });
+	const runtime = createRuntime({ env, onError, moduleSettings: MODULE_SETTINGS });
 	// First of all at shutdown: modules are disposed while the pool and the trace session they
 	// may still write to are open.
 	pi.on("session_shutdown", async () => {

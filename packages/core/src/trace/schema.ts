@@ -1,4 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
+import { rollback } from "./sqlite.ts";
 
 /**
  * Ordered migrations. Index + 1 is the schema version stored in `PRAGMA user_version`.
@@ -54,21 +55,30 @@ const MIGRATIONS: readonly string[] = [
 
 const SCHEMA_VERSION = MIGRATIONS.length;
 
+/**
+ * Brings the database to the current schema. Two processes may open a new file at once, so the
+ * version is read again inside a write transaction: the one that waited finds the work done.
+ */
 export function migrate(db: DatabaseSync): void {
+	if (checkedVersion(db) === SCHEMA_VERSION) return;
+	db.exec("BEGIN IMMEDIATE");
+	try {
+		for (let version = checkedVersion(db); version < SCHEMA_VERSION; version++) {
+			db.exec(MIGRATIONS[version] ?? "");
+		}
+		db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+		db.exec("COMMIT");
+	} catch (error) {
+		rollback(db);
+		throw error;
+	}
+}
+
+function checkedVersion(db: DatabaseSync): number {
 	const row = db.prepare("PRAGMA user_version").get() as { user_version: number } | undefined;
 	const current = row?.user_version ?? 0;
 	if (current > SCHEMA_VERSION) {
 		throw new Error(`trace db schema v${current} is newer than this Exocortex (v${SCHEMA_VERSION})`);
 	}
-	for (let version = current; version < SCHEMA_VERSION; version++) {
-		db.exec("BEGIN");
-		try {
-			db.exec(MIGRATIONS[version] ?? "");
-			db.exec(`PRAGMA user_version = ${version + 1}`);
-			db.exec("COMMIT");
-		} catch (error) {
-			db.exec("ROLLBACK");
-			throw error;
-		}
-	}
+	return current;
 }

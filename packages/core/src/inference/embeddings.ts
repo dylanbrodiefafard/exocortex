@@ -1,4 +1,4 @@
-import type { ExoConfig } from "../config.ts";
+import { clampTimeoutMs, type ExoConfig } from "../config.ts";
 import { expandEnv } from "./engine.ts";
 
 /** Where text embeddings come from: any OpenAI-compatible `/embeddings` server (D-026, D-062). */
@@ -46,9 +46,10 @@ export function createEmbedder(
 		model: target.model,
 		async embed(texts, call = {}) {
 			if (texts.length === 0) return [];
-			const timeout = AbortSignal.timeout(call.timeoutMs ?? target.timeoutMs);
-			const signal = call.signal ? AbortSignal.any([call.signal, timeout]) : timeout;
 			try {
+				// Inside the `try`: `AbortSignal.timeout` throws on a delay it does not accept.
+				const timeout = AbortSignal.timeout(clampTimeoutMs(call.timeoutMs ?? target.timeoutMs));
+				const signal = call.signal ? AbortSignal.any([call.signal, timeout]) : timeout;
 				const response = await fetchImpl(`${target.baseUrl}/embeddings`, {
 					method: "POST",
 					headers: {
@@ -61,7 +62,11 @@ export function createEmbedder(
 				if (!response.ok) throw new Error(`HTTP ${response.status}`);
 				return parseEmbeddings(await response.json(), texts.length);
 			} catch (error) {
-				options.onError?.(`embeddings: ${String(error)}`);
+				try {
+					options.onError?.(`embeddings: ${String(error)}`);
+				} catch {
+					// A broken error handler must not turn "no vectors" into a rejection.
+				}
 				return undefined;
 			}
 		},

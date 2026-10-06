@@ -11,7 +11,7 @@ const VERBATIM_COMMANDS = [
 	..."diff show log blame grep status ls-files cat-file reflog branch tag".split(" ").map((sub) => `git ${sub}`),
 ];
 
-const SettingsSchema = Type.Object(
+export const SettingsSchema = Type.Object(
 	{
 		/** Tools whose results may be trimmed (read/edit/write never are). */
 		tools: Type.Array(Type.String({ minLength: 1 }), { default: ["bash"] }),

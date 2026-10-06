@@ -1,7 +1,14 @@
 import { type FakeOpenAIServer, type ScriptedReply, startFakeOpenAIServer } from "@exocortex/testkit";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
-import { buildChatBody, createOpenAIClient, InferenceError } from "../src/inference/client.ts";
+import {
+	buildChatBody,
+	type ChatRequest,
+	type ChatResponse,
+	createOpenAIClient,
+	type InferenceClient,
+	InferenceError,
+} from "../src/inference/client.ts";
 import { ENGINE_PROFILES, type EngineTarget, resolveEngine } from "../src/inference/engine.ts";
 import { completeStructured, extractJson, StructuredOutputError } from "../src/inference/structured.ts";
 
@@ -152,6 +159,68 @@ describe("completeStructured", () => {
 		expect(sent.messages).toHaveLength(1);
 		expect(sent.response_format.type).toBe("json_schema");
 	});
+
+	/** A client that answers from a list, recording what it was asked. */
+	function scripted(...replies: (Partial<ChatResponse> | Error)[]) {
+		const asked: ChatRequest[] = [];
+		const client: InferenceClient = {
+			async chat(chatRequest) {
+				asked.push(chatRequest);
+				const reply = replies[asked.length - 1] ?? new Error("no reply scripted");
+				if (reply instanceof Error) throw reply;
+				return {
+					text: "",
+					finishReason: "stop",
+					usage: { promptTokens: 10, completionTokens: 5, cachedTokens: null },
+					...reply,
+				};
+			},
+		};
+		return { client, asked };
+	}
+
+	it("does not take a draft from the reasoning for the answer (D2)", async () => {
+		// The template opened the thinking block in the prompt, so the reply has only the closing tag.
+		const { client, asked } = scripted({
+			text: 'Maybe {"verdict":"complete"}? No, the tests fail.\n</think>\n\n{"verdict":"incomplete"}',
+		});
+		const result = await completeStructured(client, target(), request, Verdict, "verdict");
+		expect(result.value).toEqual({ verdict: "incomplete" });
+		expect(asked).toHaveLength(1);
+	});
+
+	it("takes the candidate that fits the schema, not the first that parses (D2)", async () => {
+		const { client, asked } = scripted({
+			text: 'The schema is {"type":"object"}, so my answer is {"verdict":"incomplete"} (see [1]).',
+		});
+		const result = await completeStructured(client, target(), request, Verdict, "verdict");
+		expect(result.value).toEqual({ verdict: "incomplete" });
+		expect(asked).toHaveLength(1);
+	});
+
+	it("reports each response as it arrives, so a failed repair turn still shows the first one's usage (D9)", async () => {
+		const { client } = scripted({ text: "prose" }, new InferenceError("aborted", "request aborted"));
+		const seen: ChatResponse[] = [];
+		await expect(
+			completeStructured(client, target(), request, Verdict, "verdict", undefined, (r) => seen.push(r)),
+		).rejects.toBeInstanceOf(InferenceError);
+		expect(seen.map((r) => r.usage?.promptTokens)).toEqual([10]);
+	});
+
+	it("makes no repair turn for a reply cut off at max_tokens (D9)", async () => {
+		const { client, asked } = scripted({ text: '<think>Let me look at {"verdict":"compl', finishReason: "length" });
+		const error = await completeStructured(client, target(), request, Verdict, "verdict").catch((e: unknown) => e);
+		expect(error).toBeInstanceOf(StructuredOutputError);
+		expect(error).toMatchObject({ reason: "truncated", responses: [{ finishReason: "length" }] });
+		expect(String(error)).toMatch(/cut off at max_tokens \(50\)/);
+		expect(asked).toHaveLength(1);
+
+		// A reply that hit the limit but holds a whole, valid answer is still an answer.
+		const whole = scripted({ text: '{"verdict":"complete"}', finishReason: "length" });
+		expect((await completeStructured(whole.client, target(), request, Verdict, "verdict")).value).toEqual({
+			verdict: "complete",
+		});
+	});
 });
 
 describe("extractJson", () => {
@@ -160,11 +229,54 @@ describe("extractJson", () => {
 		['Sure! {"a":1} done', { a: 1 }],
 		["```\n[1,2]\n```", [1, 2]],
 		["<think>{nope}</think> [3]", [3]],
+		['```json\n"yes"\n```', "yes"],
+		["  42 ", 42],
+		// Reasoning, closed with or without its opening tag, is not the answer (D2).
+		['draft {"a":0}\n</think>\n{"a":1}', { a: 1 }],
+		['<think>one {"a":0}</think> text <think>two {"a":2}</think>{"a":1}', { a: 1 }],
+		// The last value a reply states is the one it settled on.
+		['First {"a":0}. On reflection: {"a":1}', { a: 1 }],
+		// Braces and brackets inside strings do not end a value.
+		['Answer: {"a":"} ] <think> {","b":[1,"]"]} trailing }', { a: "} ] <think> {", b: [1, "]"] }],
+		['{"a":"say \\"hi\\" }"}!', { a: 'say "hi" }' }],
+		// A JSON value inside something that is not JSON.
+		['{note: the answer is {"a":1}}', { a: 1 }],
+		['{ [ {"a":1}', { a: 1 }],
 	])("%s", (text, expected) => {
 		expect(extractJson(text)).toEqual({ ok: true, value: expected });
 	});
 
 	it("fails on prose", () => {
-		expect(extractJson("nothing here").ok).toBe(false);
+		expect(extractJson("nothing here")).toEqual({ ok: false, error: "no parseable JSON found" });
+		expect(extractJson("")).toEqual({ ok: false, error: "no parseable JSON found" });
+		expect(extractJson("{ unbalanced [ } ]").ok).toBe(false);
+	});
+
+	it("treats an unclosed thinking block as no answer (D2)", () => {
+		for (const text of ['<think>Let me draft: {"a":0}', '<think>{"a":0}', 'Hm. <think> so {"a":0} and then']) {
+			expect(extractJson(text)).toEqual({
+				ok: false,
+				error: "the reply ended inside its reasoning, before any answer",
+			});
+		}
+		// What came before the block is still an answer.
+		expect(extractJson('{"a":1}\n<think>did I get that right? {"a":0}')).toEqual({ ok: true, value: { a: 1 } });
+	});
+
+	it("prefers the candidate the caller accepts, and otherwise returns the last one (D2)", () => {
+		const text = 'Like {"a":1} or {"b":2} or {"c":3}.';
+		const has = (key: string) => (value: unknown) => typeof value === "object" && value !== null && key in value;
+		expect(extractJson(text, has("a"))).toEqual({ ok: true, value: { a: 1 } });
+		expect(extractJson(text, has("b"))).toEqual({ ok: true, value: { b: 2 } });
+		expect(extractJson(text, has("z"))).toEqual({ ok: true, value: { c: 3 } });
+		// A reply that is one JSON value is the answer as a whole: no part of it is taken instead.
+		expect(extractJson('{"z":{"a":1}}', has("a"))).toEqual({ ok: true, value: { z: { a: 1 } } });
+	});
+
+	it("stays fast on a reply full of unbalanced or deeply nested brackets", () => {
+		const started = performance.now();
+		expect(extractJson("{[".repeat(50_000)).ok).toBe(false);
+		expect(extractJson(`${"{".repeat(20_000)}${"}".repeat(20_000)}`).ok).toBe(false);
+		expect(performance.now() - started).toBeLessThan(1_000);
 	});
 });

@@ -1,7 +1,7 @@
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 
-const SettingsSchema = Type.Object(
+export const SettingsSchema = Type.Object(
 	{
 		/** A first error further down than this many lines is surfaced at the top of the result. */
 		buriedAfterLines: Type.Integer({ minimum: 0, default: 20 }),

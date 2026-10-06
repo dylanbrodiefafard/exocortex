@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 
-const SettingsSchema = Type.Object(
+export const SettingsSchema = Type.Object(
 	{
 		/** Card store; one per machine, cards scoped by repo (D-018). Default ~/.exocortex/memory.db. */
 		dbPath: Type.Optional(Type.String({ minLength: 1 })),

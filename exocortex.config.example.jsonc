@@ -1,6 +1,8 @@
-// Exocortex configuration (JSONC). Copy to ~/.exocortex/config.jsonc; a project can override any
-// key in <repo>/.exocortex/config.jsonc. EXO_CONFIG=<path> replaces the global file. Unknown keys
-// or invalid values disable Exocortex entirely (fail closed) and pi shows a warning.
+// Exocortex configuration (JSONC). Copy to ~/.exocortex/config.jsonc. EXO_CONFIG=<path> replaces
+// that file. A project's own <repo>/.exocortex/config.jsonc may set only "enabled" and "modules":
+// "trace", "engine", "pool" and "embeddings" there are ignored and reported (D-080). Unknown keys,
+// modules or module settings, and invalid values, disable Exocortex entirely (fail closed) and pi
+// shows a warning.
 {
 	// Master kill switch.
 	"enabled": true,
@@ -8,7 +10,8 @@
 	// Append-only SQLite trace of every session (brief §5.1). Needed by eval and, later, memory.
 	"trace": {
 		"enabled": true,
-		"dbPath": "~/.exocortex/exocortex.db"
+		"dbPath": "~/.exocortex/exocortex.db", // a relative path is relative to this file's directory
+		"retentionDays": 0 // delete sessions older than this many days when pi starts; 0 = keep everything
 	},
 
 	// Where sidecar calls go. Unset fields fall back to pi's main model when it is an
@@ -29,7 +32,8 @@
 		"reservedForMain": 2, // slots sidecars never take
 		"timeoutMs": 20000, // per call, queueing included; a timeout degrades to "no help"
 		"sessionTokenBudget": 0, // sidecar tokens per session; 0 = unlimited
-		"backgroundWhenIdleOnly": true // background work waits for the main agent to go idle
+		"backgroundWhenIdleOnly": true, // background work waits for the main agent to go idle
+		"maxHoldMs": 600000 // a background call waiting for that gives up after this long; its timeoutMs does not run meanwhile
 	},
 
 	// Optional: an OpenAI-compatible /embeddings server, e.g. a small model on the CPU (D-062).
@@ -42,7 +46,7 @@
 	},
 
 	// Modules are off unless enabled here. Every module also takes "maxCallsPerTurn" (default 4)
-	// and "maxTokensPerCall" (default 1024). Toggle live in pi with /exo on|off and /exo <module> on|off.
+	// and "maxTokensPerCall" (default 4096). Toggle live in pi with /exo on|off and /exo <module> on|off.
 	"modules": {
 		"supervisor": {
 			"enabled": false,

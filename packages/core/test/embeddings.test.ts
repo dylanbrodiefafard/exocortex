@@ -97,6 +97,33 @@ describe("createEmbedder", () => {
 	});
 });
 
+describe("createEmbedder never rejects (D10)", () => {
+	it("takes any timeout: a huge one is clamped, a negative or NaN one means no time at all", async () => {
+		const { fetchImpl } = fakeFetch(() => ({ data: [{ embedding: [1] }] }));
+		const embedder = createEmbedder(target, { fetchImpl });
+		expect(await embedder.embed(["a"], { timeoutMs: 1e15 })).toHaveLength(1);
+		expect(await embedder.embed(["a"], { timeoutMs: Number.POSITIVE_INFINITY })).toHaveLength(1);
+		const hanging = ((_url: string, init: { signal: AbortSignal }) =>
+			new Promise((_resolve, reject) => {
+				init.signal.addEventListener("abort", () => reject(new Error("aborted")));
+			})) as unknown as typeof fetch;
+		const slow = createEmbedder(target, { fetchImpl: hanging });
+		for (const timeoutMs of [-1, Number.NaN]) {
+			await expect(slow.embed(["a"], { timeoutMs })).resolves.toBeUndefined();
+		}
+	});
+
+	it("ignores an error handler that throws", async () => {
+		const embedder = createEmbedder(target, {
+			fetchImpl: fakeFetch(() => ({}), 500).fetchImpl,
+			onError: () => {
+				throw new Error("handler exploded");
+			},
+		});
+		await expect(embedder.embed(["a"])).resolves.toBeUndefined();
+	});
+});
+
 describe("vectors", () => {
 	it("compares unit vectors and survives a round trip through bytes", () => {
 		const a = Float32Array.from([0.6, 0.8]);

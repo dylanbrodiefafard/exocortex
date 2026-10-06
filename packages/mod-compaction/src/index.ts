@@ -5,4 +5,4 @@ export {
 	type Facts,
 	renderSummary,
 } from "./compaction.ts";
-export { type CompactionSettings, parseSettings } from "./settings.ts";
+export { type CompactionSettings, parseSettings, SettingsSchema as CompactionSettingsSchema } from "./settings.ts";

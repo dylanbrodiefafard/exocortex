@@ -1,7 +1,7 @@
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 
-const SettingsSchema = Type.Object(
+export const SettingsSchema = Type.Object(
 	{
 		/** The user waits on compaction, so it runs at critical priority within this deadline. */
 		timeoutMs: Type.Integer({ minimum: 1_000, default: 90_000 }),

@@ -1,4 +1,11 @@
-export { type ConfigSource, type ExoConfig, type LoadConfigOptions, type LoadedConfig, loadConfig } from "./config.ts";
+export {
+	type ConfigSource,
+	type ExoConfig,
+	type LoadConfigOptions,
+	type LoadedConfig,
+	loadConfig,
+	type ModuleSettingsSchemas,
+} from "./config.ts";
 export { createDebugLog, type DebugFields, type DebugLog, type DebugLogOptions, type DebugValue } from "./debug-log.ts";
 export { type ChatRequestFingerprint, canonicalJson, fingerprintChatRequest, sharedPrefix } from "./fingerprint.ts";
 export {
@@ -28,6 +35,7 @@ export {
 } from "./inference/engine.ts";
 export {
 	createSidecarPool,
+	type DrainResult,
 	type ModuleLimits,
 	moduleLimitsFrom,
 	type PoolStats,

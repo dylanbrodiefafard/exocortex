@@ -1,7 +1,7 @@
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 
-const SettingsSchema = Type.Object(
+export const SettingsSchema = Type.Object(
 	{
 		/** `suggest`: pre-fill the user's next message (D-010). `auto`: continue on its own (opt-in). */
 		mode: Type.Union([Type.Literal("suggest"), Type.Literal("auto")], { default: "suggest" }),

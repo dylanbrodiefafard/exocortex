@@ -174,9 +174,11 @@ Config is JSONC, read from three places:
 
 | Location | Scope |
 |---|---|
-| `~/.exocortex/config.jsonc` | Global |
-| `<repo>/.exocortex/config.jsonc` | Per project; overrides any global key |
-| `EXO_CONFIG=<path>` | Replaces the global file |
+| `~/.exocortex/config.jsonc` | Your settings, for every project |
+| `EXO_CONFIG=<path>` | Replaces that file |
+| `<repo>/.exocortex/config.jsonc` | Per project: may set `enabled` and `modules` only |
+
+A project's file comes with the repository, so it can switch modules on or off and tune them, and nothing more. `engine`, `embeddings`, `pool` and `trace` there are ignored and reported: where sidecar calls go, and with which API key, is yours to decide. Look at a cloned repository's `.exocortex/config.jsonc` before you work in it, as you would its scripts: a module's settings can name commands to run (the supervisor's `checks`).
 
 [`exocortex.config.example.jsonc`](exocortex.config.example.jsonc) documents every option. The ones you are most likely to set:
 
@@ -185,7 +187,9 @@ Config is JSONC, read from three places:
 - **`modules`**: one block per module. All are off unless enabled here.
 - **`embeddings`** (optional): any OpenAI-compatible `/embeddings` server, for example a small model on the CPU. Memory then recognises the same error, or the same preference, said in different words. Without it, keyword matching is used.
 
-Unknown keys or invalid values disable Exocortex and show a warning in pi, so a typo cannot change behaviour silently.
+- **`trace`**: `dbPath` is where sessions are recorded (a relative path is relative to the config file's directory), and `retentionDays` deletes sessions older than that when pi starts. The default, `0`, keeps everything.
+
+Unknown keys, unknown modules, unknown module settings and invalid values disable Exocortex and show a warning in pi, so a typo cannot change behaviour silently.
 
 ### Engine support
 

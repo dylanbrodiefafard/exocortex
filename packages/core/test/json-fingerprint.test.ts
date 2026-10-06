@@ -26,6 +26,85 @@ describe("toJsonValue", () => {
 			text: big,
 		});
 	});
+
+	it("survives a getter that throws, losing only that property (D10)", () => {
+		const hostile = {
+			fine: 1,
+			get broken(): never {
+				throw new Error("getter exploded");
+			},
+			after: "kept",
+		};
+		expect(toJsonValue({ list: [hostile] })).toEqual({
+			list: [{ fine: 1, broken: "[unreadable]", after: "kept" }],
+		});
+		const proxy = new Proxy(
+			{},
+			{
+				ownKeys() {
+					throw new Error("no keys for you");
+				},
+			},
+		);
+		expect(toJsonValue({ proxy, ok: true })).toEqual({ proxy: "[unreadable]", ok: true });
+	});
+
+	it("keeps what an Error, a Map and a Set hold (D10)", () => {
+		const error = Object.assign(new TypeError("bad input", { cause: new Error("root") }), { code: "E_BAD" });
+		const converted = toJsonValue({ error }) as { error: Record<string, unknown> };
+		expect(converted.error).toMatchObject({
+			name: "TypeError",
+			message: "bad input",
+			code: "E_BAD",
+			cause: { name: "Error", message: "root" },
+		});
+		expect(converted.error["stack"]).toMatch(/TypeError: bad input/);
+		expect(
+			toJsonValue({
+				map: new Map<unknown, unknown>([
+					["a", 1],
+					[{ k: 1 }, undefined],
+				]),
+				set: new Set([1, "two", 3n]),
+			}),
+		).toEqual({
+			map: [
+				["a", 1],
+				[{ k: 1 }, null],
+			],
+			set: [1, "two", "3"],
+		});
+	});
+
+	it("summarises every kind of binary buffer instead of one property per element (D10)", () => {
+		const bytes = new ArrayBuffer(64);
+		expect(
+			toJsonValue({
+				u8: new Uint8Array(bytes),
+				f32: new Float32Array(bytes),
+				view: new DataView(bytes, 8),
+				raw: bytes,
+				node: Buffer.from("hello"),
+			}),
+		).toEqual({
+			u8: { omitted: "binary", chars: 64 },
+			f32: { omitted: "binary", chars: 64 },
+			view: { omitted: "binary", chars: 56 },
+			raw: { omitted: "binary", chars: 64 },
+			node: { omitted: "binary", chars: 5 },
+		});
+	});
+
+	it("never throws: invalid dates, very deep nesting (D10)", () => {
+		expect(toJsonValue({ at: new Date(Number.NaN), ok: new Date(0) })).toEqual({
+			at: "Invalid Date",
+			ok: "1970-01-01T00:00:00.000Z",
+		});
+		let deep: unknown = "bottom";
+		for (let i = 0; i < 100_000; i++) deep = [deep];
+		expect(() => toJsonValue(deep)).not.toThrow();
+		expect(JSON.stringify(toJsonValue(deep))).toContain("[too deep]");
+	});
 });
 
 describe("fingerprintChatRequest", () => {

@@ -1,5 +1,5 @@
 export { asksUserQuestion, diffFingerprint, fitDiff, formatEvidence, touchedFiles } from "./evidence.ts";
-export { parseSettings, type SupervisorSettings } from "./settings.ts";
+export { parseSettings, SettingsSchema as SupervisorSettingsSchema, type SupervisorSettings } from "./settings.ts";
 export {
 	type Claim,
 	type ClaimKind,

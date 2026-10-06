@@ -1,10 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync, StatementSync } from "node:sqlite";
 import type { SidecarCallRecord } from "../inference/pool.ts";
 import { migrate } from "./schema.ts";
-import { openDatabase } from "./sqlite.ts";
+import { isTransientSqliteError, openDatabase, rollback, setBusyTimeout } from "./sqlite.ts";
 
 export type JsonValue = string | number | boolean | null | readonly JsonValue[] | { readonly [key: string]: JsonValue };
 
@@ -102,9 +102,13 @@ export interface TraceStore {
 	sessions(filter?: { readonly label?: string }): StoredSession[];
 	events(sessionId: string, filter?: { readonly kinds?: readonly TraceEventKind[] }): StoredTraceEvent[];
 	sidecarCalls(sessionId: string): SidecarCallRecord[];
-	/** Writes buffered operations in one transaction. Never throws; failures go to `onError`. */
+	/**
+	 * Writes buffered operations in one transaction. Never throws. A row the database refuses is
+	 * dropped by itself and reported to `onError`; when the database is locked the whole batch is
+	 * kept and written by a later flush (D-080).
+	 */
 	flush(): void;
-	/** Flushes and closes. Further appends are dropped. */
+	/** Flushes and closes. Further appends are dropped. Never throws. */
 	close(): void;
 }
 
@@ -116,16 +120,39 @@ export interface TraceStoreOptions {
 	readonly flushIntervalMs?: number;
 	/** Flush immediately once this many operations are buffered. */
 	readonly maxBuffered?: number;
+	/** Called with every failure. It may be called from a timer; what it throws is ignored. */
 	readonly onError?: (error: unknown) => void;
+	/**
+	 * How long a flush waits for another connection's write lock. Flushes run on the caller's
+	 * event loop, so this is kept short and a locked flush is retried later instead. Default 20 ms.
+	 */
+	readonly busyTimeoutMs?: number;
+	/** The longer wait `close()` allows its last flush. Default 500 ms. */
+	readonly closeBusyTimeoutMs?: number;
+	/**
+	 * Most operations held while the database cannot be written. Past it new events and sidecar
+	 * records are dropped (session rows are always kept) and the count is reported. Default 20,000.
+	 */
+	readonly maxPending?: number;
+	/** Sessions that started longer ago than this are deleted when the store opens. Unset or 0: keep all. */
+	readonly retentionMs?: number;
 }
 
 type PendingOp =
-	| { readonly op: "session"; readonly id: string; readonly info: SessionInfo; readonly ts: number }
+	| {
+			readonly op: "session";
+			readonly id: string;
+			readonly info: SessionInfo;
+			readonly meta: string;
+			readonly ts: number;
+	  }
 	| {
 			readonly op: "event";
 			readonly sessionId: string;
 			readonly seq: number;
 			readonly event: TraceEventInput;
+			/** `event.data` as JSON, made at `append` so a value that cannot be serialised costs only itself. */
+			readonly data: string;
 			readonly ts: number;
 	  }
 	| { readonly op: "end"; readonly id: string; readonly ts: number }
@@ -133,49 +160,145 @@ type PendingOp =
 
 const DEFAULT_FLUSH_INTERVAL_MS = 50;
 const DEFAULT_MAX_BUFFERED = 256;
+const DEFAULT_BUSY_TIMEOUT_MS = 20;
+const DEFAULT_CLOSE_BUSY_TIMEOUT_MS = 500;
+const DEFAULT_MAX_PENDING = 20_000;
+/** A locked flush is retried after the flush interval, doubling up to this. */
+const MAX_RETRY_DELAY_MS = 5_000;
+/** Sessions pruned per open, so the first prune of a large file cannot hold up the harness's start. */
+const PRUNE_SESSIONS_PER_OPEN = 500;
 
 /**
  * Append-only SQLite trace store (brief §5.1). Appends are buffered in memory and written in
- * batched transactions off the caller's path, so harness event handlers pay only an array push.
+ * batched transactions off the caller's path, so harness event handlers pay only a JSON
+ * serialisation and an array push.
  */
 export function openTraceStore(options: TraceStoreOptions): TraceStore {
 	if (options.path !== ":memory:") mkdirSync(dirname(options.path), { recursive: true });
+	// Opening and migrating may wait for another process doing the same; flushes may not.
 	const db = openDatabase(options.path);
-	migrate(db);
+	try {
+		migrate(db);
+		setBusyTimeout(db, options.busyTimeoutMs ?? DEFAULT_BUSY_TIMEOUT_MS);
+	} catch (error) {
+		db.close();
+		throw error;
+	}
 
 	const now = options.now ?? Date.now;
-	const onError = options.onError ?? (() => {});
 	const flushIntervalMs = options.flushIntervalMs ?? DEFAULT_FLUSH_INTERVAL_MS;
 	const maxBuffered = options.maxBuffered ?? DEFAULT_MAX_BUFFERED;
+	const maxPending = options.maxPending ?? DEFAULT_MAX_PENDING;
 	const statements = prepare(db);
+	const eventsByKinds = new Map<number, StatementSync>();
 	let buffer: PendingOp[] = [];
 	let timer: NodeJS.Timeout | undefined;
 	let closed = false;
+	/** Flushes in a row that could not get the database. */
+	let failedFlushes = 0;
+	/** Operations refused because `maxPending` was reached. */
+	let dropped = 0;
 
-	function enqueue(op: PendingOp): void {
-		if (closed) return;
-		buffer.push(op);
-		if (buffer.length >= maxBuffered) {
-			flush();
-		} else if (!timer) {
-			timer = setTimeout(flush, flushIntervalMs);
-			timer.unref();
+	function report(error: unknown): void {
+		try {
+			options.onError?.(error);
+		} catch {
+			// A broken error handler must not take the session down with it.
 		}
 	}
 
+	function schedule(delayMs: number): void {
+		if (timer || closed) return;
+		timer = setTimeout(flush, delayMs);
+		timer.unref();
+	}
+
+	function enqueue(op: PendingOp): void {
+		if (closed) return;
+		if (buffer.length >= maxPending && (op.op === "event" || op.op === "sidecar")) {
+			dropped += 1;
+			return;
+		}
+		buffer.push(op);
+		// While the database is locked, the retry timer decides when to try again: a synchronous
+		// attempt per append would block the caller for the busy timeout each time.
+		if (buffer.length >= maxBuffered && failedFlushes === 0) flush();
+		else schedule(flushIntervalMs);
+	}
+
 	function flush(): void {
+		try {
+			flushNow();
+		} catch (error) {
+			report(error);
+		}
+	}
+
+	function flushNow(): void {
 		if (timer) clearTimeout(timer);
 		timer = undefined;
 		if (buffer.length === 0 || !db.isOpen) return;
-		const batch = buffer;
-		buffer = [];
+		let refused: unknown[];
 		try {
-			db.exec("BEGIN");
-			for (const op of batch) write(statements, op);
-			db.exec("COMMIT");
+			refused = writeBatch(buffer);
 		} catch (error) {
-			if (db.isTransaction) db.exec("ROLLBACK");
-			onError(error);
+			// The batch stays buffered. Another writer holding the lock is ordinary; anything else
+			// is worth one report.
+			rollback(db);
+			if (failedFlushes === 0 && !isBusy(error)) report(error);
+			failedFlushes += 1;
+			schedule(Math.min(flushIntervalMs * 2 ** Math.min(failedFlushes, 16), MAX_RETRY_DELAY_MS));
+			return;
+		}
+		buffer = [];
+		failedFlushes = 0;
+		for (const error of refused) report(error);
+		reportDropped();
+	}
+
+	/**
+	 * Writes the operations in one transaction and returns the errors of the rows the database
+	 * refused (each costs only itself). Throws, with the transaction still open, when the database
+	 * cannot be written at all right now.
+	 */
+	function writeBatch(batch: readonly PendingOp[]): unknown[] {
+		const refused: unknown[] = [];
+		db.exec("BEGIN IMMEDIATE");
+		for (const op of batch) {
+			try {
+				write(statements, op);
+			} catch (error) {
+				if (isTransientSqliteError(error)) throw error;
+				refused.push(error);
+			}
+		}
+		db.exec("COMMIT");
+		return refused;
+	}
+
+	function reportDropped(): void {
+		if (dropped === 0) return;
+		report(new Error(`trace: dropped ${dropped} events while the database could not be written`));
+		dropped = 0;
+	}
+
+	function serialise(value: unknown): string | undefined {
+		try {
+			const text = JSON.stringify(value);
+			if (typeof text === "string") return text;
+			report(new Error("trace: value has no JSON form"));
+		} catch (error) {
+			report(error);
+		}
+		return undefined;
+	}
+
+	if (options.retentionMs !== undefined && options.retentionMs > 0) {
+		try {
+			prune(db, now() - options.retentionMs);
+		} catch (error) {
+			// Locked by another session: the next open prunes.
+			if (!isBusy(error)) report(error);
 		}
 	}
 
@@ -184,13 +307,15 @@ export function openTraceStore(options: TraceStoreOptions): TraceStore {
 			const id = randomUUID();
 			let seq = 0;
 			let ended = false;
-			enqueue({ op: "session", id, info, ts: now() });
+			enqueue({ op: "session", id, info, meta: serialise(info.meta ?? {}) ?? "{}", ts: now() });
 			return {
 				id,
 				append(event) {
-					if (ended) return;
+					if (ended || closed) return;
+					const data = serialise(event.data);
+					if (data === undefined) return;
 					seq += 1;
-					enqueue({ op: "event", sessionId: id, seq, event, ts: event.ts ?? now() });
+					enqueue({ op: "event", sessionId: id, seq, event, data, ts: event.ts ?? now() });
 				},
 				recordSidecarCall(record) {
 					if (ended) return;
@@ -213,9 +338,18 @@ export function openTraceStore(options: TraceStoreOptions): TraceStore {
 		},
 		events(sessionId, filter = {}) {
 			flush();
-			const rows = statements.eventsBySession.all({ session_id: sessionId }) as unknown as EventRow[];
-			const kinds = filter.kinds ? new Set<string>(filter.kinds) : undefined;
-			return rows.filter((row) => !kinds || kinds.has(row.kind)).map(toEvent);
+			if (!filter.kinds) {
+				return (statements.eventsBySession.all({ session_id: sessionId }) as unknown as EventRow[]).map(toEvent);
+			}
+			const kinds = [...new Set<string>(filter.kinds)];
+			if (kinds.length === 0) return [];
+			let statement = eventsByKinds.get(kinds.length);
+			if (!statement) {
+				const marks = kinds.map(() => "?").join(", ");
+				statement = db.prepare(`SELECT * FROM events WHERE session_id = ? AND kind IN (${marks}) ORDER BY seq`);
+				eventsByKinds.set(kinds.length, statement);
+			}
+			return (statement.all(sessionId, ...kinds) as unknown as EventRow[]).map(toEvent);
 		},
 		sidecarCalls(sessionId) {
 			flush();
@@ -226,10 +360,53 @@ export function openTraceStore(options: TraceStoreOptions): TraceStore {
 		close() {
 			if (closed) return;
 			flush();
+			try {
+				if (buffer.length > 0 && db.isOpen) {
+					// The last chance to write: wait a little longer for the other writer.
+					setBusyTimeout(db, options.closeBusyTimeoutMs ?? DEFAULT_CLOSE_BUSY_TIMEOUT_MS);
+					flush();
+				}
+			} catch (error) {
+				report(error);
+			}
 			closed = true;
-			db.close();
+			if (timer) clearTimeout(timer);
+			timer = undefined;
+			if (buffer.length > 0) report(new Error(`trace: closed with ${buffer.length} unwritten operations`));
+			reportDropped();
+			buffer = [];
+			try {
+				if (db.isOpen) db.close();
+			} catch (error) {
+				report(error);
+			}
 		},
 	};
+}
+
+function isBusy(error: unknown): boolean {
+	const code = (error as { errcode?: unknown } | null)?.errcode;
+	return typeof code === "number" && ((code & 0xff) === 5 || (code & 0xff) === 6);
+}
+
+/** Deletes the oldest sessions that started before `cutoff`, with their events and sidecar calls. */
+function prune(db: DatabaseSync, cutoff: number): void {
+	const old = `SELECT id FROM sessions WHERE started_at < ${Math.floor(cutoff)} ORDER BY started_at LIMIT ${PRUNE_SESSIONS_PER_OPEN}`;
+	const expired = db.prepare(`SELECT 1 FROM sessions WHERE started_at < ${Math.floor(cutoff)} LIMIT 1`).get();
+	if (expired === undefined) return;
+	db.exec("BEGIN IMMEDIATE");
+	try {
+		db.exec("CREATE TEMP TABLE IF NOT EXISTS exo_prune (id TEXT PRIMARY KEY); DELETE FROM exo_prune;");
+		db.exec(`INSERT INTO exo_prune ${old}`);
+		db.exec("DELETE FROM events WHERE session_id IN (SELECT id FROM exo_prune)");
+		db.exec("DELETE FROM sidecar_calls WHERE session_id IN (SELECT id FROM exo_prune)");
+		db.exec("DELETE FROM sessions WHERE id IN (SELECT id FROM exo_prune)");
+		db.exec("DELETE FROM exo_prune");
+		db.exec("COMMIT");
+	} catch (error) {
+		rollback(db);
+		throw error;
+	}
 }
 
 function prepare(db: DatabaseSync) {
@@ -261,7 +438,7 @@ function write(statements: ReturnType<typeof prepare>, op: PendingOp): void {
 				cwd: op.info.cwd,
 				label: op.info.label ?? null,
 				started_at: op.ts,
-				meta: JSON.stringify(op.info.meta ?? {}),
+				meta: op.meta,
 			});
 			return;
 		case "event":
@@ -273,7 +450,7 @@ function write(statements: ReturnType<typeof prepare>, op: PendingOp): void {
 				turn: op.event.turn ?? null,
 				synthetic: op.event.synthetic ? 1 : 0,
 				module: op.event.module ?? null,
-				data: JSON.stringify(op.event.data),
+				data: op.data,
 			});
 			return;
 		case "end":

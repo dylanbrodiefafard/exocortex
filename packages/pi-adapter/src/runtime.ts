@@ -4,6 +4,7 @@ import {
 	type ExoConfig,
 	type LoadedConfig,
 	loadConfig,
+	type ModuleSettingsSchemas,
 	openTraceStore,
 	type SidecarPool,
 	type TraceEventInput,
@@ -51,6 +52,11 @@ export interface Runtime {
 export interface RuntimeOptions {
 	readonly env: Readonly<Record<string, string | undefined>>;
 	readonly onError: (where: string, error: unknown) => void;
+	/**
+	 * The modules that exist, with their settings schemas: config naming another module, or a
+	 * setting a module does not have, is then a problem (D-080). Left out, `modules` is not checked.
+	 */
+	readonly moduleSettings?: ModuleSettingsSchemas;
 }
 
 /** Process-wide Exocortex state shared by every hook in the pi adapter. */
@@ -65,6 +71,7 @@ export function createRuntime(options: RuntimeOptions): Runtime {
 		try {
 			store = openTraceStore({
 				path: config.trace.dbPath,
+				retentionMs: config.trace.retentionDays * 86_400_000,
 				onError: (error) => options.onError("trace write", error),
 			});
 		} catch (error) {
@@ -81,7 +88,8 @@ export function createRuntime(options: RuntimeOptions): Runtime {
 				return loaded;
 			}
 			try {
-				loaded = loadConfig({ cwd, env: options.env });
+				const modules = options.moduleSettings;
+				loaded = loadConfig({ cwd, env: options.env, ...(modules ? { modules } : {}) });
 			} catch (error) {
 				options.onError("config", error);
 				loaded = loadConfig({ cwd, env: options.env, readFile: () => undefined });
