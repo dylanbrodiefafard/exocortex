@@ -7,6 +7,7 @@ import {
 	loadPrompt,
 	type ModuleContext,
 	SIDECAR_MAX_TOKENS,
+	startAndEnd,
 	type ToolResultDraft,
 } from "@exocortex/core";
 import { Type } from "typebox";
@@ -31,6 +32,7 @@ const SelectionSchema = Type.Object({
 	ranges: Type.Array(Type.Array(Type.Integer(), { minItems: 2, maxItems: 2 }), { maxItems: 40 }),
 });
 
+/** A long request keeps its start and its end: the task is stated first, the constraints often last (D-089). */
 const GOAL_CHARS = 1_000;
 /** Lines always kept after a sidecar selection: the exit status and final summary live at the end. */
 const SIDECAR_TAIL_LINES = 10;
@@ -100,7 +102,7 @@ export function createTrimmer(raw: Readonly<Record<string, unknown>>, ctx: Modul
 		id: TRIMMER_ID,
 
 		onUserTurn(turn) {
-			if (turn.origin === "user") goal = turn.text.slice(0, GOAL_CHARS);
+			if (turn.origin === "user") goal = startAndEnd(turn.text, GOAL_CHARS);
 		},
 
 		async rewriteToolResult(draft, signal) {

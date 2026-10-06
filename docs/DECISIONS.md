@@ -1735,6 +1735,41 @@ Open check: Exocortex's injected `custom_message` reaches ninfer as a second con
 
 ---
 
+### D-089 — A sidecar is told what it is not shown; the verdict reads the agent's reply · accepted (2026-10-06; owner's report of a false `incomplete` in daily use; amends D-039 step 4, D-046's `finalMessage`, D-071's "the agent's narrative" and D-084's prompts)
+- **Context:** session `8ed660dd`. The request was "Review the latest commit. Do not run tests", then a follow-up asking for a numbered list of issues by priority with severity labels and a list of positives. The agent's reply had all of it. The verdict was `incomplete` twice, with the list, the labels and the positives as `missing`, and the user accepted a suggestion to do what was already done.
+  - The judge was given the last 1,500 characters of a 4,765-character reply (D-039), under the heading "Agent's final message (truncated)". The numbered list was in the first 3,500 characters. Even the "Positives" heading was outside the window.
+  - Nothing else could show it: a review changes no file and runs no test, so the evidence was empty. The reply was the work.
+  - The prompt told the judge the message was cut and not what follows from that. It reported what it could not see as not done.
+- **The rule.** Text a sidecar judges is never cut without a line that says so, and a prompt whose answer can be "this is absent" says that what was cut out shows nothing either way. A long text keeps its start and its end (core's `startAndEnd`): a request states the task first and its constraints last, a reply delivers first and asks last.
+- **Supervisor.**
+  1. **The verdict reads the final message**, up to 16,000 characters (was the last 1,500): the first 12,000 and the last 4,000 of a longer one, with a line between them giving the number of characters left out. The heading says which it is: "(all of it)" or "(long: its middle is not shown)".
+  2. **`verdict.v7` and `verdict-items.v7` say two things more.** When an item asks for something the agent writes in its reply (a review, an explanation, an answer, a plan), the final message is that work and is judged as written; for every other item what the agent says is still a claim. And whatever is marked as cut (diff lines or files "not shown", an output starting with "…", a message whose middle or text is "not shown") can only make an item `unverified` / "unknown", never `missing` / "unmet".
+  3. **The holistic prompt takes its heading from the code.** It had "(truncated)" written into it, so with `finalMessage: "claims"` the claims list was headed as the message. The `claims` heading now ends "(the text of the message is not shown)".
+  4. **The setting's value `tail` is now `message`** (still the default). Nothing is released, and it no longer shows a tail.
+  5. **A request restored from saved state** keeps its start and end like any other (it was cut to its first 16,000 characters, unmarked). A command line over 200 characters in the evidence ends in "…".
+- **The same fault elsewhere.** Every sidecar prompt's inputs were read for a cut the reader is not told about.
+  - **Memory, selecting preferences for a request** (`preference-select.v2`): the sidecar leaves out a preference "the request already says" or "makes an exception to", and read the first 3,000 characters of the request. "Skip the tests this time" at the end of a long request was not seen, and the preference was added against it. It now reads 12,000, start and end, with the gap marked. The call is made before the main model starts, so its prefill delays nothing else (D-068's reason for leaving input limits alone does not apply).
+  - **Memory, reading a message for preferences** (`preferences.v3`): the first 4,000 characters. A rule stated after a pasted log was never read. Now the start and end within the same 4,000 (it runs in the background beside the main model, D-068). The mark holds a full stop, so the sentence a quote is read in (`quotedSentence`) stops at the gap. The agent's previous message, shown as context, says when its start is left out.
+  - **Triage:** an error excerpt cut at 4,000 characters lost its last lines without a mark; it now ends in `[…]`. Its request view was already start and end, and is now core's function.
+  - **Trimmer:** the goal the line selection reads was the first 1,000 characters of the request; now start and end.
+  - **Core, a piped test run read by a sidecar** (`run-verdict.v1`): the last 12,000 characters, which the prompt calls "everything it printed". A cut output is now headed by a line saying its start is not shown. The mark is no line of the output, so it cannot be quoted as evidence.
+- **Read and left alone.**
+  - **The supervisor's diff and check output** were already marked where cut (D-071, D-084); the new prompt line names those marks.
+  - **Memory's lesson** (`lesson.v3`) shows an edit's first 1,200 characters, ending in "…". A fix past that reads as "the edits do not touch the error" and no card is written. That is D-081's rule (no card unless the edits explain the pass) failing closed, and it costs a card, not a wrong message to the user.
+  - **Compaction** leaves out the oldest of a conversation over 400,000 characters and says so; the user's requests are kept as tracked facts (D-085).
+  - **Triage's edits** are marked where cut and where earlier ones are not shown. A hint is advice, checked against the evidence for names it invents.
+  - **The trimmer's line selection** is not asked at all when the numbered output does not fit.
+- **Not done.**
+  - **Per-criterion verdicts cannot reach `complete` on a task whose work is the reply.** A "met" item must quote a diff, check or command line (D-084), and a review has none, so its items are "unknown" and the verdict `uncertain`. Letting a line of the message count would let "the README is written" prove the README. Left for the A/B of `verdictStyle`.
+  - **No rule in code turns `incomplete` into `uncertain` when the message was cut.** Code cannot tell which missing item would have been in the gap. The prompt carries it.
+- **Open risks.**
+  - **The judge now reads the agent's whole narrative**, which D-039 and D-071 kept short so that a confident message could not argue its way to `complete`. The prompt draws the line (the reply is evidence only for what the reply itself delivers), and a model may not hold it. `supervisor-claims` is the A/B of exactly this (D-054); its baseline moved.
+  - **A verdict prompt up to about 4k tokens longer.** It runs while the agent is idle (D-071).
+  - **A deliverable in the middle of a reply over 16,000 characters is still not seen.** It now comes back as `unverified`, if the judge follows the prompt.
+  - **`verdict.v7`, `verdict-items.v7` and the new marks are untested with the real model**, like D-084's prompts. The check is the same session replayed: the trace has the request, the ledger and both replies.
+
+---
+
 ## Open questions (carried from brief §10, updated)
 
 1. ~~Resolved by D-029.~~ Exact pi mechanism for injecting into the current user turn without altering prior messages. *(Phase 0)*

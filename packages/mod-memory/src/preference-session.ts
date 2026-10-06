@@ -5,6 +5,7 @@ import {
 	type SettleAction,
 	type SettleInfo,
 	SIDECAR_MAX_TOKENS,
+	startAndEnd,
 	type UserTurn,
 	type UserTurnContext,
 } from "@exocortex/core";
@@ -43,12 +44,21 @@ const SELECT_PROMPT = loadPrompt(new URL("../prompts/preference-select.v2.md", i
 
 const SelectionSchema = Type.Object({ apply: Type.Array(Type.Integer({ minimum: 1 }), { maxItems: 10 }) });
 
-const SELECT_REQUEST_CHARS = 3_000;
+/**
+ * How much of a request the selection reads. A long one keeps its start and its end (D-089): the
+ * selection leaves out what the request already says or makes an exception to, and "skip the tests
+ * this time" is as likely to be its last line as its first.
+ */
+const SELECT_REQUEST_CHARS = 12_000;
 /** Shorter messages ("yes", "continue", "thanks") cannot state a preference worth a sidecar call. */
 const MIN_PREFERENCE_MESSAGE_CHARS = 20;
+/** A long message keeps its start and its end (D-089): a standing rule often follows what was pasted. */
 const PREFERENCE_MESSAGE_CHARS = 4_000;
 /** Enough of the agent's last message to tell a correction of it from a new request (D-064). */
 const PREFERENCE_CONTEXT_CHARS = 1_200;
+/** Ends in a full stop inside the mark, so no sentence a quote is read in runs across the gap. */
+const MESSAGE_CUT_MARK = "[… the middle of this message is not shown. …]";
+const CONTEXT_CUT_MARK = "[… the start of the agent's message is not shown …]";
 /**
  * Known preferences shown to the sidecar so it can say "same as" or "replaces": the latest ones.
  * Code still compares a proposed rule with every live preference (M7).
@@ -147,7 +157,8 @@ export function createPreferenceSession(
 		if (!repo.known && source !== "interview") return 0;
 		const all = store.preferences();
 		const known = all.slice(-MAX_KNOWN_PREFERENCES);
-		const text = message.slice(0, PREFERENCE_MESSAGE_CHARS);
+		// A quote is checked against what the sidecar read, and its sentence stops at the mark.
+		const text = startAndEnd(message, PREFERENCE_MESSAGE_CHARS, { mark: MESSAGE_CUT_MARK });
 		const proposals = await propose(text, before, known, source);
 		if (!proposals) return 0;
 		const nearest = await nearestPreferences(
@@ -196,7 +207,7 @@ export function createPreferenceSession(
 						role: "user",
 						content: PREFERENCES_PROMPT.render({
 							known: known.map((p, i) => `${i + 1}. ${p.rule}`).join("\n") || "(none)",
-							before: before.slice(-PREFERENCE_CONTEXT_CHARS) || "(nothing)",
+							before: endOf(before) || "(nothing)",
 							message: text,
 						}),
 					},
@@ -288,7 +299,7 @@ export function createPreferenceSession(
 						role: "user",
 						content: SELECT_PROMPT.render({
 							preferences: candidates.map((p, i) => `${i + 1}. ${withKind(p)}`).join("\n"),
-							request: prompt.slice(0, SELECT_REQUEST_CHARS),
+							request: startAndEnd(prompt, SELECT_REQUEST_CHARS),
 						}),
 					},
 				],
@@ -444,4 +455,11 @@ export function createPreferenceSession(
 			return sub === "preferences" ? list() : undefined;
 		},
 	};
+}
+
+/** The end of the agent's last message, saying so when its start is left out (D-089). */
+function endOf(before: string): string {
+	return before.length > PREFERENCE_CONTEXT_CHARS
+		? `${CONTEXT_CUT_MARK}\n${before.slice(-PREFERENCE_CONTEXT_CHARS)}`
+		: before;
 }

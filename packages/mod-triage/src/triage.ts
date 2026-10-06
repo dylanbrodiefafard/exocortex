@@ -15,6 +15,7 @@ import {
 	maskedFailure,
 	outcomeOf,
 	SIDECAR_MAX_TOKENS,
+	startAndEnd,
 	type ToolOutcome,
 	type ToolResultDraft,
 	type ToolRewrite,
@@ -777,14 +778,9 @@ export function errorExcerpt(output: string): string {
 		out.push(clip(lines[i] ?? "", MAX_LINE_CHARS));
 		previous = i;
 	}
-	return out.join("\n").slice(0, EXCERPT_CHARS);
-}
-
-/** A long request keeps its start and its end: the task is stated first, the constraints often last. */
-function startAndEnd(text: string, max: number): string {
-	if (text.length <= max) return text;
-	const head = Math.floor((max * 2) / 3);
-	return `${text.slice(0, head)}\n[…]\n${text.slice(text.length - (max - head))}`;
+	const excerpt = out.join("\n");
+	// The same mark as between its parts: the end of the output is gone, and the reader is told (D-089).
+	return excerpt.length > EXCERPT_CHARS ? `${excerpt.slice(0, EXCERPT_CHARS)}\n[…]` : excerpt;
 }
 
 function clip(text: string, max = 200): string {

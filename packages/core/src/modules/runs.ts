@@ -313,6 +313,8 @@ const VerdictSchema = Type.Object({
 });
 /** The agent piped the output to keep it short; a longer one is read from its end, where results are. */
 const MAX_OUTPUT_CHARS = 12_000;
+/** Heads a cut output (D-089). It is no line of the output, so it cannot be quoted as evidence. */
+const OUTPUT_CUT_MARK = "[… the start of the output is not shown …]";
 /** A quoted line this short must be a whole line of the output: "OK" is inside many words. */
 const MIN_PARTIAL_QUOTE = 8;
 
@@ -343,6 +345,9 @@ export async function judgeHiddenRun(
 	const unread: HiddenRunReading = { verdict, source: "output" };
 	if (verdict !== "unknown" || hiddenRun(tool)?.kind !== "test" || !sidecar.pool) return unread;
 	if (lines.every((line) => line === "")) return unread;
+	const printed = lines.join("\n");
+	const output =
+		printed.length > MAX_OUTPUT_CHARS ? `${OUTPUT_CUT_MARK}\n${printed.slice(-MAX_OUTPUT_CHARS)}` : printed;
 	const result = await sidecar.pool
 		.run({
 			module: sidecar.module,
@@ -357,7 +362,7 @@ export async function judgeHiddenRun(
 						role: "user",
 						content: VERDICT_PROMPT.render({
 							command: String(tool.input["command"]).slice(0, 500),
-							output: lines.join("\n").slice(-MAX_OUTPUT_CHARS),
+							output,
 						}),
 					},
 				],

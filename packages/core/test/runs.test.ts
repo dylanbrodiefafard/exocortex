@@ -206,6 +206,19 @@ describe("reading a run whose exit code a pipe hid (D-075)", () => {
 		);
 	});
 
+	it("tells the sidecar when it is shown only the end of the output (D-089)", async () => {
+		const long = `${"compiling a module of the project\n".repeat(600)}${JEST}`;
+		const cut = await judge(long, { verdict: "passed", evidence: "Tests:       4 passed, 4 total" });
+		const prompt = String(cut.t.requests[0]?.messages[0]?.["content"]);
+		expect(prompt).toContain("[… the start of the output is not shown …]\n");
+		expect(prompt).toContain(JEST);
+		// The mark is not a line of the output: it is no evidence.
+		const marked = await judge(long, { verdict: "passed", evidence: "[… the start of the output is not shown …]" });
+		expect(marked.reading).toEqual({ verdict: "unknown", source: "output" });
+		const whole = await judge(JEST, { verdict: "passed", evidence: "Tests:       4 passed, 4 total" });
+		expect(String(whole.t.requests[0]?.messages[0]?.["content"])).not.toContain("is not shown …]");
+	});
+
 	it("does not take an answer it cannot check", async () => {
 		const unknown = { verdict: "unknown", source: "output" };
 		expect((await judge(JEST, { verdict: "passed", evidence: "All tests passed" })).reading).toEqual(unknown);

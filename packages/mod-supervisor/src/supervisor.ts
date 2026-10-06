@@ -6,6 +6,7 @@ import {
 	type SettleAction,
 	type SettleInfo,
 	SIDECAR_MAX_TOKENS,
+	startAndEnd,
 	type ToolOutcome,
 	type UserTurn,
 } from "@exocortex/core";
@@ -30,8 +31,8 @@ import { isCommitId, newFileDiffs, untrackedFiles, workspaceFingerprint } from "
 export const SUPERVISOR_ID = "supervisor";
 
 const LEDGER_PROMPT = loadPrompt(new URL("../prompts/ledger.v3.md", import.meta.url));
-const VERDICT_PROMPT = loadPrompt(new URL("../prompts/verdict.v6.md", import.meta.url));
-const ITEM_VERDICT_PROMPT = loadPrompt(new URL("../prompts/verdict-items.v6.md", import.meta.url));
+const VERDICT_PROMPT = loadPrompt(new URL("../prompts/verdict.v7.md", import.meta.url));
+const ITEM_VERDICT_PROMPT = loadPrompt(new URL("../prompts/verdict-items.v7.md", import.meta.url));
 
 const LedgerSchema = Type.Object({
 	is_task: Type.Boolean(),
@@ -142,7 +143,13 @@ const SavedSchema = Type.Object({
 const MAX_CRITERIA = 12;
 /** How much of the user's request the verdict reads; longer ones keep their start and end. */
 const REQUEST_CHARS = 16_000;
-const FINAL_MESSAGE_CHARS = 1_500;
+const REQUEST_CUT = { mark: "… (middle of a long request left out) …", startShare: 0.75 };
+/**
+ * How much of the agent's final message the verdict reads (D-089). For a review, an explanation or
+ * an answer the message is the work, and it is often the only evidence: a longer one keeps its
+ * start, where the deliverable is, and its end, where a question to the user is.
+ */
+const FINAL_MESSAGE_CHARS = 16_000;
 /** In `claims` mode the verdict still sees this much of the ending, to spot a question to the user. */
 const CLAIMS_TAIL_CHARS = 300;
 const VOTE_TEMPERATURE = 0.7;
@@ -348,7 +355,7 @@ function runOptions(settings: SupervisorSettings): RunOptions {
  */
 function restoreTask(saved: unknown): Task | undefined {
 	if (!Value.Check(SavedSchema, saved)) return undefined;
-	const requests = saved.ledger.requests.map((request) => request.slice(0, REQUEST_CHARS));
+	const requests = saved.ledger.requests.map((request) => startAndEnd(request, REQUEST_CHARS, REQUEST_CUT));
 	const ledger: Ledger = {
 		requests,
 		criteria: saved.ledger.criteria.slice(0, MAX_CRITERIA),
@@ -803,13 +810,7 @@ async function judge(
 			schema: ItemVerdictSchema,
 			schemaName: "item_verdict",
 			request: request(
-				ITEM_VERDICT_PROMPT.render({
-					request: userRequest,
-					criteria,
-					evidence: evidence.text,
-					final_label: final.label,
-					final_message: final.text,
-				}),
+				ITEM_VERDICT_PROMPT.render({ request: userRequest, criteria, evidence: evidence.text, ...final }),
 			),
 		});
 		if (!result.ok) {
@@ -822,9 +823,7 @@ async function judge(
 		...common,
 		schema: VerdictSchema,
 		schemaName: "verdict",
-		request: request(
-			VERDICT_PROMPT.render({ request: userRequest, criteria, evidence: evidence.text, final_message: final.text }),
-		),
+		request: request(VERDICT_PROMPT.render({ request: userRequest, criteria, evidence: evidence.text, ...final })),
 	});
 	if (!result.ok) {
 		ctx.log(`verdict ${result.outcome}: ${result.error}`);
@@ -836,20 +835,33 @@ async function judge(
 /** The user's messages for this task as the verdict reads them: verbatim, later ones marked as additions. */
 function requestView(requests: readonly string[]): string {
 	const text = requests.map((r, i) => (i === 0 ? r.trim() : `(The developer then added:)\n${r.trim()}`)).join("\n\n");
-	if (text.length <= REQUEST_CHARS) return text;
-	const head = Math.floor(REQUEST_CHARS * 0.75);
-	return `${text.slice(0, head)}\n… (middle of a long request left out) …\n${text.slice(head - REQUEST_CHARS)}`;
+	return startAndEnd(text, REQUEST_CHARS, REQUEST_CUT);
 }
 
-/** Research R1.3: in `claims` mode the judge sees the agent's success claims, labelled unverified. */
+/**
+ * The agent's final message as the verdict reads it, under a heading that says how much of it that
+ * is (D-089): the judge takes what it is not shown for absent unless it is told.
+ * - `message`: all of it, or the start and the end of a long one with the gap marked.
+ * - `claims` (research R1.3): only its success claims, labelled unverified, and its last words.
+ */
 function finalMessageView(finalMessage: string, mode: SupervisorSettings["finalMessage"]) {
-	if (mode === "tail") {
-		return { label: "Agent's final message (truncated)", text: finalMessage.slice(-FINAL_MESSAGE_CHARS) };
+	const message = finalMessage.trim();
+	if (mode === "message") {
+		const leftOut = message.length - FINAL_MESSAGE_CHARS;
+		return {
+			final_label:
+				leftOut > 0 ? "Agent's final message (long: its middle is not shown)" : "Agent's final message (all of it)",
+			final_message: startAndEnd(message, FINAL_MESSAGE_CHARS, {
+				mark: `… (${leftOut} characters in the middle of the message are not shown) …`,
+				startShare: 0.75,
+			}),
+		};
 	}
-	const claims = extractClaims(finalMessage).map((c) => `- UNVERIFIED CLAIM: ${c.sentence}`);
+	const claims = extractClaims(message).map((c) => `- UNVERIFIED CLAIM: ${c.sentence}`);
 	return {
-		label: "The agent's unverified claims, then the last words of its final message",
-		text: `${claims.length > 0 ? claims.join("\n") : "(no success claims)"}\n…\n${finalMessage.slice(-CLAIMS_TAIL_CHARS)}`,
+		final_label:
+			"The agent's unverified claims, then the last words of its final message (the text of the message is not shown)",
+		final_message: `${claims.length > 0 ? claims.join("\n") : "(no success claims)"}\n…\n${message.slice(-CLAIMS_TAIL_CHARS)}`,
 	};
 }
 

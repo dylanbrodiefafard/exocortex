@@ -13,6 +13,8 @@ How to read the evidence:
 - A test run from before the agent's last edit, or one whose exit code was another command's (a pipe, `;` or `||`), does not show the finished work passes. When a note says so and nothing later shows it, rate the items that rest on it "unknown".
 - A passing test run shows only what those tests cover.
 - If the agent's final message says what it will do next and then stops, the items that step covers are unmet.
+- An item that asks for something the agent writes in its reply (a review, an explanation, an answer, a plan, or the form these take) has no line you may quote. Rate it "unmet" only when the final message below is shown whole and plainly does not contain it; otherwise rate it "unknown".
+- Some of what you are given is cut to fit, and says so: a diff with lines or files "not shown", an output that begins with "…", a final message whose middle or whose text is "not shown". What was cut out shows nothing either way. Never rate an item "unmet" because it would be in a part you were not given: rate it "unknown".
 
 Also set `failed` to true if the agent says it cannot do the task or gave up, and `asked_user` to true only if the agent stopped because it needs an answer or a decision from the developer before it can go on. An offer of more work after it finished ("Want me to add tests too?") is not that.
 

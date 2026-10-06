@@ -832,6 +832,59 @@ describe("preference selection and standing rules by sidecar (D-062)", () => {
 		expect(prompts).toHaveLength(3);
 	});
 
+	it("shows the selection the end of a long request, where an exception is often stated (D-089)", async () => {
+		seed();
+		const prompts: string[] = [];
+		const { memory } = setup({ preferences: true }, (prompt) => {
+			prompts.push(prompt);
+			return { apply: [] };
+		});
+		const text = `Fix the date parser.\n${"log line from the failing run\n".repeat(600)}Skip the tests this time.`;
+		await memory.contextForUserTurn?.({ text, origin: "user" }, signal);
+		expect(prompts[0]).toContain("Fix the date parser.");
+		expect(prompts[0]).toContain("Skip the tests this time.");
+		expect(prompts[0]).toContain("\n[…]\n");
+		expect(prompts[0]?.length).toBeLessThan(text.length);
+	});
+
+	it("reads a rule stated after a long paste, and tells the sidecar what it is not shown (D-089)", async () => {
+		const prompts: string[] = [];
+		const s = setup({ preferences: true, preferenceSelect: false }, (prompt) => {
+			prompts.push(prompt);
+			return {
+				preferences: [
+					{
+						rule: RULES[0],
+						quote: "always write the failing test first",
+						standing: true,
+						applies_to: "any",
+						correction: false,
+						same_as: 0,
+						replaces: 0,
+					},
+				],
+			};
+		});
+		const paste = "log line from the failing run\n".repeat(400);
+		await s.memory.onSettle?.(
+			{ outcome: "completed", lastAssistantText: `${"I changed things. ".repeat(200)}Done.` },
+			signal,
+		);
+		s.memory.onUserTurn?.({
+			text: `Fix the date parser.\n${paste}From now on, always write the failing test first.`,
+			origin: "user",
+		});
+		await s.memory.onSettle?.(DONE, signal);
+		await until(() => s.t.records.length > 0);
+		expect(prompts[0]).toContain("[… the middle of this message is not shown. …]");
+		expect(prompts[0]).toContain("[… the start of the agent's message is not shown …]");
+		expect(
+			openMemoryStore(dbPath)
+				.preferences()
+				.map((p) => p.rule),
+		).toEqual([RULES[0]]);
+	});
+
 	it("falls back to keyword filtering when the sidecar fails or selection is off", async () => {
 		seed();
 		const failing = setup({ preferences: true }, () => new Error("down"));

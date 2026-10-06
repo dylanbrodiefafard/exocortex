@@ -29,8 +29,11 @@ export const SettingsSchema = Type.Object(
 		warningSignals: Type.Boolean({ default: false }),
 		/** R1.4: judge each checklist item with a quoted evidence line, and derive the verdict in code. */
 		verdictStyle: Type.Union([Type.Literal("holistic"), Type.Literal("per-criterion")], { default: "holistic" }),
-		/** R1.3: show the verdict the final message's tail (`tail`) or only its extracted, unverified claims. */
-		finalMessage: Type.Union([Type.Literal("tail"), Type.Literal("claims")], { default: "tail" }),
+		/**
+		 * What the verdict reads of the agent's final message. `message`: the message itself, the start
+		 * and end of a very long one (D-089). `claims` (R1.3): only its extracted, unverified claims.
+		 */
+		finalMessage: Type.Union([Type.Literal("message"), Type.Literal("claims")], { default: "message" }),
 		/** R1.5: re-ask this many times in total when the verdict is `complete`; any dissent → `uncertain`. */
 		completeVotes: Type.Integer({ minimum: 1, maximum: 5, default: 1 }),
 		/**

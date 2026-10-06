@@ -62,7 +62,7 @@
 			"preVerdict": false, // a failing check = incomplete with no LLM call
 			"warningSignals": false, // flag skipped/deleted tests, stubs, unsupported "tests pass" claims
 			"verdictStyle": "holistic", // or "per-criterion": each item judged with a quoted evidence line
-			"finalMessage": "tail", // or "claims": show only the agent's success claims, marked unverified
+			"finalMessage": "message", // or "claims": show only the agent's success claims, marked unverified
 			"completeVotes": 1, // >1: re-ask on "complete"; any dissent = uncertain
 			"verifyUncertain": false // on "uncertain": ask the agent once to check what the evidence does not show
 		},

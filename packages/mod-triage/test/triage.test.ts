@@ -481,6 +481,13 @@ describe("errorExcerpt", () => {
 		expect(excerpt).toContain("[…]");
 		expect(excerpt.at(-1)).toBe("line 59");
 	});
+	it("marks an excerpt that lost its end to the size limit (D-089)", () => {
+		const lines = Array.from({ length: 30 }, (_, i) => `line ${i} ${"x".repeat(290)}`);
+		lines[5] = "error: boom";
+		const excerpt = errorExcerpt(lines.join("\n"));
+		expect(excerpt.endsWith("\n[…]")).toBe(true);
+		expect(excerpt).toContain("error: boom");
+	});
 	it("starts at the top when there is no error line", () => {
 		expect(errorExcerpt("a\nb")).toBe("a\nb");
 	});

@@ -14,6 +14,8 @@ How to read the evidence:
 - A test run from before the agent's last edit, or one whose exit code was another command's (a pipe, `;` or `||`), does not show the finished work passes. When a note says so and nothing later shows it, treat the items that rest on it as not shown, and put "run the tests again" in `unverified`.
 - A passing test run shows only what those tests cover. An item no test or diff line shows is not shown.
 - If the agent's final message says what it will do next and then stops, the items that step covers are not done.
+- When an item asks for something the agent writes in its reply (a review, an explanation, an answer, a plan, or the form these take), the agent's final message below is that work, not a claim about it. Read it and judge the item against what it says. For every other item, what the agent says about its work is a claim and needs evidence.
+- Some of what you are given is cut to fit, and says so: a diff with lines or files "not shown", an output that begins with "…", a final message whose middle or whose text is "not shown". What was cut out shows nothing either way. Never call an item missing because it would be in a part you were not given: put it in `unverified`.
 
 In `unverified`, list the items the evidence does not show either way, each as a short instruction to the agent to check it (empty when there are none). "complete" means both lists are empty: with anything in `missing` the verdict is "incomplete", and with anything in `unverified` it is "uncertain".
 
@@ -30,7 +32,7 @@ Acceptance checklist:
 Evidence:
 {{evidence}}
 
-Agent's final message (truncated):
+{{final_label}}:
 <<<
 {{final_message}}
 >>>

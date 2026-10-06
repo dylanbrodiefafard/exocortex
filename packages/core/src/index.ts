@@ -93,6 +93,7 @@ export {
 	verifyingRun,
 } from "./modules/runs.ts";
 export { commandBase, type ShellCommand, shellCommands, splitCommand, unwrapCommand } from "./modules/shell.ts";
+export { type StartAndEndOptions, startAndEnd } from "./modules/text.ts";
 export type {
 	Committable,
 	CompactionRequest,

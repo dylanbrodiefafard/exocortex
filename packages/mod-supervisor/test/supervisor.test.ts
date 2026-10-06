@@ -427,6 +427,52 @@ describe("supervisor research options (all off by default)", () => {
 		expect(await invented.onSettle?.(DONE, signal)).toMatchObject({ summary: "supervisor: uncertain" });
 	});
 
+	it("shows the judge a reply that is the work: its start, where the deliverable is, not only its end (D-089)", async () => {
+		const REVIEW = {
+			is_task: true,
+			follows_previous: false,
+			criteria: ["Numbered list of issues ordered by priority", "Severity labels", "A list of positives"],
+			check_commands: [],
+		};
+		const issues = Array.from(
+			{ length: 11 },
+			(_, i) => `${i + 1}. [minor] ${"The handler swallows the error it catches. ".repeat(7)}`,
+		);
+		const review = [
+			"## Issues (by priority)",
+			...issues,
+			"## Positives",
+			...Array.from({ length: 8 }, (_, i) => `- Positive ${i + 1}: ${"clear naming and small functions. ".repeat(5)}`),
+			"**Assumptions:** I did not run the tests, as asked.",
+		].join("\n");
+		expect(review.length).toBeGreaterThan(4_500);
+		const sup = createSupervisor({}, context({ ledger: REVIEW, verdicts: [COMPLETE] }));
+		sup.onUserTurn?.({
+			text: "Review the latest commit as a numbered, labelled list. Do not run tests.",
+			origin: "user",
+		});
+		await sup.onSettle?.({ outcome: "completed", lastAssistantText: review }, signal);
+		const prompt = String(requests.at(-1)?.messages[0]?.["content"]);
+		expect(prompt).toContain("Agent's final message (all of it):");
+		expect(prompt).toContain(review);
+		expect(prompt).toContain("the agent's final message below is that work");
+	});
+
+	it("marks the gap in a very long final message, and keeps both ends (D-089)", async () => {
+		const sup = createSupervisor({}, context({ ledger: LEDGER, verdicts: [COMPLETE] }));
+		sup.onUserTurn?.({ text: "Make app.py print v2.", origin: "user" });
+		editApp(sup);
+		const long = `## Issues first\n${"filler sentence. ".repeat(2_000)}\nShould I also update the README?`;
+		await sup.onSettle?.({ outcome: "completed", lastAssistantText: long }, signal);
+		const prompt = String(requests.at(-1)?.messages[0]?.["content"]);
+		expect(prompt).toContain("Agent's final message (long: its middle is not shown):");
+		expect(prompt).toContain("## Issues first");
+		expect(prompt).toContain("Should I also update the README?");
+		expect(prompt).toMatch(/… \(\d+ characters in the middle of the message are not shown\) …/);
+		expect(prompt).toContain("Never call an item missing because it would be in a part you were not given");
+		expect(prompt.length).toBeLessThan(long.length);
+	});
+
 	it("finalMessage=claims: the verdict sees unverified claims and the ending, not the narrative", async () => {
 		const sup = createSupervisor({ finalMessage: "claims" }, context({ ledger: LEDGER, verdicts: [COMPLETE] }));
 		sup.onUserTurn?.({ text: "Make app.py print v2.", origin: "user" });
@@ -435,6 +481,9 @@ describe("supervisor research options (all off by default)", () => {
 		await sup.onSettle?.({ outcome: "completed", lastAssistantText: long }, signal);
 		const prompt = String(requests.at(-1)?.messages[0]?.["content"]);
 		expect(prompt).toContain("- UNVERIFIED CLAIM: All tests pass.");
+		// The heading says the message itself is not there, in the holistic prompt too.
+		expect(prompt).toContain("(the text of the message is not shown):");
+		expect(prompt).not.toContain("Agent's final message (");
 		expect(prompt.split("I carefully restructured").length - 1).toBeLessThan(10);
 	});
 

@@ -42,6 +42,7 @@ export interface Evidence {
 }
 
 const RECENT_COMMANDS = 10;
+const COMMAND_CHARS = 200;
 const FAILED_OUTPUT_CHARS = 2_000;
 const CHECK_OUTPUT_CHARS = 4_000;
 /** Room kept for the "more lines not shown" note under a file's cut diff. */
@@ -105,9 +106,7 @@ function commandsSection(input: EvidenceInput, quotable: string[]): string {
 	// One line each: a command spanning lines could otherwise write a section of its own here.
 	const lines = commands.map(
 		(t) =>
-			`$ ${String(t.input["command"])
-				.replace(/\s*\n\s*/g, " ⏎ ")
-				.slice(0, 200)}  → exit ${t.exitCode ?? (t.isError ? "error" : "?")}`,
+			`$ ${clip(String(t.input["command"]).replace(/\s*\n\s*/g, " ⏎ "), COMMAND_CHARS)}  → exit ${t.exitCode ?? (t.isError ? "error" : "?")}`,
 	);
 	quotable.push(...lines);
 	// A failure the agent has since fixed would only mislead: show it only if that command never passed again.
@@ -223,6 +222,12 @@ export function touchedFiles(tools: readonly ToolOutcome[]): string[] {
 	return [...paths].slice(0, 30);
 }
 
+/** The start of a long command, ending in `…` where it was cut. */
+function clip(text: string, chars: number): string {
+	return text.length > chars ? `${text.slice(0, chars - 1)}…` : text;
+}
+
+/** The end of a long output, beginning with `…` where it was cut: the verdict prompts say what that means. */
 function tail(text: string, chars: number): string {
 	const trimmed = text.trimEnd();
 	return trimmed.length > chars ? `…${trimmed.slice(-chars)}` : trimmed;
