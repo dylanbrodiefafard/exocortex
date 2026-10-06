@@ -1,6 +1,6 @@
 import type { StoredTraceEvent, TraceEventKind } from "@exocortex/core";
 import { describe, expect, it } from "vitest";
-import { computeTraceMetrics, errorSignature } from "../src/metrics.ts";
+import { computeTraceMetrics, failureOf } from "../src/metrics.ts";
 
 let seq = 0;
 function event(kind: TraceEventKind, data: unknown, extra: Partial<StoredTraceEvent> = {}): StoredTraceEvent {
@@ -23,27 +23,23 @@ function toolError(text: string, exitCode = 1) {
 	return event("tool.result", { toolName: "bash", isError: true, exitCode, content: [{ type: "text", text }] });
 }
 
-describe("errorSignature", () => {
-	it("normalizes numbers, paths, quoted strings and hex", () => {
-		const a = errorSignature({
-			toolName: "bash",
-			exitCode: 1,
-			content: [{ type: "text", text: "running\nsrc/foo.py:12: error: 'x' at 0xdeadbeef" }],
-		});
-		const b = errorSignature({
-			toolName: "bash",
-			exitCode: 1,
-			content: [{ type: "text", text: "src/bar/baz.py:99: error: 'yy' at 0x1234" }],
-		});
-		expect(a).toBe(b);
-		expect(a).toBe("bash|1|<path>:<n>: error: <str> at <hex>");
+describe("failureOf", () => {
+	it("ignores line numbers and addresses, but not which file or name the error is about", () => {
+		const of = (text: string) => failureOf({ toolName: "bash", exitCode: 1, content: [{ type: "text", text }] });
+		expect(of("running\nsrc/foo.py:12: error: 'x' at 0xdeadbeef")).toBe(of("src/foo.py:99: error: 'x' at 0x1234"));
+		expect(of("src/foo.py:12: error: 'x'")).not.toBe(of("src/foo.py:12: error: 'yy'"));
+		expect(of("src/foo.py:12: error: 'x'")).not.toBe(of("src/bar.py:12: error: 'x'"));
 	});
 
-	it("distinguishes tools and exit codes", () => {
+	it("distinguishes tools, and knows a failure that printed nothing by its command", () => {
 		const content = [{ type: "text", text: "error: boom" }];
-		expect(errorSignature({ toolName: "bash", exitCode: 1, content })).not.toBe(
-			errorSignature({ toolName: "bash", exitCode: 2, content }),
-		);
+		expect(failureOf({ toolName: "bash", content })).not.toBe(failureOf({ toolName: "read", content }));
+		const commands = new Map([
+			["a", "./one.sh"],
+			["b", "./two.sh"],
+		]);
+		const silent = (toolCallId: string) => failureOf({ toolName: "bash", toolCallId, content: [] }, commands);
+		expect(silent("a")).not.toBe(silent("b"));
 	});
 });
 
@@ -64,7 +60,7 @@ describe("computeTraceMetrics", () => {
 			event("turn.end", { usage: { input: 100, cacheRead: 0, output: 10 } }),
 			event("llm.request", fp(["a", "b", "c", "d"])),
 			event("tool.call", {}),
-			toolError("FAILED test_x: AssertionError 3 != 4"),
+			toolError("FAILED test_x: AssertionError 1 != 2"),
 			event("turn.end", { usage: { input: 20, cacheRead: 80, output: 5 } }),
 			event("message", { role: "custom", customType: "exo.supervisor" }, { synthetic: true, module: "supervisor" }),
 			event("user.input", { text: "continue", source: "extension" }),
@@ -380,5 +376,48 @@ describe("computeTraceMetrics", () => {
 			prefixKeptRate: null,
 			maxPromptChars: 0,
 		});
+	});
+});
+
+describe("repeated errors (D-073)", () => {
+	const call = (toolCallId: string, command: string) => event("tool.call", { toolCallId, input: { command } });
+	const result = (toolCallId: string, text: string, isError = true) =>
+		event("tool.result", {
+			toolName: "bash",
+			toolCallId,
+			isError,
+			exitCode: isError ? 101 : 0,
+			content: [{ type: "text", text }],
+		});
+	const failing = (names: string) =>
+		`${names
+			.split(" ")
+			.map((n) => `test ${n} ... FAILED`)
+			.join("\n")}\nerror: test failed, to rerun pass \`--lib\``;
+
+	it("does not count a run with fewer failing tests as the same error again", () => {
+		const metrics = computeTraceMetrics([
+			call("1", "cargo test"),
+			result("1", failing("a b c")),
+			call("2", "cargo test"),
+			result("2", failing("a b")),
+			call("3", "cargo test"),
+			result("3", failing("a")),
+		]);
+		expect(metrics.toolErrors).toBe(3);
+		expect(metrics.repeatedToolErrors).toBe(0);
+		expect(metrics.recurringErrors).toEqual([]);
+	});
+
+	it("follows a test run that failed behind a pipe", () => {
+		const metrics = computeTraceMetrics([
+			call("1", "cargo test 2>&1 | tail -5"),
+			result("1", failing("a"), false),
+			call("2", "cargo test 2>&1 | tail -5"),
+			result("2", failing("a"), false),
+			call("3", "cargo test 2>&1 | tail -5"),
+			result("3", "test result: ok. 3 passed", false),
+		]);
+		expect(metrics.recurringErrors).toEqual([{ occurrences: 2, hints: 0, after: "stopped", fixed: true }]);
 	});
 });

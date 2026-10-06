@@ -85,7 +85,7 @@ describe("triage", () => {
 		const rewrite = await fail(triage, second);
 		expect(rewrite?.text.startsWith(RUST_ERROR.replace("42:9", "57:3"))).toBe(true);
 		expect(rewrite?.text).toContain(
-			"[exo triage: this failed again with the same error (error[E0502]: cannot borrow `self.stack` as mutable); it is the 2nd time this task.",
+			"[exo triage: this failed again with the same errors as before (first: error[E0502]: cannot borrow `self.stack` as mutable); it is the 2nd time this task.",
 		);
 		expect(rewrite?.text).toContain(
 			"[exo triage hint: The borrow of `self.stack` outlives the push in lib.rs. Clone the value before mutating.]",
@@ -93,7 +93,7 @@ describe("triage", () => {
 		expect(rewrite?.note).toBe("repeat 2 + hint");
 		expect(prompts[0]).toContain("implement forth");
 		expect(prompts[0]).toContain("- cargo build → exit 101");
-		expect(prompts[0]).toContain("happened 2 times");
+		expect(prompts[0]).toContain("the same errors 2 times");
 		expect(triage.status?.()).toBe("triage (1 repeats, 1 hints)");
 	});
 
@@ -119,7 +119,7 @@ describe("triage", () => {
 		expect(texts[4]).toContain("this has now failed 5 times");
 		expect(texts[4]).toContain("stop retrying it");
 		expect(texts[5]).toContain(
-			"this has now failed 6 times with the same error (error[E0502]: cannot borrow `self.stack` as mutable). Stop repeating it. If you cannot find a different approach, stop and tell the user what you tried and what is blocking you.]",
+			"this has now failed 6 times with the same errors as before (first: error[E0502]: cannot borrow `self.stack` as mutable). Stop repeating it. If you cannot find a different approach, stop and tell the user what you tried and what is blocking you.]",
 		);
 	});
 
@@ -212,6 +212,84 @@ describe("triage", () => {
 		const { triage } = setup({ sidecar: false });
 		await fail(triage, draft(RUST_ERROR));
 		expect(await fail(triage, draft("error[E0308]: mismatched types"))).toBeUndefined();
+	});
+
+	it("does not call fewer failing tests, or a different message, a repeat (D-073)", async () => {
+		const { triage, t } = setup({}, () => ({ diagnosis: "x", next_action: "y" }));
+		const run = (failing: readonly string[], message = "left: 1") =>
+			draft(
+				[
+					...failing.map((name) => `test ${name} ... FAILED`),
+					`thread 'a' (4242) panicked at src/lib.rs:9:5:\n  ${message}`,
+					"error: test failed, to rerun pass `--lib`",
+				].join("\n"),
+				{ input: { command: "cargo test" } },
+			);
+		expect(await fail(triage, run(["a", "b", "c"]))).toBeUndefined();
+		// One test fixed: every run still ends in the same cargo line, but the failure moved.
+		expect(await fail(triage, run(["a", "b"]))).toBeUndefined();
+		expect(await fail(triage, run(["a"]))).toBeUndefined();
+		expect(t.requests).toEqual([]);
+		expect(triage.status?.()).toBe("triage");
+		// Back to a failure seen before (an edit was undone): that is a repeat.
+		const back = await fail(triage, run(["a", "b"]));
+		expect(back?.text).toContain("this failed again with the same errors as before");
+	});
+
+	it("ignores line numbers, run times and thread ids when comparing failures", async () => {
+		const { triage } = setup({ sidecar: false });
+		const run = (line: number, id: number, time: string) =>
+			draft(
+				`--- FAIL: TestSteps (${time}s)\nthread 'a' (${id}) panicked at src/lib.rs:${line}:5:\nFAIL\tpkg\t${time}s`,
+			);
+		await fail(triage, run(9, 100, "0.01"));
+		expect((await fail(triage, run(14, 2077, "0.32")))?.note).toBe("repeat 2");
+	});
+
+	it("names the edited files a failure outlived, and shows the sidecar the edits and the code", async () => {
+		writeFileSync(
+			join(dir, "calc.py"),
+			["def add(a, b):", "    return a - b", "", "def sub(a, b):", "    return a - b"].join("\n"),
+		);
+		const prompts: string[] = [];
+		const { triage } = setup({}, (prompt) => {
+			prompts.push(prompt);
+			return { diagnosis: "`add` subtracts in calc.py.", next_action: "Change line 2 of calc.py to add." };
+		});
+		const failure = draft(
+			'FAIL: test_add (tests.test_calc.CalcTest.test_add)\nTraceback (most recent call last):\n  File "/usr/lib/python3/unittest/case.py", line 58, in run\n  File "calc.py", line 2, in add\nAssertionError: -1 != 3',
+			{ input: { command: "python3 -m unittest" }, exitCode: 1 },
+		);
+		await fail(triage, failure);
+		triage.onToolResult?.({
+			toolName: "edit",
+			input: { path: "calc.py", edits: [{ oldText: "def sub(a, b):", newText: "def sub(a: int, b: int):" }] },
+			isError: false,
+			exitCode: null,
+			output: "ok",
+		});
+		const rewrite = await fail(triage, failure);
+		expect(rewrite?.text).toContain("The edits made since (calc.py) did not change it.");
+		expect(rewrite?.text).toContain("[exo triage hint: `add` subtracts in calc.py.");
+		expect(prompts[0]).toContain("calc.py\n- def sub(a, b):\n+ def sub(a: int, b: int):");
+		expect(prompts[0]).toContain("calc.py (line 2):\n     1 | def add(a, b):\n>    2 |     return a - b");
+		expect(prompts[0]).not.toContain("case.py (line");
+	});
+
+	it("counts a test run that failed behind a pipe, and says whose exit code was shown", async () => {
+		const piped = (output: string) =>
+			draft(output, { input: { command: "cargo test 2>&1 | tail -5" }, isError: false, exitCode: 0 });
+		const failing = "test parse ... FAILED\nerror: test failed, to rerun pass `--lib`";
+		const { triage } = setup({ sidecar: false });
+		expect(await fail(triage, piped("test result: ok. 4 passed"))).toBeUndefined();
+		expect(await fail(triage, piped(failing))).toBeUndefined();
+		const again = await fail(triage, piped(failing));
+		expect(again?.text).toContain("this failed again with the same errors as before (first: test parse ... FAILED)");
+		expect(again?.text).toContain("The exit code shown is the pipe's last command's, not this run's.");
+
+		const off = setup({ sidecar: false, maskedFailures: false }).triage;
+		await fail(off, piped(failing));
+		expect(await fail(off, piped(failing))).toBeUndefined();
 	});
 
 	it("skips benign exit codes (no grep match) and counts non-error failures with no error line", async () => {

@@ -76,9 +76,11 @@
 		},
 		"triage": {
 			"enabled": false,
+			// A failure repeats when it reports the same errors again; fewer failing tests is a new failure (D-073).
 			"sidecar": true, // a two-sentence hint when the same failure repeats (never on the first)
-			"maxHintsPerSignature": 2, // sidecar hints per repeated error; the second must differ from the first
-			"loopThreshold": 3, // repeats before the stronger "this approach is not working" warning
+			"maxHintsPerSignature": 2, // sidecar hints per repeated failure; the second must differ from the first
+			"loopThreshold": 3, // sightings before the stronger "this approach is not working" warning
+			"maskedFailures": true, // `cargo test 2>&1 | tail` exits 0: count it as failed when its output has an error line
 			"hintTimeoutMs": 8000,
 			"hypotheses": 0, // at the loop threshold, this many parallel sidecars propose causes from different angles
 			"benignCommands": ["grep", "egrep", "fgrep", "rg", "ag", "diff", "cmp", "test", "[", "which", "pgrep", "git diff"] // exit 1 = an answer

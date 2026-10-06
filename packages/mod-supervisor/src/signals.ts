@@ -1,4 +1,4 @@
-import { isTestPath, type ToolOutcome } from "@exocortex/core";
+import { isTestPath, type ToolOutcome, verifyingRun } from "@exocortex/core";
 
 /**
  * Deterministic warning signs for the verdict (research R1.2 #4–#7): things a same-model judge
@@ -138,12 +138,6 @@ export function narrowTestSignal(tools: readonly ToolOutcome[]): string | undefi
 	return isNarrowTest(command) ? `the last test run covered only a subset: ${command.trim().slice(0, 160)}` : undefined;
 }
 
-const TEST_RUNNER =
-	/^(python3? -m (pytest|unittest)|pytest|cargo test|go test|ctest|make( -\S+)* (test|tests|check)|npm (run )?test|npx (vitest|jest)|tox)(\s|$)/;
-const BUILD_RUNNER =
-	/^(cargo (build|check|clippy)|go (build|vet)|make( -\S+)*( all)?$|cmake --build|npm run build|npx tsc|tsc)(\s|$)?/;
-const RUN_PREFIX = /^((\w+=\S*|timeout\s+\d+[smh]?)\s+)+/;
-
 export interface TestRun {
 	readonly kind: "test" | "build";
 	/** Position in the task's tool calls. */
@@ -157,12 +151,10 @@ export interface TestRun {
 export function lastFullRun(tools: readonly ToolOutcome[]): TestRun | undefined {
 	const runs = tools.flatMap((tool, index) => {
 		const line = typeof tool.input["command"] === "string" ? tool.input["command"].trim() : "";
-		// The run is the last `&&` step (after any `cd`), up to its first pipe.
-		const [run = "", ...piped] = (line.split("&&").at(-1) ?? "").split("|").map((s) => s.trim());
-		const bare = run.replace(/\s*2>&1/g, "").replace(RUN_PREFIX, "");
-		const kind = TEST_RUNNER.test(bare) ? ("test" as const) : BUILD_RUNNER.test(bare) ? ("build" as const) : undefined;
-		const hidden = piped.length > 0 && !line.includes("pipefail");
-		return kind ? [{ kind, index, hidden, line: line.slice(0, 160), narrow: isNarrowTest(bare) }] : [];
+		const run = verifyingRun(line);
+		return run
+			? [{ kind: run.kind, index, hidden: run.hidden, line: line.slice(0, 160), narrow: isNarrowTest(run.bare) }]
+			: [];
 	});
 	// A run of some of the tests proves less than the last full one; narrowTestSignal reports those.
 	return runs.findLast((r) => r.kind === "test" && !r.narrow) ?? runs.findLast((r) => r.kind === "build");

@@ -2,11 +2,14 @@ import {
 	callKey,
 	cleanTerminalOutput,
 	type ExoModule,
-	errorSignature,
+	type FileEdit,
+	failureKey,
+	fileEdits,
 	firstErrorLine,
 	loadPrompt,
 	loopHistoryLength,
 	type ModuleContext,
+	maskedFailure,
 	SIDECAR_MAX_TOKENS,
 	type ToolResultDraft,
 	trailingLoop,
@@ -14,11 +17,12 @@ import {
 } from "@exocortex/core";
 import { Type } from "typebox";
 import { parseSettings, type TriageSettings } from "./settings.ts";
+import { errorSites, renderSites } from "./sites.ts";
 
 export const TRIAGE_ID = "triage";
 
-const DIAGNOSE_PROMPT = loadPrompt(new URL("../prompts/diagnose.v2.md", import.meta.url));
-const HYPOTHESIS_PROMPT = loadPrompt(new URL("../prompts/hypothesis.v1.md", import.meta.url));
+const DIAGNOSE_PROMPT = loadPrompt(new URL("../prompts/diagnose.v3.md", import.meta.url));
+const HYPOTHESIS_PROMPT = loadPrompt(new URL("../prompts/hypothesis.v2.md", import.meta.url));
 /** Diagnostic angles for parallel hypotheses (PlanSearch-style diversity, research R6.1). */
 const FRAMES = loadPrompt(new URL("../prompts/frames.v1.md", import.meta.url))
 	.text.split("\n")
@@ -38,21 +42,34 @@ const DiagnosisSchema = Type.Object({
 	next_action: Type.String({ maxLength: 400 }),
 });
 
-const GOAL_CHARS = 1_000;
+/** The request is where the expected behaviour is written down: a diagnosis reads most of it. */
+const GOAL_CHARS = 6_000;
 const RECENT_COMMANDS = 6;
+/** Edits kept per task, and what the sidecar is shown of the ones a failure outlived. */
+const MAX_EDITS = 40;
+const SHOWN_EDITS = 6;
+const EDIT_TEXT_CHARS = 500;
+const MAX_SITES = 4;
 const EXCERPT_CONTEXT_LINES = 12;
 const EXCERPT_TAIL_LINES = 8;
 const EXCERPT_CHARS = 4_000;
 const MAX_LINE_CHARS = 300;
 
 interface TaskState {
+	/** Times each failure was seen, by what it reported ({@link failureKey}). */
 	readonly counts: Map<string, number>;
-	/** Sidecar calls made for hints, per signature (the cap counts calls, shown or not). */
+	/** Sidecar calls made for hints, per failure (the cap counts calls, shown or not). */
 	readonly hintCalls: Map<string, number>;
-	/** Hints the agent was shown, per signature. */
+	/** Hints the agent was shown, per failure. */
 	readonly hints: Map<string, string[]>;
 	readonly recent: string[];
 	readonly hypothesized: Set<string>;
+	/** The task's latest file edits, each with its number in the task. */
+	readonly edits: { readonly seq: number; readonly edit: FileEdit }[];
+	/** Edits made in the task so far. */
+	edited: number;
+	/** How many edits had been made when each failure was first seen. */
+	readonly editedAtFirst: Map<string, number>;
 	/** Every tool call of the task with its result, oldest first, as far back as a loop can reach. */
 	readonly calls: { readonly key: string; readonly label: string }[];
 	/** Notices given for the loop the calls now end in: 0 none, 1 the warning, 2 the hand-over. */
@@ -61,9 +78,14 @@ interface TaskState {
 
 /**
  * Error triage (brief §6.3, gated as research R3.1 recommends): on a first failure only surface a
- * buried first error (deterministic); on a repeat of the same normalized failure append a
- * runtime notice and, optionally, a grounded two-sentence sidecar diagnosis; past the loop
- * threshold the notice becomes a stronger, still advisory, warning. Never blocks a tool call.
+ * buried first error (deterministic); on a repeat append a runtime notice and, optionally, a
+ * grounded two-sentence sidecar diagnosis; past the loop threshold the notice becomes a stronger,
+ * still advisory, warning. Never blocks a tool call.
+ *
+ * A repeat is a failure that reports the same errors as one seen earlier in the task (D-073):
+ * fewer failing tests or a different message is a new failure, however alike its first line. The
+ * diagnosis reads what the main model is too close to weigh: the request, the code the errors
+ * point at, and the edits the failure outlived.
  *
  * It also notices going round in circles without an error (D-069): the same call returning the
  * same result, or a short cycle of calls ending the same way each round. One notice when the loop
@@ -85,16 +107,24 @@ export function createTriage(raw: Readonly<Record<string, unknown>>, ctx: Module
 
 		onUserTurn(turn) {
 			if (turn.origin !== "user") return;
-			goal = turn.text.slice(0, GOAL_CHARS);
+			goal = startAndEnd(turn.text, GOAL_CHARS);
 			task = newTask();
 		},
 
 		onToolResult(tool) {
 			const command = commandOf(tool.input, tool.toolName);
-			task.recent.push(
-				`${command} → ${tool.isError || (tool.exitCode ?? 0) !== 0 ? `exit ${tool.exitCode ?? "error"}` : "ok"}`,
-			);
+			const outcome = isFailure(tool)
+				? `exit ${tool.exitCode ?? "error"}`
+				: isMasked(tool)
+					? "errors in the output (exit code hidden by a pipe)"
+					: "ok";
+			task.recent.push(`${command} → ${outcome}`);
 			if (task.recent.length > RECENT_COMMANDS) task.recent.shift();
+			for (const edit of fileEdits(tool, EDIT_TEXT_CHARS) ?? []) {
+				task.edited += 1;
+				task.edits.push({ seq: task.edited, edit });
+				if (task.edits.length > MAX_EDITS) task.edits.shift();
+			}
 			task.calls.push({ key: callKey(tool.toolName, tool.input, tool.output), label: command });
 			if (task.calls.length > loopHistoryLength(handOverAt)) task.calls.shift();
 			// The loop ended: a later one starts over with its first notice.
@@ -102,31 +132,36 @@ export function createTriage(raw: Readonly<Record<string, unknown>>, ctx: Module
 		},
 
 		async rewriteToolResult(draft, signal) {
-			if (!isFailure(draft) || isBenign(draft, settings)) return noProgress(draft);
-			const signature = errorSignature(draft.toolName, draft.exitCode, draft.output);
+			const masked = isMasked(draft);
+			if (!masked && (!isFailure(draft) || isBenign(draft, settings))) return noProgress(draft);
+			// Identity from the original output; position from what the model will see (maybe trimmed).
+			const signature = failureKey(draft);
 			const count = (task.counts.get(signature) ?? 0) + 1;
 			task.counts.set(signature, count);
-			// Signature from the original output; position from what the model will see (maybe trimmed).
 			const first = firstErrorLine(draft.output);
 			if (count === 1) {
-				const shown = firstErrorLine(draft.current);
-				if (!shown || shown.index < settings.buriedAfterLines) return undefined;
-				return {
-					text: `[exo triage: first error (line ${shown.index + 1} below): ${clip(shown.line)}]\n${draft.current}`,
-					note: "surfaced the first error",
-				};
+				task.editedAtFirst.set(signature, task.edited);
+				return surfaced(draft);
 			}
 			repeats += 1;
-			const notice = repeatNotice(count, first?.line, settings.loopThreshold, handOverAt);
-			const hypotheses =
-				count >= settings.loopThreshold ? await hypothesize(signature, count, draft, signal) : undefined;
+			const outlived = editsSince(signature);
+			const notice = repeatNotice({
+				count,
+				errorLine: first?.line,
+				edited: [...new Set(outlived.map((e) => e.path))],
+				masked,
+				loopThreshold: settings.loopThreshold,
+				handOverAt,
+			});
+			const evidence = evidenceFor(count, draft, outlived, masked);
+			const hypotheses = count >= settings.loopThreshold ? await hypothesize(signature, evidence, signal) : undefined;
 			if (hypotheses) {
 				return {
 					text: `${draft.current}\n${notice}\n${renderHypotheses(hypotheses)}`,
 					note: `repeat ${count} + ${hypotheses.length} hypotheses`,
 				};
 			}
-			const hint = await diagnose(signature, count, draft, signal);
+			const hint = await diagnose(signature, evidence, signal);
 			if (hint) hintsGiven += 1;
 			return {
 				text: `${draft.current}\n${notice}${hint ? `\n[exo triage hint: ${hint}]` : ""}`,
@@ -169,29 +204,56 @@ export function createTriage(raw: Readonly<Record<string, unknown>>, ctx: Module
 		};
 	}
 
-	function promptVars(count: number, draft: ToolResultDraft) {
+	/** A first failure whose first error is far down what the model will read: point at it. */
+	function surfaced(draft: ToolResultDraft) {
+		const shown = firstErrorLine(draft.current);
+		if (!shown || shown.index < settings.buriedAfterLines) return undefined;
 		return {
+			text: `[exo triage: first error (line ${shown.index + 1} below): ${clip(shown.line)}]\n${draft.current}`,
+			note: "surfaced the first error",
+		};
+	}
+
+	function isMasked(tool: Parameters<typeof maskedFailure>[0]): boolean {
+		return settings.maskedFailures && maskedFailure(tool);
+	}
+
+	/** The edits made since this failure was first seen: it outlived every one of them. */
+	function editsSince(signature: string): FileEdit[] {
+		const from = task.editedAtFirst.get(signature) ?? task.edited;
+		return task.edits.filter((e) => e.seq > from).map((e) => e.edit);
+	}
+
+	/** What a sidecar is given to read, and the text its answer is checked against. */
+	function evidenceFor(count: number, draft: ToolResultDraft, outlived: readonly FileEdit[], masked: boolean) {
+		const excerpt = errorExcerpt(draft.output);
+		const vars = {
 			count: String(count),
 			goal: goal || "(unknown)",
 			recent: task.recent.map((r) => `- ${r}`).join("\n") || "(none)",
 			command: commandOf(draft.input, draft.toolName),
-			exit_code: draft.exitCode === null ? "unknown" : String(draft.exitCode),
-			excerpt: errorExcerpt(draft.output),
+			exit_code: masked ? "hidden by a pipe" : draft.exitCode === null ? "unknown" : String(draft.exitCode),
+			excerpt,
+			edits: renderEdits(outlived),
+			code:
+				renderSites(errorSites(excerpt, ctx.cwd, MAX_SITES), ctx.cwd) ||
+				"(the output names no line in a file of this workspace)",
 		};
+		return { vars, text: `${draft.output}\n${goal}\n${task.recent.join("\n")}\n${vars.edits}\n${vars.code}` };
 	}
+
+	type Evidence = ReturnType<typeof evidenceFor>;
 
 	/**
 	 * Phase 6 (D-015): K isolated sidecars, each from a different angle, in parallel. Only distinct,
 	 * grounded hypotheses that name a check are kept, and only a list of 2+ is shown: no LLM picks a
 	 * winner (research R6.1).
 	 */
-	async function hypothesize(signature: string, count: number, draft: ToolResultDraft, signal: AbortSignal) {
+	async function hypothesize(signature: string, evidence: Evidence, signal: AbortSignal) {
 		const pool = ctx.pool();
 		if (settings.hypotheses === 0 || !pool || task.hypothesized.has(signature)) return undefined;
 		task.hypothesized.add(signature);
 		ctx.progress("Considering other causes of the repeated failure…");
-		const vars = promptVars(count, draft);
-		const evidence = `${draft.output}\n${goal}\n${task.recent.join("\n")}`;
 		const results = await Promise.all(
 			FRAMES.slice(0, settings.hypotheses).map((frame) =>
 				pool.run({
@@ -202,7 +264,7 @@ export function createTriage(raw: Readonly<Record<string, unknown>>, ctx: Module
 					schema: HypothesisSchema,
 					schemaName: "hypothesis",
 					request: {
-						messages: [{ role: "user", content: HYPOTHESIS_PROMPT.render({ ...vars, frame }) }],
+						messages: [{ role: "user", content: HYPOTHESIS_PROMPT.render({ ...evidence.vars, frame }) }],
 						maxTokens: SIDECAR_MAX_TOKENS,
 						temperature: HYPOTHESIS_TEMPERATURE,
 						thinking: settings.thinking,
@@ -216,14 +278,14 @@ export function createTriage(raw: Readonly<Record<string, unknown>>, ctx: Module
 				: [],
 		);
 		const grounded = candidates.filter(
-			(c) => ungroundedReferences(`${c.hypothesis} ${c.check}`, evidence, ctx.cwd).length === 0,
+			(c) => ungroundedReferences(`${c.hypothesis} ${c.check}`, evidence.text, ctx.cwd).length === 0,
 		);
 		const distinct = dedupe(grounded);
 		ctx.log(`hypotheses: ${candidates.length} answered, ${grounded.length} grounded, ${distinct.length} distinct`);
 		return distinct.length >= 2 ? distinct : undefined;
 	}
 
-	async function diagnose(signature: string, count: number, draft: ToolResultDraft, signal: AbortSignal) {
+	async function diagnose(signature: string, evidence: Evidence, signal: AbortSignal) {
 		const calls = task.hintCalls.get(signature) ?? 0;
 		const pool = ctx.pool();
 		if (!settings.sidecar || !pool || calls >= settings.maxHintsPerSignature) return undefined;
@@ -242,7 +304,7 @@ export function createTriage(raw: Readonly<Record<string, unknown>>, ctx: Module
 					{
 						role: "user",
 						content: DIAGNOSE_PROMPT.render({
-							...promptVars(count, draft),
+							...evidence.vars,
 							previous: earlier.map((h) => `- ${h}`).join("\n") || "(none)",
 						}),
 					},
@@ -260,7 +322,7 @@ export function createTriage(raw: Readonly<Record<string, unknown>>, ctx: Module
 			.filter(Boolean)
 			.join(" ");
 		if (hint === "") return undefined;
-		const ungrounded = ungroundedReferences(hint, `${draft.output}\n${goal}\n${task.recent.join("\n")}`, ctx.cwd);
+		const ungrounded = ungroundedReferences(hint, evidence.text, ctx.cwd);
 		if (ungrounded.length > 0) {
 			ctx.log(`dropped a hint naming unknown ${ungrounded.join(", ")}`);
 			return undefined;
@@ -321,13 +383,28 @@ function newTask(): TaskState {
 		hints: new Map(),
 		recent: [],
 		hypothesized: new Set(),
+		edits: [],
+		edited: 0,
+		editedAtFirst: new Map(),
 		calls: [],
 		loopLevel: 0,
 	};
 }
 
-function isFailure(draft: ToolResultDraft): boolean {
-	return draft.isError || (draft.exitCode !== null && draft.exitCode !== 0);
+function isFailure(tool: Pick<ToolResultDraft, "isError" | "exitCode">): boolean {
+	return tool.isError || (tool.exitCode !== null && tool.exitCode !== 0);
+}
+
+/** The newest edits a failure outlived, as before/after text per file. */
+function renderEdits(edits: readonly FileEdit[]): string {
+	if (edits.length === 0) return "(none made with the edit tools)";
+	const shown = edits.slice(-SHOWN_EDITS).map((e) => `${e.path}\n- ${indent(e.before)}\n+ ${indent(e.after)}`);
+	const earlier = edits.length - shown.length;
+	return [...(earlier > 0 ? [`(${earlier} earlier edit(s) not shown)`] : []), ...shown].join("\n\n");
+}
+
+function indent(text: string): string {
+	return text.split("\n").join("\n  ");
 }
 
 /** `grep` finding nothing (exit 1) is an answer, not a failure. Looks at the last `&&`/`;` step. */
@@ -356,17 +433,35 @@ function commandOf(input: ToolResultDraft["input"], toolName: string): string {
 
 /**
  * Describes the repeat at runtime instead of echoing the failed call back (research R3.3), and
- * escalates at the loop threshold (R3.4).
+ * escalates at the loop threshold (R3.4). It says what is known: the errors are the ones reported
+ * before, and which edited files they outlived.
  */
-function repeatNotice(count: number, errorLine: string | undefined, loopThreshold: number, handOverAt: number): string {
-	const same = errorLine ? ` with the same error (${clip(errorLine)})` : " the same way";
-	if (count >= handOverAt) {
-		return `[exo triage: this has now failed ${count} times${same}. ${HAND_OVER}]`;
+function repeatNotice(repeat: {
+	readonly count: number;
+	readonly errorLine: string | undefined;
+	/** Files edited since the failure was first seen. */
+	readonly edited: readonly string[];
+	readonly masked: boolean;
+	readonly loopThreshold: number;
+	readonly handOverAt: number;
+}): string {
+	const { count, errorLine } = repeat;
+	const same = errorLine ? ` with the same errors as before (first: ${clip(errorLine)})` : " the same way as before";
+	const pipe = repeat.masked ? " The exit code shown is the pipe's last command's, not this run's." : "";
+	const edits =
+		repeat.edited.length > 0
+			? ` The edits made since (${repeat.edited
+					.slice(0, 4)
+					.map((p) => clip(p, 80))
+					.join(", ")}${repeat.edited.length > 4 ? ", …" : ""}) did not change it.`
+			: "";
+	if (count >= repeat.handOverAt) {
+		return `[exo triage: this has now failed ${count} times${same}.${pipe}${edits} ${HAND_OVER}]`;
 	}
-	if (count >= loopThreshold) {
-		return `[exo triage: this has now failed ${count} times${same}. The current approach is not working: stop retrying it, re-read the code around the error and question the assumption behind the last changes before the next attempt.]`;
+	if (count >= repeat.loopThreshold) {
+		return `[exo triage: this has now failed ${count} times${same}.${pipe}${edits} The current approach is not working: stop retrying it, re-read the code around the error and question the assumption behind the last changes before the next attempt.]`;
 	}
-	return `[exo triage: this failed again${same}; it is the ${ordinal(count)} time this task. Repeating the same fix is unlikely to help: change something first.]`;
+	return `[exo triage: this failed again${same}; it is the ${ordinal(count)} time this task.${pipe}${edits} Repeating the same fix is unlikely to help: change something first.]`;
 }
 
 /** What a loop that survived its first warning is told: the agent cannot be stopped (D-010), so it is asked to stop. */
@@ -402,6 +497,13 @@ export function errorExcerpt(output: string): string {
 		previous = i;
 	}
 	return out.join("\n").slice(0, EXCERPT_CHARS);
+}
+
+/** A long request keeps its start and its end: the task is stated first, the constraints often last. */
+function startAndEnd(text: string, max: number): string {
+	if (text.length <= max) return text;
+	const head = Math.floor((max * 2) / 3);
+	return `${text.slice(0, head)}\n[…]\n${text.slice(text.length - (max - head))}`;
 }
 
 function ordinal(n: number): string {

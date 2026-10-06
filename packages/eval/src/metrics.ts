@@ -1,7 +1,8 @@
 import {
 	type ChatRequestFingerprint,
 	callKey,
-	errorSignature as coreErrorSignature,
+	failureKey,
+	maskedFailure,
 	type SidecarCallRecord,
 	type StoredTraceEvent,
 	sharedPrefix,
@@ -23,7 +24,7 @@ export interface TraceMetrics {
 	readonly maxPromptChars: number;
 	readonly toolCalls: number;
 	readonly toolErrors: number;
-	/** Tool errors whose normalized signature already occurred earlier in the run. */
+	/** Tool errors that reported the same errors as an earlier one in the run (D-073). */
 	readonly repeatedToolErrors: number;
 	/** Messages Exocortex injected (synthetic). */
 	readonly injections: number;
@@ -68,7 +69,7 @@ export interface TraceMetrics {
 	 */
 	readonly stuckLoops?: number;
 	readonly stuckLoopCalls?: number;
-	/** One entry per error signature that occurred 2+ times: how the repeats and triage's hints went (D-057). */
+	/** One entry per failure seen 2+ times: how the repeats and triage's hints went (D-057, D-073). */
 	readonly recurringErrors?: readonly RecurringError[];
 	/** Sidecar prompt + completion tokens by module (D-058). */
 	readonly sidecarTokensByModule?: Readonly<Record<string, number>>;
@@ -125,12 +126,13 @@ export function computeTraceMetrics(
 
 	const toolResults = events.filter((e) => e.kind === "tool.result").map((e) => record(e.data));
 	const errors = toolResults.filter((r) => r["isError"] === true);
+	const commands = commandsByCall(events);
 	const seen = new Set<string>();
 	let repeatedToolErrors = 0;
 	for (const error of errors) {
-		const signature = errorSignature(error);
-		if (seen.has(signature)) repeatedToolErrors += 1;
-		seen.add(signature);
+		const failure = failureOf(error, commands);
+		if (seen.has(failure)) repeatedToolErrors += 1;
+		seen.add(failure);
 	}
 
 	const promptTokens = inputTokens + cachedTokens;
@@ -287,30 +289,31 @@ function tokensByModule(calls: readonly SidecarCallRecord[]): Record<string, num
 const HINT_NOTE = /\+ hint$/;
 
 /**
- * Follows each error signature through the run (D-057). A failure is what triage calls one: an
- * error result or a non-zero exit. Hints are read from triage's `exo.rewrite` notes, joined to
- * the failing result by tool call id.
+ * Follows each failure through the run (D-057). A failure is what triage calls one: an error
+ * result, a non-zero exit, or a test or build run that failed behind a pipe. It is the same
+ * failure again only when it reports the same errors (D-073): a run with fewer failing tests is
+ * another one. Hints are read from triage's `exo.rewrite` notes, joined to the failing result by
+ * tool call id.
  */
 function recurringErrors(events: readonly StoredTraceEvent[]): RecurringError[] {
-	const commands = new Map<string, string>();
+	const commands = commandsByCall(events);
 	const hinted = new Set<string>();
 	for (const e of events) {
 		const data = record(e.data);
-		if (e.kind === "tool.call")
-			commands.set(String(data["toolCallId"]), String(record(data["input"])["command"] ?? ""));
 		if (e.kind === "exo.rewrite" && e.module === "triage" && HINT_NOTE.test(String(data["note"])))
 			hinted.add(String(data["toolCallId"]));
 	}
 	const results = events.filter((e) => e.kind === "tool.result").map((e) => record(e.data));
-	const bySignature = new Map<string, number[]>();
-	results.forEach((result, index) => {
-		if (!failed(result)) return;
-		const signature = errorSignature(result);
-		bySignature.set(signature, [...(bySignature.get(signature) ?? []), index]);
-	});
 	const commandOf = (index: number) => commands.get(String(results[index]?.["toolCallId"])) ?? "";
+	const failedAt = (index: number) => failed(results[index] ?? {}, commandOf(index));
+	const byFailure = new Map<string, number[]>();
+	results.forEach((result, index) => {
+		if (!failedAt(index)) return;
+		const failure = failureOf(result, commands);
+		byFailure.set(failure, [...(byFailure.get(failure) ?? []), index]);
+	});
 	const out: RecurringError[] = [];
-	for (const indexes of bySignature.values()) {
+	for (const indexes of byFailure.values()) {
 		if (indexes.length < 2) continue;
 		const last = indexes.at(-1) ?? 0;
 		const hintIndexes = indexes.filter((i) => hinted.has(String(results[i]?.["toolCallId"])));
@@ -321,15 +324,28 @@ function recurringErrors(events: readonly StoredTraceEvent[]): RecurringError[] 
 			occurrences: indexes.length,
 			hints: hintIndexes.length,
 			after: last > pivot ? "recurred" : pivot === results.length - 1 ? "ended" : "stopped",
-			fixed: command !== "" && results.some((r, i) => i > last && !failed(r) && commandOf(i) === command),
+			fixed: command !== "" && results.some((_, i) => i > last && !failedAt(i) && commandOf(i) === command),
 		});
 	}
 	return out;
 }
 
-function failed(toolResult: Readonly<Record<string, unknown>>): boolean {
-	const exitCode = toolResult["exitCode"];
-	return toolResult["isError"] === true || (typeof exitCode === "number" && exitCode !== 0);
+/** The shell command of each tool call, by call id ("" for other tools). */
+function commandsByCall(events: readonly StoredTraceEvent[]): Map<string, string> {
+	const commands = new Map<string, string>();
+	for (const e of events) {
+		if (e.kind !== "tool.call") continue;
+		const data = record(e.data);
+		commands.set(String(data["toolCallId"]), String(record(data["input"])["command"] ?? ""));
+	}
+	return commands;
+}
+
+function failed(toolResult: Readonly<Record<string, unknown>>, command = ""): boolean {
+	const exitCode = typeof toolResult["exitCode"] === "number" ? toolResult["exitCode"] : null;
+	const isError = toolResult["isError"] === true;
+	if (isError || (exitCode !== null && exitCode !== 0)) return true;
+	return maskedFailure({ input: { command }, isError, exitCode, output: contentText(toolResult["content"]) });
 }
 
 const EDIT_TOOL = /^(edit|write|multi_?edit|apply_?patch)$/i;
@@ -380,10 +396,16 @@ function countVerdicts(events: readonly StoredTraceEvent[]): TraceMetrics["verdi
 	return counts;
 }
 
-/** The trace form of core's {@link coreErrorSignature}: one signature per tool.result event. */
-export function errorSignature(toolResult: Readonly<Record<string, unknown>>): string {
-	const exitCode = typeof toolResult["exitCode"] === "number" ? toolResult["exitCode"] : null;
-	return coreErrorSignature(String(toolResult["toolName"]), exitCode, contentText(toolResult["content"]));
+/** The trace form of core's {@link failureKey}: what a failing tool.result event reported. */
+export function failureOf(
+	toolResult: Readonly<Record<string, unknown>>,
+	commands: ReadonlyMap<string, string> = new Map(),
+): string {
+	return failureKey({
+		toolName: String(toolResult["toolName"]),
+		input: { command: commands.get(String(toolResult["toolCallId"])) ?? "" },
+		output: contentText(toolResult["content"]),
+	});
 }
 
 function contentText(content: unknown): string {

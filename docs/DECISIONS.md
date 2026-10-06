@@ -1117,6 +1117,53 @@ Open check: Exocortex's injected `custom_message` reaches ninfer as a second con
 
 ---
 
+### D-073 — Triage: a repeat is the same errors again, not the same kind of error; the hint reads the code and the edits · accepted (2026-10-05; owner's request: patch the weakest module before the A/B runs; amends D-043, D-057 and D-061)
+- **Why triage again.** Every module has had one pass against other projects' code. D-069 gave triage its loops; the repeated-error path, which is what AB_PLAN step 3 measures, was still D-043's. D-072 found that an error signature names the kind of error, not the problem, and fixed that for memory. Triage counted on the same signature, and so did the eval's primary metric for it.
+- **What others do.** Read at the commits named. None counts a failure as a repeat because its first line is alike.
+  - **Same call, same result.** OpenHands (D-069). Gemini CLI (`fb972b2`, `packages/core/src/services/loopDetectionService.ts`) tells its progress judge: "If the assistant is modifying different code or getting different errors, that is debugging progress, not a loop", and that re-running a build or test after changing code "is normal workflow".
+  - **Counts that a success clears.** Roo Code (`b867ec9`, `src/core/tools/ApplyDiffTool.ts`, `EditFileTool.ts`): failed edits are counted per file and the count is deleted when an edit to that file succeeds.
+  - **Feedback that carries the code.** Aider (`5dc9490`, `aider/linter.py`): `find_filenames_and_linenums` finds `file:line` in the output and `tree_context` appends that code under "See relevant line below marked with █". Its test loop sends the output back at most 3 times per request (`max_reflections`, `aider/coders/base_coder.py`), whatever the output says.
+  - **Generic advice.** Trae Agent (`e839e55`, `trae_agent/agent/base_agent.py`, `reflect_on_result`): "Consider trying a different approach or fixing the parameters" after any failed tool. `TraeAgent` overrides it to return nothing.
+- **What was weak here, measured on the fixtures.** Each hard task's check was run while its reference patch was applied one hunk at a time: a stand-in for an agent that tests between edits. 108 runs fail.
+  - **Progress was counted as repetition.** Triage would have called 64 of them repeats. In 26 of those the output reported different errors from every earlier run: fewer failing tests, fewer compile errors, another message. `h-rust-borrow-refactor` goes 23, 21, 15, 13, 11, 8, 4 error lines and then passes; triage would have said "the current approach is not working: stop retrying it" at 13 and "stop and tell the user what is blocking you" at 4, one edit before the pass. Across the tasks: 38 loop warnings in 16 tasks, and 5 hand-over requests.
+  - **The eval counted the same way,** so the `all-off` row's repeated-error rate would have been mostly agents making progress, and triage's row could only "improve" it by making them stop.
+  - **A failed edit to one file repeated a failed edit to another**: the signature turns every path into `<path>`.
+  - **The diagnosis read less than the agent had.** 1,000 characters of the request, six command labels and an excerpt of the output. It saw neither the code the error points at nor what the agent had changed, and it is the same model as the agent (R3.1).
+  - **A piped run was invisible.** `cargo test 2>&1 | tail -30` exits 0, so triage did nothing (D-072 noted the same for memory).
+- **Decision.**
+  1. **A failure is what it reports** (OpenHands' and Gemini's rule, applied to the errors instead of the whole output). Core's `failureLines` takes the output's error lines (toolchain-specific ones when there are any, at most 400), removes what moves when nothing was fixed (line and column numbers, durations, dates, addresses, Rust's thread ids) and sorts them. Names, values and duplicates stay. `failureKey` hashes them with the tool name. An output with no error line is known by its last 40 lines, and one that printed nothing by its call.
+  2. **A repeat is a failure whose key was seen earlier in the task.** Fewer or other errors is a new failure: no notice, no sidecar call. Going back to a failure seen before (an edit undone) is a repeat. Counts, hint caps and hypotheses are per key. Nothing else in D-043's ladder changes: notice at 2, warning at `loopThreshold`, hand-over at twice that.
+  3. **The notice says what is known**: "this failed again with the same errors as before (first: …)", and, when files were edited since the failure was first seen, "The edits made since (a.rs, b.rs) did not change it."
+  4. **The diagnosis is shown the code and the edits** (aider's report; D-071's reasoning for the judge). `diagnose.v3` and `hypothesis.v2` add:
+     - the code at up to 4 places the excerpt points at, 5 lines either side, the named line marked. `file:line` and Python's `File "…", line N` are read; a place outside the workspace is skipped. 23 of the 27 fixtures' first failures give at least one;
+     - the last 6 edits made since the failure was first seen, as before and after text (500 characters each), with the rule that a cause they would have fixed is ruled out. `fileEdits` moves from memory to core for this;
+     - 6,000 characters of the request, start and end kept (was the first 1,000).
+     The guidance gate checks a hint against all of it. The prompt is at most about 25,000 characters. The call holds the agent's tool result, so the main model is not decoding while it prefills (D-068's reason for leaving sidecar input limits alone does not apply; the 8 s deadline is unchanged).
+  5. **A test or build run that failed behind a pipe is a failure** (`maskedFailures`, default on). Core's `maskedFailure`: the command ends in a run of the tests or the build (the supervisor's classifier, moved to core as `verifyingRun`), is piped without `pipefail`, exits 0, and what was let through has a toolchain-specific error line. A line that only mentions an error is not enough. The notice adds "The exit code shown is the pipe's last command's, not this run's."
+  6. **The eval uses the same definitions** (D-069's rule). `repeatedToolErrors` and the "Repeated errors" section follow `failureKey`, and the section counts masked failures.
+- **Result on the same replay.** 38 repeats (was 64), 17 loop warnings in 10 tasks (was 38 in 16), no hand-over request (was 5). The 38 are steps where the hunk applied did not touch what fails: an agent that edits, runs the tests and reads the same errors.
+- **How this sits with earlier entries.**
+  - **D-043 "counting":** counts still reset on a new user request and not on a continuation. A pass in between still does not reset them (D-061).
+  - **D-057:** the report's hint tables are unchanged in shape. Hint 1 still comes at the 2nd sighting and hint 2 at the 3rd, but of the same errors.
+  - **D-069:** a loop that ends in a failing call repeats its errors, so it still gets these notices.
+  - **D-072:** memory keeps its own rule (signature plus the names in the first error lines). It asks "is this card's problem in the failure", which stays true while other tests are fixed; triage asks "did anything move".
+  - **D-052:** triage is off by default and nothing has been A/B'd, so no result changes meaning. `maskedFailures: false` turns item 5 off; the rest has no switch.
+- **Open risks.**
+  - Untested with a real model. The replay follows a reference patch; an agent takes other routes.
+  - **An agent that changes the failure on every attempt without getting nearer is never told.** That is D-069's "a build that fails differently each time is usually progress", now applied here too. `maxRepeatedFailures` (failures per command) in the report still shows such runs.
+  - **A value that differs run to run and is not a time or an address** (a random seed, a temp path, hash-map order in a message) makes every failure new. D-069 has the same hole.
+  - **Only error lines are compared.** Rust prints `left:`/`right:` on lines the grammar does not call errors, so an assertion that fails with another value in the same test reads as the same failure.
+  - **A masked failure rests on one error line.** A passing piped run that prints `ERROR: …` from a log is taken for a failure; a second identical one gets a notice that says it failed. The notice says whose exit code was shown.
+  - **Edits made from the shell** are not seen (as in D-072), so the notice and the prompt can say less than what was changed. The notice then says nothing about edits; the prompt says none were made with the edit tools.
+  - The code shown is the file as it is when the hint is written. A harness that runs tool calls in parallel could land an edit between the run and its result.
+- **Not done.**
+  - **Masked failures in memory and compaction.** Memory opens no episode for a piped run (D-072's open risk), and compaction lists one under "Commands that last succeeded (no need to re-run)". Both can use `maskedFailure`; memory's admission rule needs a decision about a piped pass first.
+  - **Saying that a failure got smaller** ("2 of 5 failing tests fixed"). The agent reads that in the output.
+  - **A model judging progress** (Gemini's periodic check): as D-069 left it.
+  - **Parsing each test runner's summary** to compare failing tests by name. The error lines carry the names for the D-016 toolchains.
+
+---
+
 ## Open questions (carried from brief §10, updated)
 
 1. ~~Resolved by D-029.~~ Exact pi mechanism for injecting into the current user turn without altering prior messages. *(Phase 0)*

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { cleanTerminalOutput } from "./output.ts";
+import { classifyErrorLine, cleanTerminalOutput } from "./output.ts";
+import type { ToolOutcome } from "./types.ts";
 
 /**
  * Deterministic detection of an agent going round in circles (D-069): the same tool call with the
@@ -28,6 +29,49 @@ export function callKey(toolName: string, input: unknown, output: string): strin
 	for (const [pattern, placeholder] of VOLATILE) result = result.replace(pattern, placeholder);
 	return createHash("sha256")
 		.update(`${toolName}\n${canonical(input)}\n${result.trim()}`)
+		.digest("hex")
+		.slice(0, 32);
+}
+
+/** Error lines read for a failure's identity: a longer failure is known by its first ones. */
+const MAX_FAILURE_LINES = 400;
+/** Without a recognizable error line, the end of the output stands for the failure. */
+const FALLBACK_LINES = 40;
+/** What moves when a file is edited above the error, or between two runs of the same thing. */
+const POSITIONS: readonly [RegExp, string][] = [
+	[/(?<=[A-Za-z_)\]]):\d+(:\d+)?\b/g, ":<n>"],
+	[/\bline \d+\b/g, "line <n>"],
+	[/^(thread '.*') \(\d+\)/, "$1"],
+];
+
+/**
+ * The errors a failing output reports (D-073): its error lines, sorted, without what changes when
+ * nothing was fixed (line and column numbers, durations, addresses, thread ids). Names and values
+ * stay, and so do duplicates: one failing test fewer, a different message or one of two identical
+ * errors gone is a different list. Toolchain-specific error lines are used when there are any.
+ */
+export function failureLines(output: string): string[] {
+	const lines = cleanTerminalOutput(output).split("\n");
+	const kinds = lines.map((line) => classifyErrorLine(line) ?? classifyErrorLine(line.trim()));
+	const wanted = kinds.includes("specific") ? "specific" : kinds.includes("generic") ? "generic" : undefined;
+	const errors = wanted
+		? lines.filter((_, index) => kinds[index] === wanted).slice(0, MAX_FAILURE_LINES)
+		: lines.filter((line) => line.trim() !== "").slice(-FALLBACK_LINES);
+	return errors
+		.map((line) => [...POSITIONS, ...VOLATILE].reduce((text, [pattern, to]) => text.replace(pattern, to), line.trim()))
+		.sort();
+}
+
+/**
+ * Identifies what a failing call reported, whatever was run to get it. Two failures share a key
+ * only when they report the same errors ({@link failureLines}), so a repeat means the changes
+ * made in between did not move the failure, and a failure with fewer or other errors is a new
+ * one. A failure that printed nothing is known by its call.
+ */
+export function failureKey(tool: Pick<ToolOutcome, "toolName" | "input" | "output">): string {
+	const lines = failureLines(tool.output);
+	return createHash("sha256")
+		.update(`${tool.toolName}\n${lines.length > 0 ? lines.join("\n") : canonical(tool.input)}`)
 		.digest("hex")
 		.slice(0, 32);
 }

@@ -64,6 +64,8 @@ npm run eval -- --model ninfer/coding --tags error-recovery --config all-off,tri
   - **Watch for re-reads:** the report's "Trimmed outputs" section counts saved outputs the agent read back (D-061). A high share means something needed was trimmed.
 - **Triage:**
   - **Primary:** repeated-error rate.
+  - **What counts as a repeat (D-073):** a failure that reports the same errors as an earlier one in the run, in triage and in the report alike. A run with fewer failing tests or another message is a new failure, so expect far fewer repeats than a count by first error line would give, in the `all-off` row too. If `all-off` shows almost none, the slice does not exercise triage: say so instead of reading the Δ.
+  - **Piped test runs count (D-073):** `cargo test 2>&1 | tail` that shows a failing test is a failure for triage and for the "Repeated errors" section, though not for the `repeated err` column, which follows tool errors.
   - Self-Debug's gain came almost entirely from the first feedback turn (verified). Read the report's "Repeated errors" section (D-057): cap hints at 1 unless *stopped after hint 2* is a real share of *got hint 2* and beats `all-off`'s *gone after the 3rd time*.
   - **Secondary:** success, and turns from first failure to success.
   - **Loops without an error (D-069):** read the report's "Stuck loops" section. *Calls made inside a loop*, per loop, should fall against `all-off`. If loops are common in `all-off` and triage does not shorten them, the notice is not enough and stopping the run from the host is the next step. If no run loops, the tasks do not exercise this.

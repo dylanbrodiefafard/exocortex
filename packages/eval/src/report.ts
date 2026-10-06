@@ -194,7 +194,7 @@ function recurringSection(records: readonly RunRecord[], configs: readonly strin
 			)} |`;
 		}),
 		"",
-		"One row per config, counting each normalized error signature once per run. Triage shows its first hint on the 2nd occurrence and its second on the 3rd, so *gone after the 2nd time* is where hint 1 can act and *gone after the 3rd time* where hint 2 can. Compare each against the baseline row: that is how often the agent gets past the error unaided. An error also counts as gone when the run ended.",
+		"One row per config, counting each failure once per run. A failure is the same one again only when it reports the same errors (line numbers and run times aside): a run with fewer failing tests, or another message, is a new failure and is not counted as a repeat. A test or build run that failed behind a pipe counts as a failure. Triage shows its first hint on the 2nd occurrence and its second on the 3rd, so *gone after the 2nd time* is where hint 1 can act and *gone after the 3rd time* where hint 2 can. Compare each against the baseline row: that is how often the agent gets past the error unaided. An error also counts as gone when the run ended.",
 	];
 	if (hinted.length === 0) return lines;
 	return [

@@ -398,7 +398,9 @@ describe("pi CLI with the Exocortex extension", { timeout: 30_000 }, () => {
 		expect(first).not.toContain("exo triage");
 		const [firstAgain, second] = toolMessages(2);
 		expect(firstAgain).toBe(first); // earlier results are never touched (prompt cache)
-		expect(second).toContain("[exo triage: this failed again with the same error (src/x.c:3:1: error: boom)");
+		expect(second).toContain(
+			"[exo triage: this failed again with the same errors as before (first: src/x.c:3:1: error: boom)",
+		);
 		const rewrites = readTrace(run.dbPath).events.filter((e) => e.kind === "exo.rewrite");
 		expect(rewrites.map((e) => e.module)).toEqual(["trimmer", "trimmer", "triage"]);
 		const original = readTrace(run.dbPath).events.find((e) => e.kind === "tool.result");
