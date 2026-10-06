@@ -20,7 +20,7 @@ A read-only audit of every package (2026-10-06) found the weak spots listed here
 
 | Stream | Branch | Decision | Wave | Status |
 |---|---|---|---|---|
-| A. Core: reading commands and output | `fix/core-run-reading` | D-077 | 1 | merged |
+| A. Core: reading commands and output | `fix/core-run-reading` | D-077 | 1 | merged (`588696a`) |
 | B. Adapter: hook dispatcher and lifecycle | `fix/adapter-dispatcher` | D-078 | 1 | merged (`b7ef097`) |
 | C. Eval: statistics and harness | `fix/eval-rigor` | D-079 | 1 | merged (`e7316f3`) |
 | D. Core: trace, inference, config, processes | `fix/core-infra` | D-080 | 1 | merged (`e5a056c`) |
