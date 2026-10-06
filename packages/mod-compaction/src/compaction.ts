@@ -4,6 +4,7 @@ import {
 	firstErrorLine,
 	loadPrompt,
 	type ModuleContext,
+	maskedFailure,
 	type ToolOutcome,
 	ungroundedReferences,
 } from "@exocortex/core";
@@ -34,6 +35,8 @@ export interface CommandRecord {
 	readonly command: string;
 	readonly ok: boolean;
 	readonly exitCode: number | null;
+	/** A test or build run that failed behind a pipe: the exit code was the pipe's last command's (D-074). */
+	readonly masked: boolean;
 	readonly firstError: string | null;
 	readonly runs: number;
 }
@@ -112,11 +115,13 @@ function commandRecord(tool: ToolOutcome, commands: ReadonlyMap<string, CommandR
 	const command = tool.input["command"];
 	if (tool.toolName !== "bash" || typeof command !== "string") return undefined;
 	const key = command.replace(/\s+/g, " ").trim().slice(0, 300);
-	const ok = !tool.isError && (tool.exitCode === null || tool.exitCode === 0);
+	const masked = maskedFailure(tool);
+	const ok = !masked && !tool.isError && (tool.exitCode === null || tool.exitCode === 0);
 	return {
 		command: key,
 		ok,
 		exitCode: tool.exitCode,
+		masked,
 		firstError: ok ? null : (firstErrorLine(tool.output)?.line.slice(0, 300) ?? null),
 		runs: (commands.get(key)?.runs ?? 0) + 1,
 	};
@@ -280,7 +285,8 @@ export function renderSummary(facts: Facts, summary: string | undefined, setting
 			"## Commands whose last run failed",
 			list(
 				failing.map(
-					(c) => `\`${c.command}\` → exit ${c.exitCode ?? "error"}${c.firstError ? `: ${c.firstError}` : ""}`,
+					(c) =>
+						`\`${c.command}\` → ${c.masked ? "errors in the output (exit code hidden by the pipe)" : `exit ${c.exitCode ?? "error"}`}${c.firstError ? `: ${c.firstError}` : ""}`,
 				),
 			),
 		);

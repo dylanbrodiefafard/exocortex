@@ -75,6 +75,8 @@ describe("compaction", () => {
 		const bash = (command: string, exitCode: number, output = "") =>
 			module.onToolResult?.({ toolName: "bash", input: { command }, isError: exitCode !== 0, exitCode, output });
 		bash("cargo test", 101, "running\nerror[E0502]: cannot borrow `self.stack`");
+		bash("go test ./... 2>&1 | tail -5", 0, "--- FAIL: TestSteps (0.01s)\nFAIL\tpkg\t0.02s");
+		bash("go vet ./... | tail -5", 0, "");
 		bash("cargo fmt", 0);
 		bash("ls  -la", 0);
 		bash("cargo fmt", 0);
@@ -91,9 +93,12 @@ describe("compaction", () => {
 				"## Files read",
 				"- README.md",
 				"## Commands whose last run failed",
-				"- `cargo test` → exit 101: error[E0502]: cannot borrow `self.stack`",
+				[
+					"- `cargo test` → exit 101: error[E0502]: cannot borrow `self.stack`",
+					"- `go test ./... 2>&1 | tail -5` → errors in the output (exit code hidden by the pipe): --- FAIL: TestSteps (0.01s)",
+				].join("\n"),
 				"## Commands that last succeeded (no need to re-run unless something changed)",
-				"- `ls -la`\n- `cargo fmt`",
+				"- `go vet ./... | tail -5`\n- `ls -la`\n- `cargo fmt`",
 			].join("\n\n"),
 		);
 		expect(String(t.requests[0]?.messages[0]?.["content"])).toMatch(/^You are a context summarization agent\./);
@@ -114,7 +119,7 @@ describe("compaction", () => {
 					narrative: true,
 					updated: false,
 					userMessages: 2,
-					commands: 3,
+					commands: 5,
 				},
 			},
 		]);

@@ -1157,10 +1157,18 @@ Open check: Exocortex's injected `custom_message` reaches ninfer as a second con
   - **Edits made from the shell** are not seen (as in D-072), so the notice and the prompt can say less than what was changed. The notice then says nothing about edits; the prompt says none were made with the edit tools.
   - The code shown is the file as it is when the hint is written. A harness that runs tool calls in parallel could land an edit between the run and its result.
 - **Not done.**
-  - **Masked failures in memory and compaction.** Memory opens no episode for a piped run (D-072's open risk), and compaction lists one under "Commands that last succeeded (no need to re-run)". Both can use `maskedFailure`; memory's admission rule needs a decision about a piped pass first.
+  - **Masked failures in memory.** Memory opens no episode for a piped run (D-072's open risk). It can use `maskedFailure`, but its admission rule needs a decision about a piped pass first. Compaction is done in D-074.
   - **Saying that a failure got smaller** ("2 of 5 failing tests fixed"). The agent reads that in the output.
   - **A model judging progress** (Gemini's periodic check): as D-069 left it.
   - **Parsing each test runner's summary** to compare failing tests by name. The error lines carry the names for the D-016 toolchains.
+
+---
+
+### D-074 — Compaction: a test run that failed behind a pipe is not listed as succeeded · accepted (2026-10-05; owner's request; follows D-073, amends D-044's tracked facts)
+- **Problem:** the tracked facts put `cargo test 2>&1 | tail -30` under "Commands that last succeeded (no need to re-run unless something changed)" whenever it exited 0, which a piped run does even when its tests fail. After a compaction that line is all the agent has left of the run.
+- **Decision:** a command's last run counts as failed when core's `maskedFailure` (D-073, item 5) says so. It is listed under "Commands whose last run failed" as "errors in the output (exit code hidden by the pipe)", with its first error line.
+- **Not changed:** a piped run with no toolchain error line in what it let through is still listed as succeeded. `tail -5` of a failing run can show only a summary the grammar does not know; the exit code is all there is then.
+- **No switch.** Compaction is off by default and nothing has been A/B'd (D-052).
 
 ---
 
