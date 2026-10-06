@@ -28,7 +28,7 @@ A read-only audit of every package (2026-10-06) found the weak spots listed here
 | T. Triage | `fix/triage-identity` | D-082 | 2 | merged |
 | R. Trimmer | `fix/trimmer-selection` | D-083 | 2 | merged |
 | S. Supervisor | `fix/supervisor-evidence` | D-084 | 2 | in progress |
-| K. Compaction | `fix/compaction-facts` | D-085 | 2 | in progress |
+| K. Compaction | `fix/compaction-facts` | D-085 | 2 | merged |
 | E. Eval follow-up | `fix/eval-followup` | D-086 | 2 | in progress |
 
 ---
@@ -167,12 +167,12 @@ Files owned: `packages/mod-supervisor/`.
 
 Files owned: `packages/mod-compaction/`.
 
-- [ ] **K1. Facts do not survive a second compaction or a reload.** `compaction.ts:65-67, 86-92, 254-261`. *Fix:* return the facts in the compaction's `details.exo.facts` and seed from the previous entry's (B11); fall back to parsing the facts sections of `previousSummary`; track `read`/`edit`/`write` paths in `onToolResult`.
-- [ ] **K2. Command records are keyed by the raw string and go stale.** `compaction.ts:116-130`. `cargo test` failing then `cargo test -- --nocapture` passing leaves the failure listed. *Fix:* key verifying runs by kind and bare command (A1); stamp records with a sequence number, bump it on edits, and render a pass before later edits as such.
-- [ ] **K3. The failed list keeps the oldest 40 and counts benign exits.** `compaction.ts:284-295, 306-310`. *Fix:* slice from the end; use A12's benign rule; list verifying runs plus the last few other failures.
-- [ ] **K4. An ungrounded reference deletes the whole bullet.** `compaction.ts:235`. A Next Move step naming a file to create vanishes. *Fix:* under `## Next Move`, allow paths whose parent directory exists; on a miss, drop the backticks or mark the name unverified instead of deleting the bullet; log the reference.
-- [ ] **K5. No overall budget; the prior narrative is cut below its own size.** `compaction.ts:29, 257-275`. *Fix:* a character budget for the requests section (first and newest whole, the middle one line each); derive the prior cap from `maxSummaryTokens`.
-- [ ] **K6. "Files modified" misses shell edits and lists a file twice.** `compaction.ts:138-151, 276-281`. *Fix:* normalise tool paths relative to the repo root; `git status --porcelain=v1 -z` with `git diff --numstat --relative HEAD`, labelled new/deleted/renamed; subtract the tree's dirty set at session start.
+- [x] **K1. Facts do not survive a second compaction or a reload.** `compaction.ts:65-67, 86-92, 254-261`. *Fix:* return the facts in the compaction's `details.exo.facts` and seed from the previous entry's (B11); fall back to parsing the facts sections of `previousSummary`; track `read`/`edit`/`write` paths in `onToolResult`.
+- [x] **K2. Command records are keyed by the raw string and go stale.** `compaction.ts:116-130`. `cargo test` failing then `cargo test -- --nocapture` passing leaves the failure listed. *Fix:* key verifying runs by kind and bare command (A1); stamp records with a sequence number, bump it on edits, and render a pass before later edits as such.
+- [x] **K3. The failed list keeps the oldest 40 and counts benign exits.** `compaction.ts:284-295, 306-310`. *Fix:* slice from the end; use A12's benign rule; list verifying runs plus the last few other failures.
+- [x] **K4. An ungrounded reference deletes the whole bullet.** `compaction.ts:235`. A Next Move step naming a file to create vanishes. *Fix:* under `## Next Move`, allow paths whose parent directory exists; on a miss, drop the backticks or mark the name unverified instead of deleting the bullet; log the reference.
+- [x] **K5. No overall budget; the prior narrative is cut below its own size.** `compaction.ts:29, 257-275`. *Fix:* a character budget for the requests section (first and newest whole, the middle one line each); derive the prior cap from `maxSummaryTokens`.
+- [x] **K6. "Files modified" misses shell edits and lists a file twice.** `compaction.ts:138-151, 276-281`. *Fix:* normalise tool paths relative to the repo root; `git status --porcelain=v1 -z` with `git diff --numstat --relative HEAD`, labelled new/deleted/renamed; subtract the tree's dirty set at session start.
 
 ## E. Eval follow-up (wave 2)
 

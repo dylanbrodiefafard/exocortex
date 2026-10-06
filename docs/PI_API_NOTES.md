@@ -394,6 +394,9 @@ registerCommand(name: string, options: {
   - a full system checkpoint.
   
   Raw entries stay in the file. Compaction necessarily resets the prompt-cache prefix.
+- **What a second compaction is handed (D-085):**
+  - **Each message once.** The span starts right after the previous compaction in the projection, which is that compaction's retained tail and everything since (`dist/core/compaction/compaction.js:615-633`). Nothing the previous compaction summarized is in it, so `messagesToSummarize` of successive compactions do not overlap, and a split turn's prefix is summarized by the compaction that split it (`:634-638`).
+  - **`fileOps` of the span only, after an extension's summary.** `extractFileOperations` adds the previous compaction's `details.readFiles` and `details.modifiedFiles` only when that entry is pi's own (`!prevCompaction.fromHook`, `:16-31`). After a summary an extension supplied, the files of earlier spans are not in `fileOps`: the extension has to carry them itself.
 
 ---
 

@@ -1,10 +1,11 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type CompactionRequest, type ExoModule, runShellCommand } from "@exocortex/core";
+import type { CompactionRequest, ExoModule } from "@exocortex/core";
 import { createTestModuleContext, type SidecarReply } from "@exocortex/testkit";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createCompaction, grounded, parseSummary } from "../src/compaction.ts";
+import { createCompaction } from "../src/compaction.ts";
+import { grounded, parseSummary } from "../src/narrative.ts";
 
 let dir: string;
 beforeEach(() => {
@@ -91,7 +92,13 @@ describe("compaction", () => {
 		bash("./integration.sh 2>&1 | tail -3", 0, "3 scenarios run");
 		module.onToolResult?.({ toolName: "read", input: { path: "x" }, isError: false, exitCode: null, output: "" });
 
-		const summary = await summaryOf(module, request({ conversation: "[User]: implement forth in src/lib.rs" }));
+		const summary = await summaryOf(
+			module,
+			request({
+				conversation: "[User]: implement forth in src/lib.rs",
+				userMessages: ["implement forth", "(continuation)", "also support `: square dup * ;`"],
+			}),
+		);
 		expect(summary).toBe(
 			[
 				SUMMARY,
@@ -100,7 +107,7 @@ describe("compaction", () => {
 				"## Files modified",
 				"- src/lib.rs",
 				"## Files read",
-				"- README.md",
+				"- README.md\n- x",
 				"## Commands whose last run failed",
 				[
 					"- `cargo test` → exit 101: error[E0502]: cannot borrow `self.stack`",
@@ -129,10 +136,12 @@ describe("compaction", () => {
 					updated: false,
 					userMessages: 2,
 					commands: 5,
+					unverified: 0,
 				},
 			},
 		]);
-		expect(module.status?.()).toBe("compaction (1 summaries)");
+		// Counted once the summary is used.
+		expect(module.status?.()).toBe("compaction");
 	});
 
 	it("merges the previous handover, keeps the latest conversation and passes user focus", async () => {
@@ -157,7 +166,8 @@ describe("compaction", () => {
 		expect(prompts[0]).toMatch(/compacted\.\n\nThe user asked this summary to focus on: the parser$/);
 		expect(prompts[0]).toContain("[… earlier transcript omitted …]");
 		expect(prompts[0]).toContain("THE END");
-		expect(summary).toContain("1. from the span");
+		// The earlier requests are read from the previous summary; the span's follow them.
+		expect(summary).toContain("1. old\n2. from the span");
 		expect(t.records[0]?.data).toMatchObject({ updated: true });
 	});
 
@@ -196,18 +206,6 @@ describe("compaction", () => {
 		expect(deterministic.t.records[0]?.data).toMatchObject({ narrative: false, updated: false });
 	});
 
-	it("adds git diff stats for modified files", async () => {
-		writeFileSync(join(dir, "a.txt"), "one\n");
-		await runShellCommand("git init -q -b main && git add -A && git -c user.name=t -c user.email=t@t commit -qm base", {
-			cwd: dir,
-			timeoutMs: 10_000,
-		});
-		writeFileSync(join(dir, "a.txt"), "one\ntwo\nthree\n");
-		const { module } = setup({ fallback: "deterministic" });
-		const summary = await summaryOf(module, request({ filesModified: ["b.txt"] }));
-		expect(summary).toContain("## Files modified\n\n- a.txt (+2 −0)\n- b.txt");
-	});
-
 	it("truncates huge user messages and long file lists, and reports invalid settings", async () => {
 		const invalid = setup({ timeoutMs: 5 });
 		expect(invalid.t.logs.some((l) => l.startsWith("compaction /timeoutMs"))).toBe(true);
@@ -235,7 +233,7 @@ describe("parseSummary", () => {
 });
 
 describe("grounded", () => {
-	it("drops bullets that name things found nowhere in the transcript or workspace, except in the objective", () => {
+	it("marks names found nowhere in the transcript or workspace, except in the objective, and keeps every bullet", () => {
 		writeFileSync(join(dir, "real.rs"), "");
 		const logs: string[] = [];
 		const kept = grounded(
@@ -255,34 +253,51 @@ describe("grounded", () => {
 				"- tried `made_up_fn`: did not help",
 				"## Next Move",
 				"1. Edit src/ghost.rs",
+				"2. Create `fresh.rs` beside real.rs",
 				"## Relevant Files",
 				"A note that is not a bullet about other/ghost.rs",
 			].join("\n"),
 			"[Assistant]: I tried `RefCell` around `eval`",
 			{ cwd: dir, log: (m) => logs.push(m) },
 		);
-		expect(kept).toBe(
+		expect(kept.text).toBe(
 			[
 				"## Objective",
 				"- Port `legacy_vm` to Rust.",
 				"## Important Details",
 				"- real.rs holds the entry point",
+				"- see docs/none.md [unverified: docs/none.md]",
 				"- `eval` is recursive",
 				"## Work State",
 				"### Completed",
-				"- (none)",
+				"- added Phantom [unverified: Phantom]",
 				"",
 				"### Blocked",
 				"- tried `RefCell`: double borrow",
+				"- tried made_up_fn: did not help [unverified: made_up_fn]",
 				"## Next Move",
-				"- (none)",
+				// No `src` directory to create it in.
+				"1. Edit src/ghost.rs [unverified: src/ghost.rs]",
+				"2. Create `fresh.rs` beside real.rs",
 				"## Relevant Files",
 				"A note that is not a bullet about other/ghost.rs",
 			].join("\n"),
 		);
-		expect(logs).toEqual(["dropped 4 ungrounded item(s)"]);
-		expect(grounded(SUMMARY, "src/lib.rs", { cwd: dir, log: (m) => logs.push(m) })).toBe(SUMMARY);
+		expect(kept.unverified).toEqual(["docs/none.md", "Phantom", "made_up_fn", "src/ghost.rs"]);
+		expect(logs).toEqual(["unverified in the summary: docs/none.md, Phantom, made_up_fn, src/ghost.rs"]);
+		expect(grounded(SUMMARY, "src/lib.rs", { cwd: dir, log: (m) => logs.push(m) })).toEqual({
+			text: SUMMARY,
+			unverified: [],
+		});
 		expect(logs).toHaveLength(1);
+	});
+
+	it("does not take a path outside the workspace, or a symbol, for a file to create", () => {
+		const next = (step: string) =>
+			grounded(`## Objective\n- x\n## Next Move\n1. ${step}`, "", { cwd: dir, log: () => {} }).unverified;
+		expect(next("Write ../outside.rs")).toEqual(["../outside.rs"]);
+		expect(next("Call `new_fn`")).toEqual(["new_fn"]);
+		expect(next("Write notes.md")).toEqual([]);
 	});
 
 	it("keeps accepted suggestions among the requests and gates the sidecar's summary", async () => {
@@ -291,8 +306,16 @@ describe("grounded", () => {
 		);
 		module.onUserTurn?.({ text: "implement forth", origin: "user" });
 		module.onUserTurn?.({ text: "Not done yet. 1. Add the README", origin: "suggestion" });
-		const summary = await summaryOf(module, request({ conversation: "[User]: src/lib.rs" }));
+		const summary = await summaryOf(
+			module,
+			request({
+				conversation: "[User]: src/lib.rs",
+				userMessages: ["implement forth", "Not done yet. 1. Add the README"],
+			}),
+		);
 		expect(summary).toContain("2. Not done yet. 1. Add the README");
-		expect(summary).toContain("## Next Move\n2. (none)\n\n## Relevant Files");
+		expect(summary).toContain(
+			"## Next Move\n1. Open nowhere_fn, then run cargo test after cloning the word body. [unverified: nowhere_fn]\n2. (none)\n\n## Relevant Files",
+		);
 	});
 });

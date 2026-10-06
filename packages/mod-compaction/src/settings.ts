@@ -20,6 +20,12 @@ export const SettingsSchema = Type.Object(
 		fallback: Type.Union([Type.Literal("harness"), Type.Literal("deterministic")], { default: "harness" }),
 		/** Per-message cap for verbatim user requests. */
 		maxUserMessageChars: Type.Integer({ minimum: 200, default: 2_000 }),
+		/**
+		 * Budget for the whole requests section. Over it, the first and the newest request stay whole
+		 * and those between are cut to their first line; over it still, the oldest of those are left
+		 * out and counted (D-085).
+		 */
+		maxRequestsChars: Type.Integer({ minimum: 1_000, default: 12_000 }),
 	},
 	{ additionalProperties: true },
 );
