@@ -12,7 +12,8 @@ import {
 	ungroundedReferences,
 } from "@exocortex/core";
 import { Type } from "typebox";
-import { createEpisodeTracker, type FixEpisode } from "./episodes.ts";
+import { detailShare, FAILURE_DETAIL_LINES, failureDetail } from "./detail.ts";
+import { commandKey, createEpisodeTracker, editsOf, type FixEpisode } from "./episodes.ts";
 import { INTERVIEW, type InterviewOption, type InterviewQuestion, runInterview } from "./interview.ts";
 import {
 	type ActivePreference,
@@ -36,10 +37,10 @@ import {
 
 export const MEMORY_ID = "memory";
 
-const LESSON_PROMPT = loadPrompt(new URL("../prompts/lesson.v1.md", import.meta.url));
+const LESSON_PROMPT = loadPrompt(new URL("../prompts/lesson.v2.md", import.meta.url));
 
 const LessonSchema = Type.Object({
-	lesson: Type.String({ maxLength: 600 }),
+	lesson: Type.String({ maxLength: 800 }),
 	applies_when: Type.String({ maxLength: 200 }),
 });
 
@@ -66,7 +67,7 @@ const SELECT_PROMPT = loadPrompt(new URL("../prompts/preference-select.v2.md", i
 
 const SelectionSchema = Type.Object({ apply: Type.Array(Type.Integer({ minimum: 1 }), { maxItems: 10 }) });
 
-const LESSON_CHARS = 300;
+const LESSON_CHARS = 400;
 const SELECT_REQUEST_CHARS = 3_000;
 /** Cards embedded per background backfill (cards learned before an embeddings server was configured). */
 const BACKFILL_BATCH = 64;
@@ -81,25 +82,49 @@ const MAX_KNOWN_PREFERENCES = 30;
 const MIN_PROMPT_WORDS = 4;
 const INTERVIEW_QUOTE_CHARS = 300;
 const GIT_TIMEOUT_MS = 5_000;
+/** Edited files named on a card. */
+const MAX_CARD_FILES = 6;
 
 /** Stores stay open for the process: modules are rebuilt on `/exo` toggles. */
 const stores = new Map<string, MemoryStore>();
 
-interface TaskState {
-	/** Card id → the signature it was injected for. */
-	readonly injected: Map<number, string>;
-	readonly hurt: Set<number>;
-	readonly credited: Set<number>;
+/** How a recalled card relates to the failure it is shown for. */
+type Match = "same" | "similar" | "elsewhere";
+
+interface Recalled {
+	readonly card: Card;
+	readonly match: Match;
 }
+
+/** A card shown in this task, and what the command it was shown for did afterwards. */
+interface Shown {
+	readonly card: Card;
+	readonly signature: string;
+	readonly command: string | undefined;
+	/** Times the card's problem came back after it was shown. */
+	recurred: number;
+	passed: boolean;
+}
+
+interface TaskState {
+	readonly injected: Map<number, Shown>;
+}
+
+/** A card's problem coming back this often after the card was shown means the card did not fix it. */
+const HURT_RECURRENCES = 2;
 
 /**
  * Memory, Phase 5 v1 (brief §6.4 narrowed by research R5.1–R5.5): pitfall cards only.
  * - Learn: a verified error→fix pair (same command fails, files change, it passes) becomes a card,
  *   phrased by a background sidecar (grounded) or summarized deterministically.
- * - Recall: a failing tool result whose signature (or error keywords) matches a card gets the
- *   lesson appended, within ~400 tokens. No LLM on the hot path.
- * - Utility: a card is credited `helped` when its error does not recur in the task, `hurt` when it
- *   does; cards that hurt more than they help retire. Cards are superseded, never deleted.
+ * - A card is one problem (D-072): the error's signature says what kind of failure it was, the
+ *   names in it (tests, symbols, error codes) say which. Fixing a different problem of the same
+ *   kind adds a card; it does not merge into the first.
+ * - Recall: a failing tool result with a card's signature and enough of its names gets the lesson
+ *   appended, within ~400 tokens, worded as a past fix to check. No LLM on the hot path.
+ * - Utility: a card is credited `helped` when the command it was shown for went on to pass, `hurt`
+ *   when its problem kept coming back; cards that hurt more than they help retire. Cards are
+ *   superseded, never deleted.
  *
  * With `preferences` on (D-060) it also learns how the user likes work done, only from the user's
  * own messages, and adds the preferences that a later prompt leaves unsaid. That includes what
@@ -129,12 +154,25 @@ export function createMemory(raw: Readonly<Record<string, unknown>>, ctx: Module
 	const shown = new Set<number>();
 	let lastAssistantText = "";
 
+	/**
+	 * Credits each card shown in the task by what the command did next (D-072), then forgets them.
+	 * - `hurt`: the card's problem came back twice or more, or came back and the command never passed.
+	 * - `helped`: the command passed.
+	 * - Neither: the agent never ran the command again, so nothing shows what the card did.
+	 */
 	function finishTask(): void {
-		for (const id of task.injected.keys()) {
-			if (task.credited.has(id) || task.hurt.has(id)) continue;
-			store.credit(id, "helped");
-			task.credited.add(id);
+		for (const [id, shown] of task.injected) {
+			const outcome =
+				shown.recurred >= HURT_RECURRENCES || (shown.recurred > 0 && !shown.passed)
+					? "hurt"
+					: shown.passed
+						? "helped"
+						: undefined;
+			if (!outcome) continue;
+			store.credit(id, outcome);
+			ctx.record({ kind: "exo.memory", data: { action: "credited", card: id, outcome } });
 		}
+		task.injected.clear();
 		store.retireUnhelpful();
 	}
 
@@ -181,17 +219,8 @@ export function createMemory(raw: Readonly<Record<string, unknown>>, ctx: Module
 		},
 
 		onToolResult(tool) {
-			const signature = failureSignature(tool);
-			if (signature) {
-				for (const [id, injectedFor] of task.injected) {
-					if (injectedFor === signature && !task.hurt.has(id)) {
-						task.hurt.add(id);
-						store.credit(id, "hurt");
-					}
-				}
-			}
-			const episode = settings.learn ? tracker.observe(tool) : undefined;
-			if (episode) {
+			observeShown(tool);
+			for (const episode of settings.learn ? tracker.observe(tool) : []) {
 				learn(episode).catch((error: unknown) => ctx.log(`learning failed: ${String(error)}`));
 			}
 		},
@@ -200,15 +229,23 @@ export function createMemory(raw: Readonly<Record<string, unknown>>, ctx: Module
 			const signature = failureSignature(draft);
 			if (!settings.inject || !signature) return undefined;
 			const cards = (await recallCards(await scope, signature, draft.output, signal)).filter(
-				(c) => !task.injected.has(c.id),
+				(r) => !task.injected.has(r.card.id),
 			);
 			if (cards.length === 0) return undefined;
-			for (const card of cards) {
-				task.injected.set(card.id, signature);
+			for (const { card } of cards) {
+				task.injected.set(card.id, { card, signature, command: commandKey(draft), recurred: 0, passed: false });
 				store.markInjected(card.id);
 			}
 			recalled += cards.length;
-			ctx.record({ kind: "exo.memory", data: { action: "recalled", cards: cards.map((c) => c.id), signature } });
+			ctx.record({
+				kind: "exo.memory",
+				data: {
+					action: "recalled",
+					cards: cards.map((r) => r.card.id),
+					matches: cards.map((r) => r.match),
+					signature,
+				},
+			});
 			return {
 				text: `${draft.current}\n${renderCards(cards, settings.maxInjectChars)}`,
 				note: `recalled ${cards.length} card(s)`,
@@ -454,18 +491,37 @@ export function createMemory(raw: Readonly<Record<string, unknown>>, ctx: Module
 			.join("\n");
 	}
 
+	/** What each card shown in this task sees next: its problem again, or its command passing. */
+	function observeShown(tool: ToolOutcome): void {
+		if (task.injected.size === 0) return;
+		const signature = failureSignature(tool);
+		const command = commandKey(tool);
+		const names = signature ? new Set(failureDetail(tool.output, FAILURE_DETAIL_LINES)) : undefined;
+		for (const shown of task.injected.values()) {
+			if (names) {
+				const same = shown.signature === signature && detailShare(shown.card.detail, names) >= settings.minDetail;
+				if (same) shown.recurred += 1;
+			} else if (command !== undefined && command === shown.command && tool.exitCode === 0 && !tool.isError) {
+				shown.passed = true;
+			}
+		}
+	}
+
 	async function learn(episode: FixEpisode): Promise<void> {
 		const repo = await scope;
-		const existing = store.bySignature(repo, episode.signature).find((c) => c.scope === repo);
+		// The same kind of failure naming the same things is the same problem, fixed again.
+		const names = new Set(episode.detail);
+		const existing = store
+			.bySignature(episode.signature)
+			.find(
+				(c) =>
+					c.scope === repo &&
+					detailShare(c.detail, names) >= settings.minDetail &&
+					detailShare(episode.detail, new Set(c.detail)) >= settings.minDetail,
+			);
 		const evidence = evidenceOf(episode);
 		if (existing) {
-			store.upsert({
-				scope: repo,
-				signature: episode.signature,
-				trigger: episode.errorLine,
-				lesson: existing.lesson,
-				evidence,
-			});
+			store.merge(existing.id, evidence);
 			ctx.record({ kind: "exo.memory", data: { action: "merged", card: existing.id } });
 			return;
 		}
@@ -478,9 +534,11 @@ export function createMemory(raw: Readonly<Record<string, unknown>>, ctx: Module
 			return;
 		}
 		const lesson = distilled ?? deterministicLesson(episode);
-		const { id } = store.upsert({
+		const id = store.add({
 			scope: repo,
 			signature: episode.signature,
+			detail: episode.detail,
+			files: [...new Set(editsOf(episode).map((e) => e.path))].slice(0, MAX_CARD_FILES),
 			trigger: episode.errorLine,
 			lesson,
 			evidence,
@@ -491,22 +549,30 @@ export function createMemory(raw: Readonly<Record<string, unknown>>, ctx: Module
 	}
 
 	/**
-	 * Exact signature first. Otherwise cards whose trigger shares most of the error's keywords, plus,
+	 * The same problem first. Otherwise cards whose trigger shares most of the error's keywords, plus,
 	 * with an embeddings server, cards whose trigger means the same in other words (D-062).
 	 */
-	async function recallCards(repo: string, signature: string, output: string, signal: AbortSignal): Promise<Card[]> {
+	async function recallCards(
+		repo: string,
+		signature: string,
+		output: string,
+		signal: AbortSignal,
+	): Promise<Recalled[]> {
 		const byKeywords = recall(store, repo, signature, output, settings);
-		if (byKeywords.some((c) => c.signature === signature)) return byKeywords;
-		const bySimilarity = await similarCards(repo, output, signal);
-		const merged = new Map([...byKeywords, ...bySimilarity].map((c) => [c.id, c]));
+		if (byKeywords.some((r) => r.match !== "similar")) return byKeywords;
+		const bySimilarity = (await similarCards(repo, signature, output, signal)).map((card) => ({
+			card,
+			match: "similar" as const,
+		}));
+		const merged = new Map([...byKeywords, ...bySimilarity].map((r) => [r.card.id, r]));
 		return rank([...merged.values()]).slice(0, settings.maxCards);
 	}
 
-	async function similarCards(repo: string, output: string, signal: AbortSignal): Promise<Card[]> {
+	async function similarCards(repo: string, signature: string, output: string, signal: AbortSignal): Promise<Card[]> {
 		const embedder = ctx.embedder();
 		const line = firstErrorLine(output)?.line;
 		if (!embedder || !line) return [];
-		const live = store.cards(repo).filter((c) => c.validTo === null);
+		const live = store.cards(repo).filter((c) => c.validTo === null && c.signature !== signature);
 		const vectors = store.vectors("card", embedder.model);
 		const missing = live.filter((c) => !vectors.has(c.id)).slice(0, BACKFILL_BATCH);
 		// Not awaited: the agent is waiting on this result. They are there for the next failure.
@@ -614,11 +680,7 @@ export function createMemory(raw: Readonly<Record<string, unknown>>, ctx: Module
 				messages: [
 					{
 						role: "user",
-						content: LESSON_PROMPT.render({
-							command: episode.command,
-							excerpt: episode.excerpt,
-							edits: renderEdits(episode),
-						}),
+						content: LESSON_PROMPT.render({ command: episode.command, route: renderRoute(episode) }),
 					},
 				],
 				maxTokens: SIDECAR_MAX_TOKENS,
@@ -632,48 +694,80 @@ export function createMemory(raw: Readonly<Record<string, unknown>>, ctx: Module
 		const lesson = result.value.lesson.trim();
 		// The prompt asks for "" when the fix teaches nothing reusable (a typo, a one-off).
 		if (lesson === "") return NOT_REUSABLE;
-		const evidence = `${episode.command}\n${episode.excerpt}\n${renderEdits(episode)}`;
+		const evidence = `${episode.command}\n${renderRoute(episode)}`;
 		if (ungroundedReferences(lesson, evidence, ctx.cwd).length > 0) return undefined;
 		const when = result.value.applies_when.trim();
 		return clip(when ? `${lesson} (when: ${when})` : lesson, LESSON_CHARS + 120);
 	}
 }
 
-/** Exact signature first; otherwise cards whose trigger shares most of this error's keywords. */
+/**
+ * Cards for the failure in `output`, in this order (D-072):
+ * 1. the same problem in this repo: the signature, and at least `minDetail` of the card's names;
+ * 2. the same problem fixed in 2+ other repos (D-018 promotion);
+ * 3. cards of this repo for another kind of error whose trigger shares most of this error's
+ *    keywords. A card with this signature that failed the name check is a different problem,
+ *    not a similar one.
+ */
 export function recall(
 	store: MemoryStore,
 	scope: string,
 	signature: string,
 	output: string,
-	settings: Pick<MemorySettings, "maxCards" | "minOverlap">,
-): Card[] {
-	const exact = store.bySignature(scope, signature);
-	if (exact.length > 0) return rank(exact).slice(0, settings.maxCards);
+	settings: Pick<MemorySettings, "maxCards" | "minOverlap" | "minDetail">,
+): Recalled[] {
+	const names = new Set(failureDetail(output, FAILURE_DETAIL_LINES));
+	const sameProblem = store.bySignature(signature).filter((c) => detailShare(c.detail, names) >= settings.minDetail);
+	const local = sameProblem.filter((c) => c.scope === scope);
+	if (local.length > 0) return top(local, "same", settings.maxCards);
+	const elsewhere = sameProblem.filter((c) => c.scope !== scope);
+	if (new Set(elsewhere.map((c) => c.scope)).size >= 2) return top(elsewhere, "elsewhere", settings.maxCards);
 	const line = firstErrorLine(output)?.line;
 	if (!line) return [];
-	return rank(
-		store
-			.search(scope, line, settings.maxCards * 2)
-			.filter((m) => m.overlap >= settings.minOverlap)
-			.map((m) => m.card),
-	).slice(0, settings.maxCards);
+	const similar = store
+		.search(scope, line, settings.maxCards * 2)
+		.filter((m) => m.overlap >= settings.minOverlap && m.card.signature !== signature)
+		.map((m) => m.card);
+	return top(similar, "similar", settings.maxCards);
+}
+
+function top(cards: readonly Card[], match: Match, max: number): Recalled[] {
+	return rank(cards.map((card) => ({ card, match }))).slice(0, max);
 }
 
 /** Proven cards first: helped − hurt, then how often the lesson was seen. */
-function rank(cards: readonly Card[]): Card[] {
-	return [...cards].sort((a, b) => b.helped - b.hurt - (a.helped - a.hurt) || b.seen - a.seen);
+function rank(recalled: readonly Recalled[]): Recalled[] {
+	return [...recalled].sort(({ card: a }, { card: b }) => b.helped - b.hurt - (a.helped - a.hurt) || b.seen - a.seen);
 }
 
-export function renderCards(cards: readonly Card[], maxChars: number): string {
-	const lines = cards.map((c) => `- ${c.lesson}${c.seen > 1 ? ` (seen ${c.seen}×)` : ""}`);
-	const text = `[exo memory: this error was fixed before in this repo]\n${lines.join("\n")}`;
-	return clip(text, maxChars);
+const MATCH_LABEL: Readonly<Record<Match, string>> = {
+	same: "this error, this repo",
+	similar: "a similar error, this repo",
+	elsewhere: "this error, other repos",
+};
+
+const CARDS_HEADER =
+	"[exo memory: notes from earlier fixes, each written after a failing command passed. The code may have changed since: check a note against the current code before relying on it.]";
+
+/**
+ * What the agent reads. It says what a card is (a change after which a failing command passed)
+ * and that the code may have moved on, and each card says how it matched and which files the fix
+ * touched, so the agent can check it instead of taking it on trust (D-072).
+ */
+export function renderCards(cards: readonly Recalled[], maxChars: number): string {
+	const lines = cards.map(({ card, match }) => {
+		const files = card.files.length > 0 ? `; the fix edited ${card.files.join(", ")}` : "";
+		return `- (${MATCH_LABEL[match]}${files}) ${card.lesson}${card.seen > 1 ? ` (seen ${card.seen}×)` : ""}`;
+	});
+	return clip(`${CARDS_HEADER}\n${lines.join("\n")}`, maxChars);
 }
 
 export function deterministicLesson(episode: FixEpisode): string {
-	const paths = [...new Set(episode.edits.map((e) => e.path))];
-	const first = episode.edits[0];
-	const change = first ? `: \`${oneLine(first.before)}\` → \`${oneLine(first.after)}\`` : "";
+	const edits = editsOf(episode);
+	const paths = [...new Set(edits.map((e) => e.path))];
+	// The last edit is the one in place when the command passed.
+	const last = edits.at(-1);
+	const change = last ? `: \`${oneLine(last.before)}\` → \`${oneLine(last.after)}\`` : "";
 	return clip(`Fixed before by editing ${paths.join(", ")}${change}`, LESSON_CHARS);
 }
 
@@ -684,11 +778,21 @@ function failureSignature(tool: ToolOutcome): string | undefined {
 }
 
 function evidenceOf(episode: FixEpisode): string {
-	return JSON.stringify({ command: episode.command, error: episode.errorLine, edits: episode.edits.slice(0, 3) });
+	return JSON.stringify({ command: episode.command, error: episode.errorLine, edits: editsOf(episode).slice(-3) });
 }
 
-function renderEdits(episode: FixEpisode): string {
-	return episode.edits.map((e) => `${e.path}:\n- ${e.before}\n+ ${e.after}`).join("\n\n");
+/** The route from the error to the pass, as the lesson sidecar reads it. */
+function renderRoute(episode: FixEpisode): string {
+	const parts = episode.steps.map((step, i) => {
+		const edits = step.edits.map((e) => `${e.path}:\n- ${e.before}\n+ ${e.after}`).join("\n\n");
+		const retries =
+			step.retries > 0
+				? `\n(The command failed with this same error ${step.retries} more time(s) during these edits.)`
+				: "";
+		const heading = i === 0 ? "The command failed:" : "The command then failed with a different error:";
+		return `${i + 1}. ${heading}\n<<<\n${step.excerpt}\n>>>\nEdits made next:\n<<<\n${edits}\n>>>${retries}`;
+	});
+	return `${parts.join("\n\n")}\n\n${episode.steps.length + 1}. The command passed.`;
 }
 
 /** Repo identity (D-018): the origin remote, else the root commit's tree (stable across copies), else the path. */
@@ -713,7 +817,7 @@ function storeFor(path: string): MemoryStore {
 }
 
 function newTask(): TaskState {
-	return { injected: new Map(), hurt: new Set(), credited: new Set() };
+	return { injected: new Map() };
 }
 
 function oneLine(text: string): string {

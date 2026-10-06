@@ -11,7 +11,8 @@ import { isAbsolute, join } from "node:path";
 const SPECIFIC_ERROR_PATTERNS: readonly RegExp[] = [
 	// Rust / cargo
 	/^error(\[E\d+\])?: /,
-	/^thread '.*' panicked at /,
+	// Rust 1.91+ prints the thread id: thread 'name' (12345) panicked at …
+	/^thread '.*'( \(\d+\))? panicked at /,
 	/^test \S+ \.\.\. FAILED$/,
 	/^error: test failed/,
 	// Go

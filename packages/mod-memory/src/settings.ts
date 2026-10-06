@@ -18,6 +18,12 @@ const SettingsSchema = Type.Object(
 		maxCards: Type.Integer({ minimum: 1, maximum: 5, default: 2 }),
 		/** Injection budget (~4 chars per token; brief §6.4 caps it near 400 tokens). */
 		maxInjectChars: Type.Integer({ minimum: 200, default: 1_600 }),
+		/**
+		 * D-072: a card is the same problem as a failure when the failure mentions at least this share
+		 * of the names the card was learned with (tests, symbols, error codes). 0 matches on the
+		 * signature alone, as before D-072.
+		 */
+		minDetail: Type.Number({ minimum: 0, maximum: 1, default: 0.6 }),
 		/** Full-text matches need this share of the error's keywords in the card's trigger. */
 		minOverlap: Type.Number({ minimum: 0, maximum: 1, default: 0.6 }),
 		/**

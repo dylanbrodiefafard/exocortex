@@ -90,6 +90,7 @@
 			"inject": true, // add a matching lesson to a failing tool result
 			"distill": true, // a background sidecar phrases each lesson (else a summary of the edit)
 			"maxCards": 2,
+			"minDetail": 0.6, // share of a card's names (tests, symbols, error codes) a failure must mention to count as the same problem
 			"maxInjectChars": 1600, // ~400 tokens
 			"preferences": false, // learn how you like work done and what you expect of a kind of task, from what you type and your corrections; add what a later prompt leaves unsaid (D-060, D-064)
 			"maxPreferences": 5,

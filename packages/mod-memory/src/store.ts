@@ -3,14 +3,21 @@ import { dirname } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { decodeVector, encodeVector, openDatabase } from "@exocortex/core";
 
-/** One lesson (brief §6.4). Phase 5 v1 stores only `pitfall` cards (research R5.1). */
+/**
+ * One problem and the fix that was verified for it (brief §6.4, D-072). Phase 5 v1 stores only
+ * `pitfall` cards (research R5.1).
+ */
 export interface Card {
 	readonly id: number;
 	/** Repo identity (D-018): git remote URL, else the root commit's tree hash, else the path. */
 	readonly scope: string;
 	readonly type: "pitfall";
-	/** Normalized error signature: the exact retrieval key. */
+	/** Normalized error signature: the kind of failure. Several problems can share one (D-072). */
 	readonly signature: string;
+	/** The names the failure mentioned (tests, symbols, error codes): which problem of that kind it was. */
+	readonly detail: readonly string[];
+	/** The files that were edited before the command passed. */
+	readonly files: readonly string[];
 	/** The error line it was learned from (full-text retrieval). */
 	readonly trigger: string;
 	readonly lesson: string;
@@ -28,18 +35,22 @@ export interface Card {
 export interface NewCard {
 	readonly scope: string;
 	readonly signature: string;
+	readonly detail: readonly string[];
+	readonly files: readonly string[];
 	readonly trigger: string;
 	readonly lesson: string;
 	readonly evidence: string;
 }
 
 export interface MemoryStore {
-	/** Live cards for a signature: this repo's first, then cards seen in 2+ other repos (D-018 promotion). */
-	bySignature(scope: string, signature: string): Card[];
+	/** Live cards for a signature, from every repo. The caller decides which are the same problem (D-072). */
+	bySignature(signature: string): Card[];
 	/** Live cards whose trigger shares words with `text`, best first (FTS5 candidates, rescored). */
 	search(scope: string, text: string, limit: number): { card: Card; overlap: number }[];
-	/** ADD, or MERGE into the live card with the same scope and signature (delta ops only, R5.5). */
-	upsert(card: NewCard): { readonly id: number; readonly merged: boolean };
+	/** ADD (delta ops only, R5.5). */
+	add(card: NewCard): number;
+	/** MERGE: the card's problem was fixed again. `seen` goes up and the evidence is appended. */
+	merge(id: number, evidence: string): void;
 	/** SUPERSEDE: retires `id` and adds its replacement. */
 	supersede(id: number, card: NewCard): number;
 	markInjected(id: number): void;
@@ -166,6 +177,10 @@ const MIGRATIONS: readonly string[] = [
 	`
 	ALTER TABLE preference_sightings ADD COLUMN source TEXT NOT NULL DEFAULT 'message';
 	`,
+	`
+	ALTER TABLE cards ADD COLUMN detail TEXT NOT NULL DEFAULT '';
+	ALTER TABLE cards ADD COLUMN files TEXT NOT NULL DEFAULT '';
+	`,
 ];
 
 const STOPWORDS = new Set([
@@ -188,6 +203,8 @@ interface Row {
 	scope: string;
 	type: string;
 	signature: string;
+	detail: string;
+	files: string;
 	trigger: string;
 	lesson: string;
 	evidence: string;
@@ -229,23 +246,27 @@ export function openMemoryStore(path: string, now: () => number = Date.now): Mem
 
 	function insert(card: NewCard): number {
 		const result = db
-			.prepare("INSERT INTO cards (scope, signature, trigger, lesson, evidence, created_at) VALUES (?, ?, ?, ?, ?, ?)")
-			.run(card.scope, card.signature, card.trigger, card.lesson, card.evidence, now());
+			.prepare(
+				"INSERT INTO cards (scope, signature, detail, files, trigger, lesson, evidence, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+			)
+			.run(
+				card.scope,
+				card.signature,
+				card.detail.join(" "),
+				card.files.join("\n"),
+				card.trigger,
+				card.lesson,
+				card.evidence,
+				now(),
+			);
 		const id = Number(result.lastInsertRowid);
 		db.prepare("INSERT INTO cards_fts (trigger, lesson, card_id) VALUES (?, ?, ?)").run(card.trigger, card.lesson, id);
 		return id;
 	}
 
 	return {
-		bySignature(scope, signature) {
-			const local = (select(`${live} AND scope = ? AND signature = ?`).all(scope, signature) as unknown as Row[]).map(
-				toCard,
-			);
-			if (local.length > 0) return local;
-			const others = (select(`${live} AND signature = ? AND scope != ?`).all(signature, scope) as unknown as Row[]).map(
-				toCard,
-			);
-			return new Set(others.map((c) => c.scope)).size >= 2 ? others : [];
+		bySignature(signature) {
+			return (select(`${live} AND signature = ? ORDER BY id`).all(signature) as unknown as Row[]).map(toCard);
 		},
 
 		search(scope, text, limit) {
@@ -268,18 +289,17 @@ export function openMemoryStore(path: string, now: () => number = Date.now): Mem
 				.slice(0, limit);
 		},
 
-		upsert(card) {
-			const existing = select(`${live} AND scope = ? AND signature = ?`).get(card.scope, card.signature) as unknown as
-				| Row
-				| undefined;
-			if (existing) {
-				db.prepare("UPDATE cards SET seen = seen + 1, evidence = ? WHERE id = ?").run(
-					mergeEvidence(existing.evidence, card.evidence),
-					existing.id,
-				);
-				return { id: existing.id, merged: true };
-			}
-			return { id: insert(card), merged: false };
+		add(card) {
+			return insert(card);
+		},
+
+		merge(id, evidence) {
+			const existing = select("id = ?").get(id) as unknown as Row | undefined;
+			if (!existing) return;
+			db.prepare("UPDATE cards SET seen = seen + 1, evidence = ? WHERE id = ?").run(
+				mergeEvidence(existing.evidence, evidence),
+				id,
+			);
 		},
 
 		supersede(id, card) {
@@ -411,6 +431,8 @@ export function openMemoryStore(path: string, now: () => number = Date.now): Mem
 			scope: row.scope,
 			type: "pitfall",
 			signature: row.signature,
+			detail: row.detail === "" ? [] : row.detail.split(" "),
+			files: row.files === "" ? [] : row.files.split("\n"),
 			trigger: row.trigger,
 			lesson: row.lesson,
 			evidence: row.evidence,

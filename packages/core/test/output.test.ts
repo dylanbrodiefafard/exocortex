@@ -22,6 +22,7 @@ describe("classifyErrorLine", () => {
 		["error[E0502]: cannot borrow `x` as mutable", "specific"],
 		["error: could not compile `forth`", "specific"],
 		["thread 'main' panicked at src/main.rs:3:5:", "specific"],
+		["thread 'simple_table' (207059) panicked at tests/render.rs:8:5:", "specific"],
 		["test tests::parse ... FAILED", "specific"],
 		["./limiter.go:42:7: undefined: Limit", "specific"],
 		["    --- FAIL: TestBurst (0.00s)", "specific"],

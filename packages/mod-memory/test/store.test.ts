@@ -4,45 +4,52 @@ import { keywords, openMemoryStore } from "../src/store.ts";
 const card = (scope: string, signature: string, trigger = "error[E0502]: cannot borrow `self.items` as mutable") => ({
 	scope,
 	signature,
+	detail: ["e0502", "items"],
+	files: ["src/lib.rs", "src/stack.rs"],
 	trigger,
 	lesson: `lesson for ${signature} in ${scope}`,
 	evidence: "{}",
 });
 
 describe("memory store", () => {
-	it("adds cards and merges repeats of the same scope and signature", () => {
+	it("adds cards with their names and files, and merges a repeat into the card it is given", () => {
 		const store = openMemoryStore(":memory:");
-		const first = store.upsert(card("repo-a", "sig-1"));
-		const again = store.upsert({ ...card("repo-a", "sig-1"), evidence: '{"second":true}' });
-		expect(first.merged).toBe(false);
-		expect(again).toEqual({ id: first.id, merged: true });
+		const first = store.add(card("repo-a", "sig-1"));
+		store.merge(first, '{"second":true}');
+		store.merge(999, "{}");
 		const [stored] = store.cards("repo-a");
-		expect(stored).toMatchObject({ seen: 2, lesson: "lesson for sig-1 in repo-a", validTo: null });
+		expect(stored).toMatchObject({
+			seen: 2,
+			lesson: "lesson for sig-1 in repo-a",
+			detail: ["e0502", "items"],
+			files: ["src/lib.rs", "src/stack.rs"],
+			validTo: null,
+		});
 		expect(stored?.evidence).toContain('{"second":true}');
+		expect(store.add({ ...card("repo-a", "sig-9"), detail: [], files: [] })).not.toBe(first);
+		expect(store.bySignature("sig-9")[0]).toMatchObject({ detail: [], files: [] });
 		store.close();
 	});
 
-	it("finds cards by signature in this repo, else only when 2+ other repos share it", () => {
+	it("keeps several cards for one signature and returns them from every repo (D-072)", () => {
 		const store = openMemoryStore(":memory:");
-		store.upsert(card("repo-a", "sig-1"));
-		expect(store.bySignature("repo-a", "sig-1")).toHaveLength(1);
-		expect(store.bySignature("repo-z", "sig-1")).toEqual([]);
-		store.upsert(card("repo-b", "sig-1"));
-		expect(
-			store
-				.bySignature("repo-z", "sig-1")
-				.map((c) => c.scope)
-				.sort(),
-		).toEqual(["repo-a", "repo-b"]);
-		expect(store.bySignature("repo-a", "sig-1").map((c) => c.scope)).toEqual(["repo-a"]);
+		store.add(card("repo-a", "sig-1"));
+		store.add({ ...card("repo-a", "sig-1"), detail: ["e0502", "queue"] });
+		store.add(card("repo-b", "sig-1"));
+		store.add(card("repo-b", "sig-2"));
+		expect(store.bySignature("sig-1").map((c) => [c.scope, c.detail[1]])).toEqual([
+			["repo-a", "items"],
+			["repo-a", "queue"],
+			["repo-b", "items"],
+		]);
 		store.close();
 	});
 
 	it("searches triggers by keyword overlap within the repo", () => {
 		const store = openMemoryStore(":memory:");
-		store.upsert(card("repo-a", "sig-1"));
-		store.upsert(card("repo-a", "sig-2", "undefined reference to `ring_push'"));
-		store.upsert(card("repo-b", "sig-3"));
+		store.add(card("repo-a", "sig-1"));
+		store.add(card("repo-a", "sig-2", "undefined reference to `ring_push'"));
+		store.add(card("repo-b", "sig-3"));
 		const hits = store.search("repo-a", "error[E0502]: cannot borrow `self.stack` as mutable", 5);
 		expect(hits[0]?.card.signature).toBe("sig-1");
 		expect(hits[0]?.overlap).toBeGreaterThan(0.6);
@@ -54,7 +61,7 @@ describe("memory store", () => {
 	it("tracks utility, retires unhelpful cards and supersedes without deleting", () => {
 		let now = 1_000;
 		const store = openMemoryStore(":memory:", () => now);
-		const { id } = store.upsert(card("repo-a", "sig-1"));
+		const id = store.add(card("repo-a", "sig-1"));
 		for (let i = 0; i < 3; i++) store.markInjected(id);
 		store.credit(id, "hurt");
 		store.credit(id, "hurt");
@@ -63,12 +70,12 @@ describe("memory store", () => {
 		store.credit(id, "hurt");
 		now = 2_000;
 		expect(store.retireUnhelpful()).toBe(1);
-		expect(store.bySignature("repo-a", "sig-1")).toEqual([]);
+		expect(store.bySignature("sig-1")).toEqual([]);
 		expect(store.cards("repo-a")[0]).toMatchObject({ injected: 3, helped: 1, hurt: 3, validTo: 2_000 });
 
-		const { id: other } = store.upsert(card("repo-a", "sig-2"));
+		const other = store.add(card("repo-a", "sig-2"));
 		const replacement = store.supersede(other, { ...card("repo-a", "sig-2"), lesson: "better" });
-		expect(store.bySignature("repo-a", "sig-2").map((c) => [c.id, c.lesson])).toEqual([[replacement, "better"]]);
+		expect(store.bySignature("sig-2").map((c) => [c.id, c.lesson])).toEqual([[replacement, "better"]]);
 		expect(store.cards().length).toBe(3);
 		store.close();
 	});

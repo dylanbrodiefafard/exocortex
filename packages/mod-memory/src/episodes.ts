@@ -1,13 +1,28 @@
 import { errorSignature, firstErrorLine, type ToolOutcome } from "@exocortex/core";
+import { cardDetail } from "./detail.ts";
 
-/** A verified error→fix pair (research R5.1/R5.2): a command failed, files changed, the same command passed. */
+/**
+ * A verified error→fix pair (research R5.1/R5.2): a command failed, files changed, the same
+ * command passed. `steps` is the route from this error to the pass (D-072): the error, the edits
+ * made while it stood, and any error the command failed with after them.
+ */
 export interface FixEpisode {
 	readonly command: string;
 	readonly signature: string;
 	readonly errorLine: string;
+	/** The names the failure mentioned: which problem of this kind it was. */
+	readonly detail: readonly string[];
+	readonly steps: readonly Step[];
+}
+
+/** One error on the way to the pass, and what was edited while the command failed with it. */
+interface Step {
+	readonly errorLine: string;
 	/** The failing output around the first error. */
 	readonly excerpt: string;
 	readonly edits: readonly Edit[];
+	/** Times the command failed with this same error again after edits. */
+	readonly retries: number;
 }
 
 export interface Edit {
@@ -16,60 +31,98 @@ export interface Edit {
 	readonly after: string;
 }
 
-interface OpenFailure {
+interface Stage {
 	readonly signature: string;
 	readonly errorLine: string;
+	readonly detail: readonly string[];
 	readonly excerpt: string;
 	readonly edits: Edit[];
+	retries: number;
+	editsAtLastFailure: number;
 }
 
 /** Commands whose success is external evidence that a fix worked: builds, tests, runs. */
 const VERIFYING_COMMAND =
 	/\b(pytest|unittest|python3?|cargo|go (test|build|vet|run)|ctest|make\b|cmake|g\+\+|clang\+\+|gcc|npm|npx|node|tsc|tox|\.\/\S+)/;
-const MAX_EDITS = 8;
-const EDIT_TEXT_CHARS = 400;
-const EXCERPT_LINES = 8;
+const MAX_STAGES = 4;
+const MAX_EDITS_PER_STAGE = 8;
+const EDIT_TEXT_CHARS = 1_200;
+const EXCERPT_LINES = 20;
 
 /**
  * Watches tool results for error→fix pairs. Only a failure followed by edits and then a success
  * of the *same* command counts: the success is the external signal (never the model's opinion).
- * If the error changes before the command passes, the episode restarts from the new error.
+ *
+ * When the error changes before the command passes, the earlier error is kept: the pass shows
+ * that the edits made since it, taken together, fixed it. A pass then gives one episode for the
+ * first error (what a fresh attempt meets first, with every edit since) and one for the last
+ * (with the edits that finished the job).
  */
-export function createEpisodeTracker(): { observe(tool: ToolOutcome): FixEpisode | undefined; reset(): void } {
-	const open = new Map<string, OpenFailure>();
+export function createEpisodeTracker(): { observe(tool: ToolOutcome): FixEpisode[]; reset(): void } {
+	const open = new Map<string, Stage[]>();
 
 	function onFailure(command: string, tool: ToolOutcome): void {
+		const stages = open.get(command) ?? [];
+		const last = stages.at(-1);
 		const signature = errorSignature(tool.toolName, tool.exitCode, tool.output);
-		if (open.get(command)?.signature === signature) return; // same error again: keep collecting edits
+		if (last?.signature === signature) {
+			// The same error again: keep collecting edits.
+			if (last.edits.length > last.editsAtLastFailure) last.retries += 1;
+			last.editsAtLastFailure = last.edits.length;
+			return;
+		}
 		const first = firstErrorLine(tool.output);
-		if (first)
-			open.set(command, {
-				signature,
-				errorLine: first.line,
-				excerpt: excerptAround(tool.output, first.index),
-				edits: [],
-			});
-		else open.delete(command);
+		if (!first) {
+			open.delete(command);
+			return;
+		}
+		// An error that changed with nothing edited was not fixed by anything: it is replaced.
+		if (last && last.edits.length === 0) stages.pop();
+		if (stages.length === MAX_STAGES) return;
+		stages.push({
+			signature,
+			errorLine: first.line,
+			detail: cardDetail(tool.output),
+			excerpt: excerptAround(tool.output, first.index),
+			edits: [],
+			retries: 0,
+			editsAtLastFailure: 0,
+		});
+		open.set(command, stages);
 	}
 
-	function onSuccess(command: string): FixEpisode | undefined {
-		const failure = open.get(command);
+	function onSuccess(command: string): FixEpisode[] {
+		const stages = (open.get(command) ?? []).filter((stage) => stage.edits.length > 0);
 		open.delete(command);
-		return failure && failure.edits.length > 0 ? { command, ...failure } : undefined;
+		const starts = stages.length > 1 ? [0, stages.length - 1] : stages.length === 1 ? [0] : [];
+		return starts.flatMap((start) => {
+			const stage = stages[start];
+			if (!stage) return [];
+			const steps = stages.slice(start).map(({ errorLine, excerpt, edits, retries }) => ({
+				errorLine,
+				excerpt,
+				edits: [...edits],
+				retries,
+			}));
+			return [{ command, signature: stage.signature, errorLine: stage.errorLine, detail: stage.detail, steps }];
+		});
 	}
 
 	return {
 		observe(tool) {
 			const edits = editOf(tool);
 			if (edits) {
-				for (const failure of open.values()) if (failure.edits.length < MAX_EDITS) failure.edits.push(...edits);
-				return undefined;
+				for (const stages of open.values()) {
+					const stage = stages.at(-1);
+					if (stage && stage.edits.length < MAX_EDITS_PER_STAGE) stage.edits.push(...edits);
+				}
+				return [];
 			}
 			const command = commandKey(tool);
-			if (!command || !VERIFYING_COMMAND.test(command)) return undefined;
+			if (!command || !VERIFYING_COMMAND.test(command)) return [];
 			if (tool.isError || (tool.exitCode !== null && tool.exitCode !== 0)) {
 				onFailure(command, tool);
-				return undefined;
+				return [];
 			}
 			return onSuccess(command);
 		},
@@ -79,9 +132,20 @@ export function createEpisodeTracker(): { observe(tool: ToolOutcome): FixEpisode
 	};
 }
 
-function commandKey(tool: ToolOutcome): string | undefined {
+/** Every edit on the route, in order. */
+export function editsOf(episode: FixEpisode): Edit[] {
+	return episode.steps.flatMap((step) => step.edits);
+}
+
+/** One command, however its output was redirected: `cargo test` and `cargo test 2>&1` are the same run. */
+export function commandKey(tool: ToolOutcome): string | undefined {
 	const command = tool.input["command"];
-	return typeof command === "string" ? command.replace(/\s+/g, " ").trim().slice(0, 300) : undefined;
+	if (typeof command !== "string") return undefined;
+	return command
+		.replace(/\s*2>&1/g, "")
+		.replace(/\s+/g, " ")
+		.trim()
+		.slice(0, 300);
 }
 
 /** pi's `edit` ({path, edits: [{oldText, newText}]}) and `write` ({path, content}). */

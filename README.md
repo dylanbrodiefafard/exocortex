@@ -70,7 +70,7 @@ Each is off by default. Enable them under `modules` in `~/.exocortex/config.json
 
 ### Memory (Phase 5)
 
-Enable with `"memory": { "enabled": true }` or `/exo memory on`. When a build or test command fails, the agent edits files and the same command then passes, memory saves a short lesson about that fix for this repo. The next time the same error appears, even in a later session, the lesson is added to the failing output. Lessons that keep failing to help are retired automatically. Cards live in `~/.exocortex/memory.db`.
+Enable with `"memory": { "enabled": true }` or `/exo memory on`. When a build or test command fails, the agent edits files and the same command then passes, memory saves a short lesson about that fix for this repo. The next time the same problem appears (the same kind of error naming the same tests or symbols), even in a later session, the lesson is added to the failing output as a past fix to check against the current code. Lessons that keep failing to help are retired automatically. Cards live in `~/.exocortex/memory.db`.
 
 With `"preferences": true` it also learns how you like work done. It reads only what you type. Say something as a standing rule ("always write the failing test first", "from now on keep commits small"), or give the same instruction in two sessions, and it becomes a preference. Later prompts that leave it unsaid get it added as a short visible note; your prompt wins on any conflict. `/exo memory preferences` lists what it has learned and `/exo memory forget <id>` removes one (D-060).
 

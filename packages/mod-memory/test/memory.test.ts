@@ -1,11 +1,12 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runShellCommand, type ToolOutcome } from "@exocortex/core";
+import { errorSignature, runShellCommand, type ToolOutcome } from "@exocortex/core";
 import { createTestModuleContext, type SidecarReply } from "@exocortex/testkit";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { cardDetail, detailShare, FAILURE_DETAIL_LINES, failureDetail } from "../src/detail.ts";
 import { createEpisodeTracker } from "../src/episodes.ts";
-import { createMemory, deterministicLesson } from "../src/memory.ts";
+import { createMemory, deterministicLesson, recall } from "../src/memory.ts";
 import { openMemoryStore } from "../src/store.ts";
 
 let dir: string;
@@ -70,33 +71,94 @@ async function until(predicate: () => boolean) {
 describe("episode tracker", () => {
 	it("emits a fix only for fail → edit → pass of the same command", () => {
 		const tracker = createEpisodeTracker();
-		expect(tracker.observe(fail())).toBeUndefined();
-		expect(tracker.observe(edit)).toBeUndefined();
-		expect(tracker.observe(pass("cargo test"))).toBeUndefined();
-		const episode = tracker.observe(pass());
-		expect(episode).toMatchObject({
-			command: "cargo build",
-			errorLine: "error[E0502]: cannot borrow `self.stack` as mutable",
-			edits: [{ path: "lib.rs", before: "self.stack.push(x)", after: "let v = x.clone(); self.stack.push(v)" }],
-		});
-		expect(tracker.observe(pass())).toBeUndefined();
+		expect(tracker.observe(fail())).toEqual([]);
+		expect(tracker.observe(edit)).toEqual([]);
+		expect(tracker.observe(pass("cargo test"))).toEqual([]);
+		// Redirecting the output does not make it another command.
+		const episodes = tracker.observe(pass("cargo build 2>&1"));
+		expect(episodes).toMatchObject([
+			{
+				command: "cargo build",
+				errorLine: "error[E0502]: cannot borrow `self.stack` as mutable",
+				detail: ["stack", "e0502"],
+				steps: [
+					{
+						edits: [{ path: "lib.rs", before: "self.stack.push(x)", after: "let v = x.clone(); self.stack.push(v)" }],
+						retries: 0,
+					},
+				],
+			},
+		]);
+		expect(tracker.observe(pass())).toEqual([]);
 	});
 
-	it("ignores passes without edits, non-verifying commands, and restarts when the error changes", () => {
+	it("ignores passes without edits and non-verifying commands", () => {
 		const tracker = createEpisodeTracker();
 		tracker.observe(fail());
-		expect(tracker.observe(pass())).toBeUndefined();
+		expect(tracker.observe(pass())).toEqual([]);
 		tracker.observe(fail("grep -r foo .", "error: nope"));
 		tracker.observe(edit);
-		expect(tracker.observe(pass("grep -r foo ."))).toBeUndefined();
+		expect(tracker.observe(pass("grep -r foo ."))).toEqual([]);
+		tracker.observe(fail());
+		tracker.observe(edit);
+		tracker.observe(fail("cargo build", "no error line here"));
+		expect(tracker.observe(pass())).toEqual([]);
+		tracker.observe(fail());
+		tracker.observe({ ...edit, toolName: "write", input: { path: "a.rs", content: "x" } });
+		tracker.reset();
+		expect(tracker.observe(pass())).toEqual([]);
+	});
+
+	it("keeps the first error when the error changes, and gives an episode for it and for the last (D-072)", () => {
+		const tracker = createEpisodeTracker();
+		const other = { ...edit, input: { path: "b.rs", edits: [{ oldText: "a", newText: "b" }] } };
+		tracker.observe(fail());
+		tracker.observe(edit);
 		tracker.observe(fail());
 		tracker.observe(edit);
 		tracker.observe(fail("cargo build", "error[E0308]: mismatched types"));
-		expect(tracker.observe(pass())).toBeUndefined();
-		tracker.observe(fail("cargo build", "no error line here"));
-		tracker.observe({ ...edit, toolName: "write", input: { path: "a.rs", content: "x" } });
-		tracker.reset();
-		expect(tracker.observe(pass())).toBeUndefined();
+		tracker.observe(other);
+		const episodes = tracker.observe(pass());
+		expect(
+			episodes.map((e) => [e.errorLine, e.steps.map((s) => s.edits.map((x) => x.path)), e.steps[0]?.retries]),
+		).toEqual([
+			["error[E0502]: cannot borrow `self.stack` as mutable", [["lib.rs", "lib.rs"], ["b.rs"]], 1],
+			["error[E0308]: mismatched types", [["b.rs"]], 0],
+		]);
+	});
+
+	it("does not keep an error that went away with nothing edited", () => {
+		const tracker = createEpisodeTracker();
+		tracker.observe(fail());
+		tracker.observe(fail("cargo build", "error[E0308]: mismatched types"));
+		tracker.observe(edit);
+		expect(tracker.observe(pass()).map((e) => e.errorLine)).toEqual(["error[E0308]: mismatched types"]);
+	});
+});
+
+describe("failure detail (D-072)", () => {
+	const TABLE = [
+		"simple_table --- FAILED",
+		"thread 'simple_table' (207059) panicked at tests/render.rs:8:5:",
+		"assertion `left == right` failed",
+		"error: test failed, to rerun pass `--test render`",
+	].join("\n");
+	const INI = [
+		"thread 'empty_input' (31) panicked at tests/parser.rs:4:5:",
+		"error: test failed, to rerun pass `--test parser`",
+	].join("\n");
+
+	it("keeps the names a failure mentions and drops what every failure prints", () => {
+		expect(cardDetail(TABLE)).toEqual(["simple_table", "render"]);
+		expect(cardDetail("all good")).toEqual([]);
+	});
+
+	it("tells two failures with one signature apart, and finds a card's problem further down the output", () => {
+		const table = cardDetail(TABLE);
+		expect(detailShare(table, new Set(failureDetail(INI, FAILURE_DETAIL_LINES)))).toBe(0);
+		const later = `thread 'aaa' (1) panicked at tests/other.rs:1:1:\n${TABLE}`;
+		expect(detailShare(table, new Set(failureDetail(later, FAILURE_DETAIL_LINES)))).toBe(1);
+		expect(detailShare([], new Set())).toBe(1);
 	});
 });
 
@@ -119,34 +181,128 @@ describe("memory module", () => {
 			draft(fail("cargo build", ERROR.replace("4:9", "9:1"))),
 			signal,
 		);
-		expect(rewrite?.text).toContain("[exo memory: this error was fixed before in this repo]");
-		expect(rewrite?.text).toContain("clone the value before pushing onto `self.stack`. (when: pushing while borrowed)");
+		expect(rewrite?.text).toContain("check a note against the current code before relying on it.]");
+		expect(rewrite?.text).toContain(
+			"- (this error, this repo; the fix edited lib.rs) In lib.rs, clone the value before pushing onto `self.stack`. (when: pushing while borrowed)",
+		);
 		expect(later.memory.status?.()).toMatch(/memory \(1 cards · 0 learned · 1 recalled\)/);
 		// Recalled once per task.
 		expect(await later.memory.rewriteToolResult?.(draft(fail()), signal)).toBeUndefined();
 	});
 
-	it("credits helped when the error does not recur, hurt when it does", async () => {
+	it("credits a card by what its command did next: helped on a pass, hurt when the problem keeps coming back", async () => {
 		const { memory } = setup({ distill: false });
 		memory.onToolResult?.(fail());
 		memory.onToolResult?.(edit);
 		memory.onToolResult?.(pass());
 		await new Promise((r) => setTimeout(r, 50));
+		const settle = { outcome: "completed", lastAssistantText: "" } as const;
 
+		// One more failure, then the command passes: the card helped.
 		const helped = setup();
 		await helped.memory.rewriteToolResult?.(draft(fail()), signal);
-		await helped.memory.onSettle?.({ outcome: "completed", lastAssistantText: "" }, signal);
+		helped.memory.onToolResult?.(fail());
+		helped.memory.onToolResult?.(pass());
+		await helped.memory.onSettle?.(settle, signal);
+		expect(helped.t.records.at(-1)?.data).toMatchObject({ action: "credited", outcome: "helped" });
 
+		// The problem came back and the command never passed.
 		const hurt = setup();
 		await hurt.memory.rewriteToolResult?.(draft(fail()), signal);
 		hurt.memory.onToolResult?.(fail());
 		hurt.memory.onUserTurn?.({ text: "next", origin: "user" });
 
+		// It came back twice before the pass.
+		const slow = setup();
+		await slow.memory.rewriteToolResult?.(draft(fail()), signal);
+		slow.memory.onToolResult?.(fail());
+		slow.memory.onToolResult?.(fail());
+		slow.memory.onToolResult?.(pass());
+		await slow.memory.onSettle?.(settle, signal);
+
+		// The command was never run again, or failed with another problem: no evidence either way.
+		const unknown = setup();
+		await unknown.memory.rewriteToolResult?.(draft(fail()), signal);
+		unknown.memory.onToolResult?.(fail("cargo build", "error[E0502]: cannot borrow `other.queue` as immutable"));
+		unknown.memory.onToolResult?.(pass("cargo test"));
+		await unknown.memory.onSettle?.(settle, signal);
+		expect(unknown.t.records.some((r) => (r.data as { action?: string }).action === "credited")).toBe(false);
+
 		const cards = openMemoryStore(dbPath).cards();
-		expect(cards[0]).toMatchObject({ injected: 2, helped: 1, hurt: 1 });
+		expect(cards[0]).toMatchObject({ injected: 4, helped: 1, hurt: 2 });
 		expect(cards[0]?.lesson).toBe(
 			"Fixed before by editing lib.rs: `self.stack.push(x)` → `let v = x.clone(); self.stack.push(v)`",
 		);
+	});
+
+	it("keeps a card per problem when two problems share a signature, and recalls only the one that failed (D-072)", async () => {
+		const STACK = "error[E0502]: cannot borrow `self.stack` as mutable\n  --> lib.rs:4:9";
+		const QUEUE = "error[E0502]: cannot borrow `jobs.queue` as immutable\n  --> lib.rs:40:9";
+		const { memory, t } = setup({ distill: false });
+		for (const output of [STACK, QUEUE, STACK]) {
+			memory.onToolResult?.(fail("cargo build", output));
+			memory.onToolResult?.(edit);
+			memory.onToolResult?.(pass());
+		}
+		await until(() => t.records.length === 3);
+		expect(t.records.map((r) => (r.data as { action: string }).action)).toEqual(["learned", "learned", "merged"]);
+		const store = openMemoryStore(dbPath);
+		expect(store.cards().map((c) => [c.seen, c.detail.includes("queue")])).toEqual([
+			[2, false],
+			[1, true],
+		]);
+
+		const later = setup();
+		const rewrite = await later.memory.rewriteToolResult?.(draft(fail("cargo build", QUEUE)), signal);
+		expect(rewrite?.note).toBe("recalled 1 card(s)");
+		expect(later.t.records.at(-1)?.data).toMatchObject({ cards: [store.cards()[1]?.id], matches: ["same"] });
+		// A third problem of the same kind names neither card's things: the signature alone recalls nothing.
+		const third = "error[E0502]: cannot borrow `cache.entries` as mutable\n  --> lib.rs:90:9";
+		expect(await setup().memory.rewriteToolResult?.(draft(fail("cargo build", third)), signal)).toBeUndefined();
+		expect(
+			recall(store, "elsewhere", store.cards()[0]?.signature ?? "", third, {
+				maxCards: 2,
+				minOverlap: 0.6,
+				minDetail: 0,
+			}),
+		).toEqual([]);
+	});
+
+	it("recalls a problem fixed in two other repos, and says where it comes from", () => {
+		const store = openMemoryStore(dbPath);
+		const output = "ModuleNotFoundError: No module named 'yaml'";
+		const signature = errorSignature("bash", 1, output);
+		const base = { signature, detail: cardDetail(output), files: ["setup.cfg"], trigger: output, evidence: "{}" };
+		store.add({ ...base, scope: "repo-a", lesson: "Install pyyaml." });
+		const settings = { maxCards: 2, minOverlap: 0.6, minDetail: 0.6 };
+		expect(recall(store, "repo-z", signature, output, settings)).toEqual([]);
+		store.add({ ...base, scope: "repo-b", lesson: "Add pyyaml to the dev requirements." });
+		expect(recall(store, "repo-z", signature, output, settings).map((r) => r.match)).toEqual([
+			"elsewhere",
+			"elsewhere",
+		]);
+		// The same signature, another module.
+		const other = "ModuleNotFoundError: No module named 'requests'";
+		expect(errorSignature("bash", 1, other)).toBe(signature);
+		expect(recall(store, "repo-z", signature, other, settings)).toEqual([]);
+	});
+
+	it("shows the lesson sidecar the whole route when the error changed on the way to the pass", async () => {
+		const { memory, t } = setup({}, () => ({ lesson: "", applies_when: "" }));
+		memory.onToolResult?.(fail());
+		memory.onToolResult?.(edit);
+		memory.onToolResult?.(fail());
+		memory.onToolResult?.(edit);
+		memory.onToolResult?.(fail("cargo build", "error[E0308]: mismatched types"));
+		memory.onToolResult?.(edit);
+		memory.onToolResult?.(pass());
+		await until(() => t.requests.length === 2);
+		const first = String(t.requests[0]?.messages[0]?.["content"]);
+		expect(first).toContain("1. The command failed:");
+		expect(first).toContain("(The command failed with this same error 1 more time(s) during these edits.)");
+		expect(first).toContain("2. The command then failed with a different error:");
+		expect(first).toContain("3. The command passed.");
+		expect(String(t.requests[1]?.messages[0]?.["content"])).toContain("2. The command passed.");
 	});
 
 	it("falls back to a deterministic lesson when the sidecar's lesson names unknown things", async () => {
@@ -209,16 +365,17 @@ describe("memory module", () => {
 });
 
 describe("deterministicLesson", () => {
-	it("names the files and the first change", () => {
+	it("names the files and the change that was in place when the command passed", () => {
+		const step = { errorLine: "e", excerpt: "", retries: 0 };
 		expect(
 			deterministicLesson({
 				command: "make",
 				signature: "s",
 				errorLine: "e",
-				excerpt: "",
-				edits: [
-					{ path: "a.cpp", before: "int x", after: "long x" },
-					{ path: "b.cpp", before: "", after: "" },
+				detail: [],
+				steps: [
+					{ ...step, edits: [{ path: "a.cpp", before: "int y", after: "short y" }] },
+					{ ...step, edits: [{ path: "b.cpp", before: "int x", after: "long x" }] },
 				],
 			}),
 		).toBe("Fixed before by editing a.cpp, b.cpp: `int x` → `long x`");
@@ -473,7 +630,9 @@ describe("embeddings (D-062)", () => {
 		await learnCard(embed);
 		expect(await recallFor(setup().memory, REWORDED)).toBeUndefined();
 		const rewrite = await recallFor(setup({}, undefined, embed).memory, REWORDED);
-		expect(rewrite?.text).toContain("[exo memory: this error was fixed before in this repo]");
+		expect(rewrite?.text).toContain(
+			"- (a similar error, this repo; the fix edited lib.rs) Fixed before by editing lib.rs",
+		);
 		expect(await recallFor(setup({}, undefined, embed).memory, UNRELATED)).toBeUndefined();
 		expect(await recallFor(setup({ minSimilarity: 0.99 }, undefined, embed).memory, REWORDED)).toBeUndefined();
 	});
