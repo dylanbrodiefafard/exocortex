@@ -1205,6 +1205,17 @@ Open check: Exocortex's injected `custom_message` reaches ninfer as a second con
 
 ---
 
+### D-076 — Hardening pass: fix every audit finding, in two waves · accepted (2026-10-06; owner's request)
+- **Context:** a read-only audit of every package found about ninety weak spots. The largest group traces to core's reading of command lines and their output (`runs.ts`, `output.ts`, `loops.ts`), which memory, triage, compaction, the trimmer, the supervisor and the eval all rely on. The eval's statistics and tamper guard come next, since they decide which defaults get switched on (AB_PLAN).
+- **Decision:** fix all of them before the A/B runs. `docs/HARDENING_PLAN.md` lists every item with its file, the failure and the proposed fix, and tracks its status.
+  - **Wave 1** changes what the modules build on: core's reading (D-077), the adapter's dispatcher (D-078), the eval (D-079), core infrastructure (D-080).
+  - **Wave 2** changes the modules and starts when wave 1 is on `main`: memory (D-081), triage (D-082), trimmer (D-083), supervisor (D-084), compaction (D-085), eval follow-up (D-086).
+  - Each stream is one short-lived branch, squash-merged (D-022), and writes the entry numbered above.
+- **Rules:** a finding is confirmed with a failing test before it is fixed, and one that does not reproduce is marked so in the plan with the reason.
+- **Consequences:** D-052 still holds: every module is off by default, so no result changes meaning. Fixtures should be re-calibrated after C2 (the tamper guard) lands, since it can change which runs pass.
+
+---
+
 ## Open questions (carried from brief §10, updated)
 
 1. ~~Resolved by D-029.~~ Exact pi mechanism for injecting into the current user turn without altering prior messages. *(Phase 0)*
