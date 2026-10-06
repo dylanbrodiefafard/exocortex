@@ -26,7 +26,7 @@ export const SettingsSchema = Type.Object(
 		/**
 		 * D-072: a card is the same problem as a failure when the failure mentions at least this share
 		 * of the names the card was learned with (tests, symbols, error codes). 0 matches on the
-		 * signature alone, as before D-072.
+		 * signature alone.
 		 */
 		minDetail: Type.Number({ minimum: 0, maximum: 1, default: 0.6 }),
 		/**

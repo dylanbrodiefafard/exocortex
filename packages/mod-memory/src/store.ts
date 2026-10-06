@@ -2,7 +2,6 @@ import { chmodSync, closeSync, existsSync, mkdirSync, openSync, renameSync } fro
 import { dirname } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { decodeVector, encodeVector, openDatabase } from "@exocortex/core";
-import { normalizeScope } from "./scope.ts";
 
 /**
  * One problem and the fix that was verified for it (brief §6.4, D-072). Phase 5 v1 stores only
@@ -158,17 +157,24 @@ export interface StoredPreference {
 	readonly sightings: readonly Sighting[];
 }
 
-type Migration = string | ((db: DatabaseSync) => void);
+/**
+ * The schema's version. Nothing is released, so there is one schema and no migrations (D-088): a
+ * store at any other version is set aside and a new one started. The first change after a release
+ * adds a migration here and stops setting stores aside.
+ */
+const SCHEMA_VERSION = 1;
 
-const MIGRATIONS: readonly Migration[] = [
-	`
+const SCHEMA = `
 	CREATE TABLE cards (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		scope TEXT NOT NULL,
 		type TEXT NOT NULL DEFAULT 'pitfall',
 		signature TEXT NOT NULL,
+		detail TEXT NOT NULL DEFAULT '',
+		files TEXT NOT NULL DEFAULT '',
 		trigger TEXT NOT NULL,
 		lesson TEXT NOT NULL,
+		distilled INTEGER NOT NULL DEFAULT 0,
 		evidence TEXT NOT NULL,
 		seen INTEGER NOT NULL DEFAULT 1,
 		injected INTEGER NOT NULL DEFAULT 0,
@@ -180,14 +186,15 @@ const MIGRATIONS: readonly Migration[] = [
 	CREATE INDEX cards_signature ON cards (signature, valid_to);
 	CREATE INDEX cards_scope ON cards (scope, valid_to);
 	CREATE VIRTUAL TABLE cards_fts USING fts5(trigger, lesson, card_id UNINDEXED, tokenize = 'unicode61');
-	`,
-	`
 	CREATE TABLE preferences (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		rule TEXT NOT NULL,
+		task_kind TEXT NOT NULL DEFAULT 'any',
 		injected INTEGER NOT NULL DEFAULT 0,
+		repeated INTEGER NOT NULL DEFAULT 0,
 		created_at INTEGER NOT NULL,
-		valid_to INTEGER
+		valid_to INTEGER,
+		retired_by TEXT
 	);
 	CREATE TABLE preference_sightings (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -195,12 +202,12 @@ const MIGRATIONS: readonly Migration[] = [
 		scope TEXT NOT NULL,
 		session TEXT NOT NULL,
 		standing INTEGER NOT NULL DEFAULT 0,
+		correction INTEGER NOT NULL DEFAULT 0,
 		quote TEXT NOT NULL,
+		source TEXT NOT NULL DEFAULT 'message',
 		seen_at INTEGER NOT NULL
 	);
 	CREATE INDEX preference_sightings_preference ON preference_sightings (preference_id);
-	`,
-	`
 	CREATE TABLE vectors (
 		kind TEXT NOT NULL,
 		ref_id INTEGER NOT NULL,
@@ -208,28 +215,7 @@ const MIGRATIONS: readonly Migration[] = [
 		vector BLOB NOT NULL,
 		PRIMARY KEY (kind, ref_id, model)
 	);
-	`,
-	`
-	ALTER TABLE preferences ADD COLUMN task_kind TEXT NOT NULL DEFAULT 'any';
-	ALTER TABLE preferences ADD COLUMN repeated INTEGER NOT NULL DEFAULT 0;
-	ALTER TABLE preference_sightings ADD COLUMN correction INTEGER NOT NULL DEFAULT 0;
-	`,
-	`
-	ALTER TABLE preference_sightings ADD COLUMN source TEXT NOT NULL DEFAULT 'message';
-	`,
-	`
-	ALTER TABLE cards ADD COLUMN detail TEXT NOT NULL DEFAULT '';
-	ALTER TABLE cards ADD COLUMN files TEXT NOT NULL DEFAULT '';
-	`,
-	// Every lesson that is not the deterministic summary came from the sidecar.
-	`
-		ALTER TABLE cards ADD COLUMN distilled INTEGER NOT NULL DEFAULT 0;
-		UPDATE cards SET distilled = 1 WHERE lesson NOT LIKE 'Fixed before by editing %';
-		ALTER TABLE preferences ADD COLUMN retired_by TEXT;
-		`,
-	// Keep this one last: a test steps back one version to run it again.
-	normalizeStoredScopes,
-];
+`;
 
 /** Fewer shared keywords than this is a coincidence, not a similar error. */
 const MIN_SHARED_KEYWORDS = 3;
@@ -291,17 +277,18 @@ interface SightingRow {
 }
 
 /**
- * Opens (and migrates) the memory card store. `:memory:` for tests.
+ * Opens the memory card store, creating it when new. `:memory:` for tests.
  * - The file is the user's alone (mode 600): it holds their words and pieces of their code.
  * - A file that is not a database, or a damaged one, is set aside as `<name>.corrupt-<time>` and a
- *   new store is started; `report` is told. A store from a newer Exocortex is refused, not replaced.
+ *   new store is started; `report` is told. So is a store at another schema version, as
+ *   `<name>.other-schema-<time>` (D-088).
  */
 export function openMemoryStore(
 	path: string,
 	now: () => number = Date.now,
 	report: (message: string) => void = () => {},
 ): MemoryStore {
-	const db = openMigrated(path, now, report);
+	const db = openStoreFile(path, now, report);
 	const live = "valid_to IS NULL";
 	const select = (where: string) => db.prepare(`SELECT * FROM cards WHERE ${where}`);
 	let depth = 0;
@@ -610,54 +597,41 @@ function mergeEvidence(previous: string, next: string): string {
 }
 
 /**
- * Brings a database to the current schema. Each step runs in a write transaction that is taken
- * before the version is read, so of two processes opening a new store at once, the second waits
- * and then finds the step done.
+ * Creates the schema in a new database. The write transaction is taken before the version is
+ * read, so of two processes opening a new store at once, the second waits and then finds it made.
+ * Throws {@link OtherSchema} for a store at another version.
  */
-export function migrate(db: DatabaseSync): void {
-	for (;;) {
-		db.exec("BEGIN IMMEDIATE");
-		try {
-			const row = db.prepare("PRAGMA user_version").get() as { user_version: number } | undefined;
-			const version = row?.user_version ?? 0;
-			if (version > MIGRATIONS.length) {
-				throw new Error(`memory store schema v${version} is newer than this Exocortex`);
-			}
-			const migration = MIGRATIONS[version];
-			if (migration === undefined) {
-				db.exec("COMMIT");
-				return;
-			}
-			if (typeof migration === "string") db.exec(migration);
-			else migration(db);
-			db.exec(`PRAGMA user_version = ${version + 1}`);
-			db.exec("COMMIT");
-		} catch (error) {
-			db.exec("ROLLBACK");
-			throw error;
+export function ensureSchema(db: DatabaseSync): void {
+	db.exec("BEGIN IMMEDIATE");
+	try {
+		const row = db.prepare("PRAGMA user_version").get() as { user_version: number } | undefined;
+		const version = row?.user_version ?? 0;
+		if (version !== 0 && version !== SCHEMA_VERSION) throw new OtherSchema(version);
+		if (version === 0) {
+			db.exec(SCHEMA);
+			db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
 		}
+		db.exec("COMMIT");
+	} catch (error) {
+		db.exec("ROLLBACK");
+		throw error;
 	}
 }
 
-/** Repo names stored before they had a normal form (M12): `remote:git@host:Owner/Repo.git`. */
-function normalizeStoredScopes(db: DatabaseSync): void {
-	for (const table of ["cards", "preference_sightings"]) {
-		const rows = db.prepare(`SELECT DISTINCT scope FROM ${table}`).all() as unknown as { scope: string }[];
-		const update = db.prepare(`UPDATE ${table} SET scope = ? WHERE scope = ?`);
-		for (const { scope } of rows) {
-			const normal = normalizeScope(scope);
-			if (normal !== scope) update.run(normal, scope);
-		}
+/** The store was written with another schema version. */
+class OtherSchema extends Error {
+	constructor(version: number) {
+		super(`schema v${version} is not this Exocortex's (v${SCHEMA_VERSION})`);
 	}
 }
 
 /** What SQLite says when the file is not a database or its pages are damaged. */
 const CORRUPT = /not a database|malformed|SQLITE_NOTADB|SQLITE_CORRUPT/i;
 
-function openMigrated(path: string, now: () => number, report: (message: string) => void): DatabaseSync {
+function openStoreFile(path: string, now: () => number, report: (message: string) => void): DatabaseSync {
 	if (path === ":memory:") {
 		const db = openDatabase(path);
-		migrate(db);
+		ensureSchema(db);
 		return db;
 	}
 	mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
@@ -673,7 +647,7 @@ function openMigrated(path: string, now: () => number, report: (message: string)
 		}
 		const db = openDatabase(path);
 		try {
-			migrate(db);
+			ensureSchema(db);
 			return db;
 		} catch (error) {
 			db.close();
@@ -683,8 +657,9 @@ function openMigrated(path: string, now: () => number, report: (message: string)
 	try {
 		return open();
 	} catch (error) {
-		if (!CORRUPT.test(String(error))) throw error;
-		const aside = `${path}.corrupt-${now()}`;
+		const other = error instanceof OtherSchema;
+		if (!other && !CORRUPT.test(String(error))) throw error;
+		const aside = `${path}.${other ? "other-schema" : "corrupt"}-${now()}`;
 		renameSync(path, aside);
 		for (const suffix of ["-wal", "-shm"]) {
 			if (existsSync(`${path}${suffix}`)) renameSync(`${path}${suffix}`, `${aside}${suffix}`);

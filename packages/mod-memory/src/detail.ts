@@ -60,8 +60,8 @@ export function cardDetail(output: string): string[] {
 
 /**
  * How much of a card's problem is in a failure: the share of the card's names the failure also
- * mentions. A card with no names (learned before D-072, or from an error that names nothing)
- * can only be matched by its signature, so it counts as present.
+ * mentions. A card with no names (its error named nothing) can only be matched by its signature,
+ * so it counts as present.
  */
 export function detailShare(card: readonly string[], failure: ReadonlySet<string>): number {
 	if (card.length === 0) return 1;

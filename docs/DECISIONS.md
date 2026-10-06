@@ -1722,6 +1722,19 @@ Open check: Exocortex's injected `custom_message` reaches ninfer as a second con
 
 ---
 
+### D-088 — Memory's store has one schema and no migrations until there is a release · accepted (2026-10-06; owner's call; amends D-081's M10 and M12 and D-072's allowances for older cards)
+- **Context:** nothing is released, yet the store carried eight migrations, one of which rewrote repo names stored in an older form, and three places in the code made allowances for cards "learned before D-072" (no files, no names). None of that describes a store anyone has.
+- **Decision.**
+  - **One schema.** The tables are created in their current shape and the store is at schema version 1. There is no migration list.
+  - **Another version is set aside.** A store at any other version is renamed to `<name>.other-schema-<time>` and a new one started, and the user is told, as for a corrupt file (D-081). It is not refused: before a release there is nothing in such a file to keep working with, and nothing is deleted.
+  - **A card names the files of its fix.** A card with no files is no longer treated as matching every fix (credit, D-081 M4) or as the same fix (merge or supersede). Cards are only written from an episode with at least one counted edit, so there are none.
+  - Lessons are still made inert when shown as well as when stored: the store is a file, and its contents are not taken on trust.
+- **Consequences:**
+  - A store written by an earlier build, including one the tests created under `~/.exocortex/` before D-081's guard, is set aside the first time memory opens it.
+  - **After a release this changes:** the first schema change adds a migration and stops setting stores aside, and a newer store is refused, as before.
+
+---
+
 ## Open questions (carried from brief §10, updated)
 
 1. ~~Resolved by D-029.~~ Exact pi mechanism for injecting into the current user turn without altering prior messages. *(Phase 0)*

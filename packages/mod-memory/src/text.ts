@@ -10,7 +10,8 @@ export function oneLine(text: string, max = 80): string {
  * Text that will be shown to the agent inside a memory note, made unable to pose as anything else
  * (M8): one line, so it cannot start a note or a header of its own; no `[exo …` opener, which is
  * how Exocortex's own messages begin; none of the `<<<` / `>>>` fences the sidecar prompts use.
- * Applied when a lesson is stored and again when it is shown, since the store may hold older text.
+ * Applied when a lesson is stored and again when it is shown: the store is a file, and what is in
+ * it is not taken on trust.
  */
 export function inert(text: string): string {
 	return text

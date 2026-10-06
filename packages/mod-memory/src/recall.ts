@@ -162,8 +162,7 @@ export function createRecaller({ ctx, settings, store, scope, changed }: MemoryD
 	function follows(shown: Shown): boolean {
 		// Another repo's files are not this repo's: any edit before the pass counts.
 		if (shown.match === "elsewhere") return shown.edited.size > 0;
-		// A card that names no files (learned before D-072) has nothing to check the pass against.
-		return shown.card.files.length === 0 || shown.card.files.some((file) => shown.edited.has(file));
+		return shown.card.files.some((file) => shown.edited.has(file));
 	}
 
 	/** Files edited since each card was shown. True when something new was noted. */

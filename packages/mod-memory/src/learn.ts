@@ -109,8 +109,7 @@ export function createLearner({ ctx, settings, store, scope }: MemoryDeps): Lear
 		const card = store
 			.bySignature(episode.signature)
 			.find((c) => c.scope === repo && sameProblem(c, episode, settings.minDetail));
-		// A card that names no files (learned before D-072) cannot be told apart from this fix.
-		return card && { card, sameFix: card.files.length === 0 || card.files.some((file) => files.includes(file)) };
+		return card && { card, sameFix: card.files.some((file) => files.includes(file)) };
 	}
 
 	/** MERGE when the problem has a card whose files this fix touched again. */

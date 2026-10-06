@@ -58,8 +58,3 @@ export function normalizeRemote(url: string): string {
 	if (scp) return `${scp[1] ?? ""}/${tidy(scp[2] ?? "").replace(/^\/+/, "")}`.toLowerCase();
 	return tidy(trimmed);
 }
-
-/** A stored scope in its normal form: only `remote:` scopes have one. */
-export function normalizeScope(scope: string): string {
-	return scope.startsWith("remote:") ? `remote:${normalizeRemote(scope.slice("remote:".length))}` : scope;
-}

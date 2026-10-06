@@ -1,11 +1,11 @@
 import "./home-guard.ts";
-import { existsSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openDatabase } from "@exocortex/core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { recall } from "../src/recall.ts";
-import { keywords, migrate, openMemoryStore } from "../src/store.ts";
+import { ensureSchema, keywords, openMemoryStore } from "../src/store.ts";
 
 const card = (scope: string, signature: string, trigger = "error[E0502]: cannot borrow `self.items` as mutable") => ({
 	scope,
@@ -252,15 +252,15 @@ describe("store safety (M10, M8)", () => {
 	});
 	afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
-	it("migrates once when two processes open a new store at the same moment", () => {
+	it("creates the schema once when two processes open a new store at the same moment", () => {
 		const path = join(dir, "race.db");
 		const ours = openDatabase(path);
 		let raced = false;
-		/** Another process that migrates the same file right after we read its version. */
+		/** Another process that creates the schema in the same file right after we read its version. */
 		const other = () => {
 			const db = openDatabase(path, { busyTimeoutMs: 1 });
 			try {
-				migrate(db);
+				ensureSchema(db);
 			} catch (error) {
 				if (!/locked|busy/i.test(String(error))) throw error;
 			} finally {
@@ -285,7 +285,7 @@ describe("store safety (M10, M8)", () => {
 				};
 			},
 		});
-		expect(() => migrate(racing)).not.toThrow();
+		expect(() => ensureSchema(racing)).not.toThrow();
 		expect(raced).toBe(true);
 		ours.close();
 		const store = openMemoryStore(path);
@@ -305,7 +305,7 @@ describe("store safety (M10, M8)", () => {
 		store.close();
 	});
 
-	it("sets a corrupt file aside and starts fresh, but refuses a newer schema", () => {
+	it("sets a corrupt file aside and starts fresh, and does the same for another schema version (D-088)", () => {
 		const path = join(dir, "sub", "memory.db");
 		openMemoryStore(path).close();
 		writeFileSync(path, "this is not a database, it only has the name of one\n".repeat(40));
@@ -320,8 +320,12 @@ describe("store safety (M10, M8)", () => {
 		const raw = openDatabase(path);
 		raw.exec("PRAGMA user_version = 999");
 		raw.close();
-		expect(() => openMemoryStore(path)).toThrow(/newer than this Exocortex/);
-		expect(existsSync(path)).toBe(true);
+		const again = openMemoryStore(path, Date.now, (message) => reports.push(message));
+		// The card written above went with the old file, which is kept beside the new one.
+		expect(again.cards()).toEqual([]);
+		again.close();
+		expect(readdirSync(join(dir, "sub")).filter((name) => name.includes(".other-schema-"))).toHaveLength(1);
+		expect(reports[1]).toMatch(/schema v999 is not this Exocortex's.*set aside as .*memory\.db\.other-schema-/);
 	});
 
 	it("keeps the file to its owner", () => {
@@ -371,31 +375,6 @@ describe("store safety (M10, M8)", () => {
 		expect(store.retire(id)).toBe(true);
 		expect(store.retire(id)).toBe(false);
 		expect(store.card(id)?.validTo).not.toBeNull();
-		store.close();
-	});
-
-	it("gives stored repo names their normal form when it migrates (M12)", () => {
-		const path = join(dir, "scopes.db");
-		const old = openMemoryStore(path);
-		old.add(card("remote:git@github.com:Owner/Repo.git", "sig-1"));
-		old.add(card("tree:abc", "sig-2"));
-		const preference = old.addPreference("Keep commits small.");
-		old.addSighting(preference, {
-			scope: "remote:https://token@github.com/owner/repo/",
-			session: "s",
-			standing: true,
-			correction: false,
-			quote: "q",
-		});
-		old.close();
-		// Back to the version before the last migration, which is the one that rewrites the names.
-		const raw = openDatabase(path);
-		const { user_version: version } = raw.prepare("PRAGMA user_version").get() as { user_version: number };
-		raw.exec(`PRAGMA user_version = ${version - 1}`);
-		raw.close();
-		const store = openMemoryStore(path);
-		expect(store.cards().map((c) => c.scope)).toEqual(["remote:github.com/owner/repo", "tree:abc"]);
-		expect(store.preferences()[0]?.sightings[0]?.scope).toBe("remote:github.com/owner/repo");
 		store.close();
 	});
 });
