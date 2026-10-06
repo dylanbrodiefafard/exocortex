@@ -17,7 +17,7 @@
   <a href="#features">Features</a> ·
   <a href="#how-it-works">How it works</a> ·
   <a href="#configuration">Configuration</a> ·
-  <a href="#evaluation">Evaluation</a> ·
+  <a href="#roadmap">Roadmap</a> ·
   <a href="#documentation">Docs</a>
 </p>
 
@@ -28,7 +28,7 @@ Exocortex is an extension for the [pi](https://github.com/badlogic/pi-mono) codi
 The main model does none of this work. Exocortex gives it no new tools and no extra instructions. The help comes from short side calls ("sidecars") to the same local server, using GPU slots the main agent isn't using.
 
 > [!NOTE]
-> **Status: experimental.** The trace, eval harness, sidecar pool and five modules are built and tested. Every module ships **off by default**, because the A/B runs that would justify turning each one on have not been done yet. There are no measured results to quote. See the [roadmap](#roadmap).
+> **Status: experimental.** All five modules are built and tested, but every one ships **off by default**: the runs that would show how much each one helps have not been done yet, so there are no measured results to quote. You choose which to turn on. See the [roadmap](#roadmap).
 
 ## Why
 
@@ -49,14 +49,13 @@ A small local model running a coding agent is already at its limit on the task i
 - **Keep the prompt cache.** Earlier messages, the system prompt and the tool set are never changed. Help arrives as a new message or as a rewrite of the tool result that just came in.
 - **Say nothing rather than something wrong.** Anything put into context has to pass a precision check; a sidecar that times out or answers badly means no help that turn.
 - **Local first.** No cloud service is needed. Everything talks to an OpenAI-compatible endpoint you run.
-- **Measure before enabling.** Each module can be toggled on its own and A/B tested with the built-in eval harness.
+- **You stay in control.** Each module can be turned on or off on its own, in the config or mid-session.
 
 ## Features
 
 - **Five independent modules:** supervisor, trimmer, triage, compaction and memory, each off until you enable it.
 - **Sidecar pool:** a scheduler with priorities, per-call timeouts, token budgets and slots reserved for the main agent.
 - **Session traces:** every session is recorded to SQLite, with a CLI to inspect events, sidecar calls and what each module did.
-- **Eval harness:** drives pi over RPC against 34 task fixtures in Python, Go, Rust and C++, and compares configs task by task with confidence intervals.
 - **Engine profiles:** works with any OpenAI-compatible server, with fallbacks for features an engine lacks.
 - **Kill switches:** `/exo off` disables everything for the session; `/exo <module> off` disables one module.
 
@@ -220,7 +219,7 @@ Exocortex uses only the standard Chat Completions API. An engine profile records
 - **Pool**: the scheduler that owns the concurrency slots and decides which sidecar calls run, always leaving room for the main agent.
 - **Trace**: an append-only record of the session: prompts, tool calls, results, injections and verdicts.
 
-Modules react to pi's events. They can do two things to the conversation: add a new message tagged `exo.*`, or rewrite the tool result that has just arrived. Earlier turns are never touched, so the server's prefix cache stays valid. The core package does not import pi, which keeps it testable without a model server and leaves room for other harnesses later.
+Modules react to pi's events. They can do two things to the conversation: add a new message tagged `exo.*`, or rewrite the tool result that has just arrived. Earlier turns are never touched, so the server's prefix cache stays valid.
 
 ## Observability
 
@@ -246,61 +245,25 @@ EXO_DEBUG=1 EXO_DEBUG_FILE=/tmp/exo.log pi -e /path/to/exocortex/packages/pi-ada
 
 Set `EXO_DEBUG=verbose` to also log per-token events. The `--exo-debug=1` flag works too; write it with `=`, otherwise pi takes the next argument as the flag's value.
 
-## Evaluation
-
-The eval harness copies a task fixture into a scratch directory, drives pi over RPC with only Exocortex loaded, scores the result with the task's check command and computes metrics from the trace.
-
-```sh
-npm run eval -- --model <provider>/<model-id> --repeat 3                  # baseline: every module off, all tasks
-npm run eval -- --model <provider>/<model-id> --tags hard                 # only the hard tier (or --tags smoke)
-npm run eval -- --config all-off,supervisor --tags hard --repeat 5        # A/B a module
-npm run eval -- --config all-off,trimmer --tags noisy-output --repeat 5   # configs live in packages/eval/configs/
-npm run eval -- --validate                                                # fixture QA: pristine fails, solution passes
-npm run eval -- --report eval-runs/<stamp> --tags spec-compliance         # re-render a finished run, or one slice
-```
-
-- Output goes to `eval-runs/<timestamp>/`: `summary.md`, `results.json`, per-run stderr and check logs, and pi sessions.
-- With two or more configs, the summary compares each one with the first, task by task: the mean success difference with a bootstrap 95% CI, a sign test, changes in turns, tokens and wall-clock time, and the smallest difference the run count can detect. A dozen tasks × 5 repeats only detects large effects.
-- The summary also reports how repeated errors went and which triage hint preceded the end of each, how often trimmed outputs were read back, and compactions and context overflows per config.
-- Models and auth come from your `~/.pi/agent`. Pass `--pi-agent-dir` to use another directory.
-- The fixtures need `python3`, `go`, `cargo` and `g++`/`make`.
-
-**Adding a task.** Create `tasks/<id>/` with `task.json` (id, language, prompt, check command, limits), `repo/` (the starting code), `solution.patch` (a reference fix) and optionally `hidden/` (acceptance tests the agent never sees). Then run `--validate`. [`docs/EVAL_TASKS.md`](docs/EVAL_TASKS.md) has the tiers and authoring rules, and [`docs/AB_PLAN.md`](docs/AB_PLAN.md) the order to A/B the modules in.
-
-### Load test
-
-Measures how much the sidecar pool slows the main agent: main requests alone, then the same requests while 20 sidecar calls are kept in flight.
-
-```sh
-npm run loadtest -- --base-url http://127.0.0.1:8080/v1 --model qwen3.8-27b --profile ninfer
-```
-
-Pass `--max-concurrent` equal to the engine's real slot count, and `--reserved` of at least 1. Results are written to `eval-runs/loadtest-<timestamp>/summary.md`. Run `npm run loadtest -- --help` for sizes and concurrency.
-
 ## Roadmap
 
 | Phase | What | State |
 |---|---|---|
-| 0–1 | Scaffold, session trace, eval harness | Done |
-| 2 | Sidecar pool | Done |
-| 3 | Supervisor | Built, off by default; A/B acceptance run pending |
-| 4 | Trimmer, triage, compaction | Built, off by default; A/B pending |
-| 5 | Memory (fixes and preferences) | Built, off by default; A/B pending |
+| 0–2 | Session trace and sidecar pool | Done |
+| 3 | Supervisor | Built, off by default; measurement pending |
+| 4 | Trimmer, triage, compaction | Built, off by default; measurement pending |
+| 5 | Memory (fixes and preferences) | Built, off by default; measurement pending |
 | 6 | Reasoning-only parallelism: several sidecars diagnose a hard step in parallel and a judge picks one | Planned |
 
-A module becomes on by default only after an A/B run shows it helps.
+A module becomes on by default only after measurement shows it helps.
 
 ## Documentation
 
 | | |
 |---|---|
-| [`docs/DECISIONS.md`](docs/DECISIONS.md) | Every design decision and the reasoning behind it. It overrides the brief where they differ |
-| [`docs/BRIEF.md`](docs/BRIEF.md) | The original project brief |
+| [`docs/DECISIONS.md`](docs/DECISIONS.md) | Every design decision and the reasoning behind it |
 | [`docs/RESEARCH.md`](docs/RESEARCH.md) | Survey of the research behind each module, with verification status per claim |
 | [`docs/INFERENCE_ENGINES.md`](docs/INFERENCE_ENGINES.md) | Engine features Exocortex uses, their fallbacks, and which engines have them |
-| [`docs/PI_API_NOTES.md`](docs/PI_API_NOTES.md) | pi's extension API as verified from its source |
-| [`docs/EVAL_TASKS.md`](docs/EVAL_TASKS.md) | Eval task tiers and authoring rules |
-| [`docs/AB_PLAN.md`](docs/AB_PLAN.md) | The plan for A/B testing each module |
 
 ## Acknowledgements
 
