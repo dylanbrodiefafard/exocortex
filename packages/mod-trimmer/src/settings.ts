@@ -20,13 +20,18 @@ export const SettingsSchema = Type.Object(
 		headLines: Type.Integer({ minimum: 0, default: 40 }),
 		tailLines: Type.Integer({ minimum: 0, default: 80 }),
 		contextLines: Type.Integer({ minimum: 0, default: 3 }),
-		/** An error's block (snippet, traceback, notes) is kept whole up to this many lines. */
+		/**
+		 * An error's block (snippet, traceback, stacks, a failing test's output) is kept whole up to
+		 * this many lines; a longer one keeps its start, its end and its key lines.
+		 */
 		maxBlockLines: Type.Integer({ minimum: 0, default: 30 }),
 		/** Hide passing tests and compile progress first; if the rest fits `minChars`, all of it is shown. */
 		hideRoutine: Type.Boolean({ default: true }),
 		/**
 		 * Bash commands whose output is content the agent asked for, not a log: left untrimmed when
 		 * every printing part of the command line ends in one (`git` entries name a subcommand).
+		 * After a command that is not listed, only one that selects counts (`| tail`, `| grep`,
+		 * `| sed -n`): `cargo test | cat` is still a log.
 		 */
 		verbatimCommands: Type.Array(Type.String({ minLength: 1 }), { default: [...VERBATIM_COMMANDS] }),
 		/**
@@ -34,12 +39,17 @@ export const SettingsSchema = Type.Object(
 		 * the part the harness kept, unless the file is larger than this.
 		 */
 		maxFullOutputBytes: Type.Integer({ minimum: 0, default: 16 * 1024 * 1024 }),
+		/**
+		 * Error blocks shown with their lines, failures before lines that only mention one. Failures
+		 * beyond it still show the line that names them (three times as many).
+		 */
 		maxErrorWindows: Type.Integer({ minimum: 0, default: 40 }),
+		/** Runs of this many lines that differ only in numbers collapse; never errors or lines with a source position. */
 		collapseRuns: Type.Integer({ minimum: 2, default: 3 }),
 		maxLineChars: Type.Integer({ minimum: 80, default: 400 }),
 		/**
-		 * Ceiling for a trimmed result. Above it, error windows are halved until it fits: many long
-		 * error lines can otherwise leave a "trimmed" output several times `minChars`.
+		 * Ceiling for a trimmed result, footer included. Over it, the selection gives up in turn:
+		 * error blocks (down to 4), head and tail lines, block lines, then line length (D-083).
 		 */
 		maxChars: Type.Integer({ minimum: 2_000, default: 24_000 }),
 		/** Sidecar line selection when the deterministic tier still leaves this much (research R2.2). */
@@ -52,7 +62,10 @@ export const SettingsSchema = Type.Object(
 		/** The sidecar holds the agent loop, so the deadline is short; the deterministic result is the fallback. */
 		sidecarTimeoutMs: Type.Integer({ minimum: 500, default: 6_000 }),
 		thinking: Type.Boolean({ default: false }),
-		/** Where full outputs are saved when the harness did not save one; default: OS temp dir. */
+		/**
+		 * Where full outputs are saved when the harness did not save one; default: OS temp dir. Each
+		 * session gets its own `session-<id>` directory under it, removed when the process exits.
+		 */
 		saveDir: Type.Optional(Type.String({ minLength: 1 })),
 	},
 	{ additionalProperties: true },

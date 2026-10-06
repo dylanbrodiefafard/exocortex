@@ -36,6 +36,23 @@ describe("splitCommand", () => {
 		expect(splitCommand("echo a#b '#c'")).toEqual([[["echo", "a#b", "#c"]]]);
 	});
 
+	it("reads quoted syntax characters as text, and a quoted substitution as a substitution (D-083)", () => {
+		expect(splitCommand('grep -rn "fn main()" src')).toEqual([[["grep", "-rn", "fn main()", "src"]]]);
+		expect(splitCommand('rg "impl<T> Foo {" src; grep "a << b" notes.txt')).toEqual([
+			[["rg", "impl<T> Foo {", "src"]],
+			[["grep", "a << b", "notes.txt"]],
+		]);
+		expect(splitCommand("find . -name x -exec grep -n todo {} \\;")).toEqual([
+			[["find", ".", "-name", "x", "-exec", "grep", "-n", "todo", "{}", ";"]],
+		]);
+		expect(splitCommand("echo \\(a\\) \"\\$(not run)\" '$(nor this)'")).toEqual([
+			[["echo", "(a)", "$(not run)", "$(nor this)"]],
+		]);
+		for (const command of ['echo "today is $(date)"', 'echo "today is `date`"', `echo "${BRACED}"`, "cat <(ls)"]) {
+			expect(splitCommand(command), command).toBeUndefined();
+		}
+	});
+
 	it("is undefined for what it does not model as a flat list, and for an unterminated quote", () => {
 		for (const command of [
 			"cat <<EOF\nx\nEOF",

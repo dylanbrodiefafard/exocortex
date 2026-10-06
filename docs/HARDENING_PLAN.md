@@ -26,7 +26,7 @@ A read-only audit of every package (2026-10-06) found the weak spots listed here
 | D. Core: trace, inference, config, processes | `fix/core-infra` | D-080 | 1 | merged (`e5a056c`) |
 | M. Memory | `fix/memory-admission` | D-081 | 2 | in progress |
 | T. Triage | `fix/triage-identity` | D-082 | 2 | merged |
-| R. Trimmer | `fix/trimmer-selection` | D-083 | 2 | in progress |
+| R. Trimmer | `fix/trimmer-selection` | D-083 | 2 | merged |
 | S. Supervisor | `fix/supervisor-evidence` | D-084 | 2 | in progress |
 | K. Compaction | `fix/compaction-facts` | D-085 | 2 | in progress |
 | E. Eval follow-up | `fix/eval-followup` | D-086 | 2 | in progress |
@@ -141,12 +141,12 @@ Files owned: `packages/mod-triage/`.
 
 Files owned: `packages/mod-trimmer/`.
 
-- [ ] **R1. Collapsing similar lines removes error locations and test names.** `trim.ts:165-190`. *Fix:* never collapse a line `classifyErrorLine` recognises or that has a `path:line` location; when numbered, render the marker as `[… lines A–B: N more similar …]`.
-- [ ] **R2. The error cap counts lines and favours the earliest.** `trim.ts:150-162`. Sixty passing tests' log lines outbid the one failing test. *Fix:* build blocks first, cap blocks, rank failure headers (`--- FAIL`, `FAILED`, `error[`, `panic:`, `not ok`) above message lines; use A6's verdict list for what counts.
-- [ ] **R3. Crash blocks are cut.** `trim.ts:130-147`. A Python traceback loses its exception line; a Go panic loses its frames; a data-race block is dropped whole. *Fix:* a `Traceback` block includes the first unindented line after it; a `panic:` or `fatal error:` block runs through one blank line and the `goroutine N [` paragraphs; `WARNING: DATA RACE` and sanitizer errors open blocks that run to their closing line.
-- [ ] **R4. The requested-content exemption is too narrow and too wide.** `command.ts:50`, `settings.ts:7-12`. `grep -rn "fn main()" src` is trimmed; `cargo test | cat` is not. *Fix:* do the syntax check inside the tokenizer (A1), where quote state is known; add `xargs` as a wrapper; when the first stage is not itself a verbatim command, exempt only selecting sinks.
-- [ ] **R5. `maxChars` is not a ceiling.** `trimmer.ts:152-163`. *Fix:* after the window floor, shrink tail and head lines, then line length, until it fits; apply the same test to the sidecar's selection.
-- [ ] **R6. Saved outputs share one directory.** `trimmer.ts:235-237`. *Fix:* a per-session subdirectory, removed on dispose.
+- [x] **R1. Collapsing similar lines removes error locations and test names.** `trim.ts:165-190`. *Fix:* never collapse a line `classifyErrorLine` recognises or that has a `path:line` location; when numbered, render the marker as `[… lines A–B: N more similar …]`.
+- [x] **R2. The error cap counts lines and favours the earliest.** `trim.ts:150-162`. Sixty passing tests' log lines outbid the one failing test. *Fix:* build blocks first, cap blocks, rank failure headers (`--- FAIL`, `FAILED`, `error[`, `panic:`, `not ok`) above message lines; use A6's verdict list for what counts.
+- [x] **R3. Crash blocks are cut.** `trim.ts:130-147`. A Python traceback loses its exception line; a Go panic loses its frames; a data-race block is dropped whole. *Fix:* a `Traceback` block includes the first unindented line after it; a `panic:` or `fatal error:` block runs through one blank line and the `goroutine N [` paragraphs; `WARNING: DATA RACE` and sanitizer errors open blocks that run to their closing line.
+- [x] **R4. The requested-content exemption is too narrow and too wide.** `command.ts:50`, `settings.ts:7-12`. `grep -rn "fn main()" src` is trimmed; `cargo test | cat` is not. *Fix:* do the syntax check inside the tokenizer (A1), where quote state is known; add `xargs` as a wrapper; when the first stage is not itself a verbatim command, exempt only selecting sinks.
+- [x] **R5. `maxChars` is not a ceiling.** `trimmer.ts:152-163`. *Fix:* after the window floor, shrink tail and head lines, then line length, until it fits; apply the same test to the sidecar's selection.
+- [x] **R6. Saved outputs share one directory.** `trimmer.ts:235-237`. *Fix:* a per-session subdirectory, removed on dispose.
 
 ## S. Supervisor (wave 2)
 

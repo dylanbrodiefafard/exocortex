@@ -1,10 +1,11 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ToolResultDraft } from "@exocortex/core";
 import { createTestModuleContext, type SidecarReply } from "@exocortex/testkit";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createTrimmer, keepFromRanges } from "../src/trimmer.ts";
+import { prepareLines } from "../src/trim.ts";
+import { createTrimmer, keepFromRanges, removeRetiredSaveDirs } from "../src/trimmer.ts";
 
 let dir: string;
 beforeEach(() => {
@@ -51,9 +52,10 @@ function draft(current: string, extra: Partial<ToolResultDraft> = {}): ToolResul
 	};
 }
 
-function setup(settings: Record<string, unknown> = {}, reply?: (body: string) => SidecarReply) {
+function setup(settings: Record<string, unknown> = {}, reply?: (body: string) => SidecarReply, sessionId?: string) {
 	const t = createTestModuleContext({
 		cwd: dir,
+		...(sessionId === undefined ? {} : { sessionId }),
 		...(reply ? { reply: (request) => reply(String(request.messages[0]?.["content"])) } : {}),
 	});
 	const trimmer = createTrimmer({ saveDir: join(dir, "saved"), ...settings }, t.context);
@@ -77,7 +79,7 @@ describe("trimmer", () => {
 		expect(rewrite.text).toContain("error[E0502]: cannot borrow `self.items`");
 		expect(rewrite.text).toContain("  --> src/lib.rs:42:9");
 		expect(rewrite.text).toContain("could not compile `forth`");
-		const saved = join(dir, "saved", "call_1.log");
+		const saved = join(dir, "saved", "session-test-session", "call_1.log");
 		expect(rewrite.text).toMatch(/\[exo trimmer: showing \d+ of 601 lines; full output: .*call_1\.log \(the line/);
 		// Markers name the omitted lines of the saved file, and a diagnostic keeps the lines under it.
 		expect(rewrite.text).toContain("[… lines 41–297 omitted …]");
@@ -241,12 +243,143 @@ describe("trimmer", () => {
 	});
 });
 
+describe("maxChars is a ceiling (R5)", () => {
+	const longLine = (i: number) => `${letters(i)} ${`${letters(i * 7)} `.repeat(120)}`.slice(0, 390);
+
+	it("holds when every line is long and many are errors", async () => {
+		const lines = Array.from({ length: 600 }, (_, i) =>
+			i % 6 === 3 ? `src/mod_${letters(i)}.rs:${i}:1: error: mismatched types in ${longLine(i)}` : longLine(i),
+		);
+		for (const maxChars of [2_000, 3_000, 9_000]) {
+			const rewrite = await setup({ maxChars }).trimmer.rewriteToolResult?.(draft(lines.join("\n")), signal);
+			if (!rewrite) throw new Error("expected a rewrite");
+			expect(rewrite.text.length).toBeLessThanOrEqual(maxChars);
+			// The first error is still there, cut short, and so are the footer and the last line.
+			expect(rewrite.text).toContain("src/mod_d.rs:3:1: error: mismatched types");
+			expect(rewrite.text).toContain(longLine(599).slice(0, 20));
+			expect(rewrite.text).toMatch(/\[exo trimmer: showing \d+ of 600 lines; full output: \S+call_1\.log \(the line/);
+		}
+	});
+
+	it("holds when hiding routine lines leaves more markers than text", async () => {
+		const lines = Array.from({ length: 2_400 }, (_, i) =>
+			i % 2 === 0 ? `ok ${i} - ${"checks the parser ".repeat(4)}${letters(i)}` : letters(i),
+		);
+		const rewrite = await setup().trimmer.rewriteToolResult?.(draft(lines.join("\n")), signal);
+		if (!rewrite) throw new Error("expected a rewrite");
+		expect(rewrite.text.length).toBeLessThanOrEqual(24_000);
+		expect(rewrite.note).toContain("head/tail/errors");
+	});
+
+	it("holds for a sidecar selection, which is dropped when it is over", async () => {
+		const lines = Array.from({ length: 400 }, (_, i) => longLine(i));
+		lines[200] = "error[E0502]: cannot borrow `self.items` as mutable";
+		const reply = () => ({ ranges: [[1, 100]] });
+		const rewrite = await setup(
+			{ sidecar: true, maxChars: 12_000, sidecarMaxInputChars: 1_000_000 },
+			reply,
+		).trimmer.rewriteToolResult?.(draft(lines.join("\n")), signal);
+		if (!rewrite) throw new Error("expected a rewrite");
+		expect(rewrite.text.length).toBeLessThanOrEqual(12_000);
+		expect(rewrite.note).toContain("head/tail/errors");
+		expect(rewrite.text).toContain("error[E0502]");
+		// One that fits is used.
+		const small = await setup({ sidecar: true, maxChars: 12_000, sidecarMaxInputChars: 1_000_000 }, () => ({
+			ranges: [[1, 3]],
+		})).trimmer.rewriteToolResult?.(draft(lines.join("\n")), signal);
+		expect(small?.note).toContain("sidecar selection");
+		expect(small?.text.length).toBeLessThanOrEqual(12_000);
+	});
+
+	it("cuts the text itself when even the least selection is over, and says so", async () => {
+		// A path so long that the footer leaves the output a few hundred characters, then none.
+		for (const [depth, shown] of [
+			[280, /^\[… \d+ lines omitted …\]\nerror\[E0502\]: cannot .*…\[\+\d+ chars\]\n/],
+			[400, /^\n\[… cut here to fit maxChars …\]\n/],
+		] as const) {
+			const path = join(dir, `${"deep/".repeat(depth)}pi-full.log`);
+			const rewrite = await setup({ maxChars: 2_000 }).trimmer.rewriteToolResult?.(
+				draft(buildLog(), { fullOutputPath: path, status: "Command exited with code 101" }),
+				signal,
+			);
+			if (!rewrite) throw new Error("expected a rewrite");
+			expect(rewrite.text.length).toBeLessThanOrEqual(2_000);
+			expect(rewrite.text).toMatch(shown);
+		}
+	});
+});
+
+describe("saved outputs (R6)", () => {
+	afterEach(() => removeRetiredSaveDirs());
+
+	it("keeps each session's outputs in its own directory, readable by the user only", async () => {
+		const first = setup({}, undefined, "session/one");
+		const second = setup({}, undefined, "session-two");
+		const a = await first.trimmer.rewriteToolResult?.(draft(buildLog(600)), signal);
+		const b = await second.trimmer.rewriteToolResult?.(draft(buildLog(700)), signal);
+		const pathA = join(dir, "saved", "session-session_one", "call_1.log");
+		const pathB = join(dir, "saved", "session-session-two", "call_1.log");
+		expect(a?.details).toEqual({ fullOutputPath: pathA });
+		expect(b?.details).toEqual({ fullOutputPath: pathB });
+		// The same tool-call id in two sessions: neither overwrites the other's file.
+		expect(readFileSync(pathA, "utf8")).toBe(buildLog(600));
+		expect(readFileSync(pathB, "utf8")).toBe(buildLog(700));
+		if (process.platform !== "win32") {
+			expect(statSync(join(dir, "saved", "session-session_one")).mode & 0o777).toBe(0o700);
+			expect(statSync(pathA).mode & 0o777).toBe(0o600);
+		}
+	});
+
+	it("removes a disposed session's outputs when the process exits, not while the session can still read them", async () => {
+		const first = setup({}, undefined, "one");
+		const other = setup({}, undefined, "two");
+		await first.trimmer.rewriteToolResult?.(draft(buildLog()), signal);
+		await other.trimmer.rewriteToolResult?.(draft(buildLog()), signal);
+		const saved = join(dir, "saved", "session-one", "call_1.log");
+		await first.trimmer.dispose?.();
+		// A reload or a settings change disposes the module too; the context still names the file.
+		expect(existsSync(saved)).toBe(true);
+		removeRetiredSaveDirs();
+		expect(existsSync(join(dir, "saved", "session-one"))).toBe(false);
+		// A session still running keeps its files, and so does the directory the user named.
+		expect(existsSync(join(dir, "saved", "session-two", "call_1.log"))).toBe(true);
+	});
+
+	it("keeps the outputs of a session whose trimmer was rebuilt", async () => {
+		const first = setup({}, undefined, "one");
+		await first.trimmer.rewriteToolResult?.(draft(buildLog()), signal);
+		await first.trimmer.dispose?.();
+		const rebuilt = setup({ minChars: 9_000 }, undefined, "one");
+		removeRetiredSaveDirs();
+		const saved = join(dir, "saved", "session-one", "call_1.log");
+		expect(existsSync(saved)).toBe(true);
+		// The rebuilt one saved nothing itself; the directory is still its session's to remove.
+		await rebuilt.trimmer.dispose?.();
+		removeRetiredSaveDirs();
+		expect(existsSync(saved)).toBe(false);
+		// Nothing saved, nothing to remove.
+		await setup({}, undefined, "three").trimmer.dispose?.();
+		removeRetiredSaveDirs();
+	});
+
+	it("saves under the temp directory by default", async () => {
+		const sessionId = `trimmer-test-${process.pid}-${Date.now()}`;
+		const t = createTestModuleContext({ cwd: dir, sessionId });
+		const trimmer = createTrimmer({}, t.context);
+		const rewrite = await trimmer.rewriteToolResult?.(draft(buildLog()), signal);
+		const saved = join(tmpdir(), "exocortex-trimmer", `session-${sessionId}`, "call_1.log");
+		expect(rewrite?.details).toEqual({ fullOutputPath: saved });
+		await trimmer.dispose?.();
+		removeRetiredSaveDirs();
+		expect(existsSync(saved)).toBe(false);
+	});
+});
+
 describe("keepFromRanges", () => {
-	const lines = ["a", "error: x", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m"].map((text, i) => ({
-		text,
-		first: i + 1,
-		last: i + 1,
-	}));
+	const lines = prepareLines(["a", "error: x", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m"].join("\n"), {
+		collapseRuns: 99,
+		hideRoutine: false,
+	});
 	it("converts 1-based inclusive ranges, clamps, ignores reversed ones, adds tail and first error", () => {
 		const keep = keepFromRanges(
 			[

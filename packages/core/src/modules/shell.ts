@@ -48,12 +48,14 @@ export interface ShellCommand {
  * Splits a command line into its `&&` / `||` / `;` / `&` / newline parts, each a pipeline of
  * stages, each stage a list of words. Quotes and backslashes are honored; undefined when the line
  * uses syntax this does not model as a flat list (heredocs, substitutions, subshells, braces).
+ *
+ * The tokenizer decides what is syntax, since only it knows what was quoted (D-083): the
+ * parentheses of `grep "fn main()" src` are text, the `$(…)` of `echo "$(date)"` is not.
  */
 export function splitCommand(command: string): string[][][] | undefined {
-	if (/<<|\$\(|`|[(){}]/.test(command.replace(/'[^']*'/g, "''"))) return undefined;
-	const tokens = tokenize(command);
-	if (!tokens) return undefined;
-	return parseList(tokens, { at: 0 }, 0).map((pipeline) => pipeline.stages.map((stage) => [...stage.words]));
+	const scan = scanCommand(command);
+	if (!scan || scan.dynamic || scan.tokens.some((token) => token.op === "(" || token.op === ")")) return undefined;
+	return parseList(scan.tokens, { at: 0 }, 0).map((pipeline) => pipeline.stages.map((stage) => [...stage.words]));
 }
 
 /**
@@ -395,6 +397,8 @@ interface Scan {
 	readonly heredocs: { tag: string; tabs: boolean }[];
 	/** An unterminated quote or substitution: the line cannot be read. */
 	failed: boolean;
+	/** The line has a heredoc or an expansion (`$(…)`, backticks, `<(…)`, `${…}`), quoted with `"` or not. */
+	dynamic: boolean;
 }
 
 /** Each reads one construct at the scan's position and says whether it did. */
@@ -410,6 +414,10 @@ const READERS: readonly ((scan: Scan) => boolean)[] = [
 
 /** Words and the operators between them, with where each sits in the source; undefined on an unterminated quote. */
 function tokenize(command: string): Token[] | undefined {
+	return scanCommand(command)?.tokens;
+}
+
+function scanCommand(command: string): Scan | undefined {
 	const scan: Scan = {
 		source: command,
 		at: 0,
@@ -420,6 +428,7 @@ function tokenize(command: string): Token[] | undefined {
 		redirect: false,
 		heredocs: [],
 		failed: false,
+		dynamic: false,
 	};
 	while (scan.at < command.length && !scan.failed) {
 		if (READERS.some((read) => read(scan))) continue;
@@ -429,7 +438,7 @@ function tokenize(command: string): Token[] | undefined {
 		scan.at++;
 	}
 	endWord(scan, command.length);
-	return scan.failed ? undefined : scan.tokens;
+	return scan.failed ? undefined : scan;
 }
 
 function add(scan: Scan, text: string, literal: boolean): void {
@@ -466,13 +475,17 @@ function readQuote(scan: Scan): boolean {
 	const c = source[at];
 	if (c === "'") return addSpan(scan, source.indexOf("'", at + 1), 1);
 	// A command substitution stays in the word as written.
-	if (c === "`") return addSpan(scan, source.indexOf("`", at + 1), 0);
+	if (c === "`") {
+		scan.dynamic = true;
+		return addSpan(scan, source.indexOf("`", at + 1), 0);
+	}
 	if (c !== '"') return false;
 	let text = "";
 	let i = at + 1;
 	for (; i < source.length && source[i] !== '"'; i++) {
 		const escaped = source[i] === "\\" && /["\\$`\n]/.test(source[i + 1] ?? "");
 		if (escaped) i++;
+		else if (source[i] === "`" || (source[i] === "$" && /[({]/.test(source[i + 1] ?? ""))) scan.dynamic = true;
 		// A backslash before a newline continues the line.
 		if (!(escaped && source[i] === "\n")) text += source[i] ?? "";
 	}
@@ -489,9 +502,10 @@ function readExpansion(scan: Scan): boolean {
 	const { source, at } = scan;
 	const c = source[at];
 	const next = source[at + 1];
-	if ((c === "$" || c === "<" || c === ">") && next === "(") return addSpan(scan, closingParen(source, at + 1), 0);
-	if (c === "$" && next === "{") return addSpan(scan, source.indexOf("}", at), 0);
-	return false;
+	const group = (c === "$" || c === "<" || c === ">") && next === "(";
+	if (!group && !(c === "$" && next === "{")) return false;
+	scan.dynamic = true;
+	return addSpan(scan, group ? closingParen(source, at + 1) : source.indexOf("}", at), 0);
 }
 
 function readEscapeOrComment(scan: Scan): boolean {
@@ -514,6 +528,7 @@ function readHeredoc(scan: Scan): boolean {
 	if (!source.startsWith("<<", at) || source[at + 2] === "<") return false;
 	endWord(scan, at);
 	const match = /^<<(-?)[ \t]*(["']?)([^\s"'|&;()<>]+)\2/.exec(source.slice(at));
+	scan.dynamic = true;
 	if (!match) scan.failed = true;
 	else {
 		scan.heredocs.push({ tag: (match[3] ?? "").replace(/\\/g, ""), tabs: match[1] === "-" });
