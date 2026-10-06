@@ -1,5 +1,6 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import type { Dialog } from "@exocortex/core";
+import { OVERRIDES_ENTRY } from "./modules.ts";
 import type { Runtime } from "./runtime.ts";
 
 const PING_TIMEOUT_MS = 30_000;
@@ -13,6 +14,7 @@ const MODULE_MODES: Readonly<Record<string, readonly string[]>> = { supervisor: 
  * - `/exo` or `/exo status`: config state, modules and sidecar pool statistics;
  * - `/exo ping`: one tiny sidecar call (and one embedding, if configured), to check the servers are reachable;
  * - `/exo off` / `/exo on`: kill switch for every module (brief §5.3), this session only;
+ *   toggles are kept in the session (an `exo.overrides` entry), so `/reload` and `/resume` keep them;
  * - `/exo <module> on|off`: toggle one module, e.g. `/exo trimmer on`;
  * - `/exo supervisor suggest|auto`: also switch the supervisor's mode;
  * - `/exo memory preferences` / `/exo memory forget <id>`: list or retire learned preferences;
@@ -34,8 +36,9 @@ export function registerExoCommand(pi: ExtensionAPI, runtime: Runtime): void {
 				else if (sub === "on" || sub === "off") {
 					runtime.overrides.allOff = sub === "off";
 					runtime.rebuildModules();
+					persistOverrides(pi, runtime);
 					say(ctx, `Exocortex modules ${sub === "off" ? "off" : "back on"} for this session.`);
-				} else if (runtime.moduleIds().includes(sub)) await moduleCommand(runtime, ctx, sub, arg, rest);
+				} else if (runtime.moduleIds().includes(sub)) await moduleCommand(pi, runtime, ctx, sub, arg, rest);
 				else say(ctx, `Unknown /exo subcommand "${sub}". Try: ${subcommands().join(", ")}`, "warning");
 			} catch (error) {
 				say(ctx, `/exo failed: ${String(error)}`, "error");
@@ -46,6 +49,7 @@ export function registerExoCommand(pi: ExtensionAPI, runtime: Runtime): void {
 
 /** A module answers its own subcommands (`/exo memory preferences`); anything else is a toggle. */
 async function moduleCommand(
+	pi: ExtensionAPI,
 	runtime: Runtime,
 	ctx: ExtensionCommandContext,
 	id: string,
@@ -54,8 +58,18 @@ async function moduleCommand(
 ): Promise<void> {
 	const reply =
 		arg === undefined ? undefined : await runtime.moduleCommand(id, [arg, ...rest].join(" "), dialogFor(ctx));
-	if (reply === undefined) toggleModule(runtime, ctx, id, arg);
-	else say(ctx, reply);
+	if (reply !== undefined) say(ctx, reply);
+	else if (toggleModule(runtime, ctx, id, arg)) persistOverrides(pi, runtime);
+}
+
+/**
+ * Writes the toggles into the session, where the module host finds them at the next
+ * `session_start`: pi runs the extension again on `/reload` and `/resume`, which would otherwise
+ * forget them. The entry is never sent to the model (PI_API_NOTES §8).
+ */
+function persistOverrides(pi: ExtensionAPI, runtime: Runtime): void {
+	const { allOff, modules } = runtime.overrides;
+	pi.appendEntry(OVERRIDES_ENTRY, { allOff, modules: structuredClone(modules) });
 }
 
 /** Pi's dialogs, where there is a UI to show them (TUI and RPC; `docs/PI_API_NOTES.md` §6). */
@@ -68,7 +82,8 @@ function dialogFor(ctx: ExtensionCommandContext): Dialog | undefined {
 	};
 }
 
-function toggleModule(runtime: Runtime, ctx: ExtensionCommandContext, id: string, arg: string | undefined): void {
+/** Applies `/exo <module> on|off|<mode>`; false when `arg` is none of those. */
+function toggleModule(runtime: Runtime, ctx: ExtensionCommandContext, id: string, arg: string | undefined): boolean {
 	const modes = MODULE_MODES[id] ?? [];
 	const override = runtime.overrides.modules[id] ?? {};
 	runtime.overrides.modules[id] = override;
@@ -78,12 +93,13 @@ function toggleModule(runtime: Runtime, ctx: ExtensionCommandContext, id: string
 		override["mode"] = arg;
 	} else {
 		say(ctx, `Usage: /exo ${id} ${["on", "off", ...modes].join("|")}`, "warning");
-		return;
+		return false;
 	}
 	runtime.rebuildModules();
 	const name = id.charAt(0).toUpperCase() + id.slice(1);
 	const mode = modes.length > 0 ? ` (${String(override["mode"] ?? "configured mode")})` : "";
 	say(ctx, `${name}: ${override["enabled"] ? `on${mode}` : "off"} for this session.`);
+	return true;
 }
 
 function status(runtime: Runtime): string {

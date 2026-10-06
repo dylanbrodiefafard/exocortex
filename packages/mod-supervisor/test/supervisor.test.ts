@@ -71,6 +71,9 @@ function context(script: Script | undefined): ModuleContext {
 		: undefined;
 	return {
 		cwd: repo,
+		sessionId: "test-session",
+		savedState: undefined,
+		saveState: () => {},
 		pool: () => pool,
 		embedder: () => undefined,
 		progress: () => {},

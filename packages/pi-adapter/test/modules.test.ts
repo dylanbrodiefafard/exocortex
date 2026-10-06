@@ -467,7 +467,7 @@ describe("tool-result rewrites", () => {
 		expect(drafts[1]?.fullOutputPath).toBeNull();
 	});
 
-	it("isolates a throwing rewriter and stops a hanging one at the budget", async () => {
+	it("isolates a throwing rewriter and stops a hanging one at its share of the budget", async () => {
 		const { h } = setup(
 			{
 				throws: rewriter("throws", async () => {
@@ -481,7 +481,8 @@ describe("tool-result rewrites", () => {
 		);
 		await h.pi.emit("session_start");
 		const started = Date.now();
-		expect(await h.pi.emit("tool_result", bashResult("x"))).toBeUndefined();
+		// The hanging module loses only its own share (D-078): the one after it still runs.
+		expect(await h.pi.emit("tool_result", bashResult("x"))).toMatchObject({ content: [{ type: "text", text: "x!" }] });
 		expect(Date.now() - started).toBeLessThan(2_000);
 		expect(h.errors.map((e) => e.where)).toEqual(["throws.rewriteToolResult"]);
 	});
@@ -520,10 +521,10 @@ describe("compaction hosting", () => {
 					id: "writer",
 					compact: async (request) => {
 						requests.push(request);
-						return "the summary";
+						return { summary: "the summary" };
 					},
 				}),
-				later: () => ({ id: "later", compact: async () => "never used" }),
+				later: () => ({ id: "later", compact: async () => ({ summary: "never used" }) }),
 			},
 			{ none: { enabled: true }, writer: { enabled: true }, later: { enabled: true } },
 		);
@@ -561,7 +562,7 @@ describe("compaction hosting", () => {
 						throw new Error("bad");
 					},
 				}),
-				hangs: () => ({ id: "hangs", compact: () => new Promise<string | undefined>(() => {}) }),
+				hangs: () => ({ id: "hangs", compact: () => new Promise<undefined>(() => {}) }),
 			},
 			{ throws: { enabled: true }, hangs: { enabled: true } },
 			{ budgetsMs: { compact: 50 } },
@@ -588,7 +589,7 @@ describe("user-turn context, suggestions and module commands", () => {
 			id,
 			contextForUserTurn: async (turn) => {
 				seen.push(turn);
-				return text;
+				return text === undefined ? undefined : { text };
 			},
 		});
 		const { h } = setup(
@@ -600,11 +601,18 @@ describe("user-turn context, suggestions and module commands", () => {
 		await h.pi.emit("input", { text: "add a parser", source: "interactive" });
 		expect(await h.pi.emit("before_agent_start", { prompt: "add a parser" })).toEqual({
 			message: {
-				customType: "exo.a",
+				customType: "exo.context",
 				content: "remember A\n\nremember C",
 				display: true,
-				details: { exo: { module: "a", modules: ["a", "c"] } },
+				details: { exo: { modules: ["a", "c"] } },
 			},
+		});
+		// One contributor: the message is that module's.
+		h.runtime.overrides.modules["c"] = { enabled: false };
+		h.runtime.rebuildModules();
+		await h.pi.emit("input", { text: "add a lexer", source: "interactive" });
+		expect(await h.pi.emit("before_agent_start", { prompt: "add a lexer" })).toMatchObject({
+			message: { customType: "exo.a", details: { exo: { module: "a", modules: ["a"] } } },
 		});
 		expect(seen[0]).toEqual({ text: "add a parser", origin: "user" });
 		expect(await h.pi.emit("before_agent_start", { prompt: "add a parser" })).toBeUndefined();
@@ -631,7 +639,8 @@ describe("user-turn context, suggestions and module commands", () => {
 		h.runtime.overrides.modules["slow"] = { enabled: false };
 		h.runtime.rebuildModules();
 		expect(await h.pi.emit("before_agent_start", {})).toBeUndefined();
-		expect(h.errors.map((e) => e.where)).toEqual(["bad.contextForUserTurn"]);
+		// The slow provider used up only its share, so the failing one was asked both times.
+		expect(h.errors.map((e) => e.where)).toEqual(["bad.contextForUserTurn", "bad.contextForUserTurn"]);
 	});
 
 	it("marks a suggestion the user sent unchanged, and tells modules about compactions", async () => {
@@ -705,7 +714,7 @@ describe("progress while a hook holds pi", () => {
 						id: "a",
 						contextForUserTurn: async () => {
 							ctx.progress("Recalling your preferences…");
-							return "note";
+							return { text: "note" };
 						},
 						rewriteToolResult: async () => undefined,
 						onSettle: async () => ({ kind: "notify", summary: "a: complete", level: "info" }),

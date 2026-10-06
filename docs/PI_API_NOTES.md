@@ -84,6 +84,7 @@ getFlag(name: string): boolean | string | undefined;   // only for flags this ex
 - **Awaited:** every handler is `await`ed. The agent loop `await`s every listener for every event (`ag/src/agent.ts:609-611`, `agent-loop.ts` uses `await emit(...)` throughout), and `AgentSession._handleAgentEvent` awaits the extension runner before persisting (`ce/src/core/agent-session.ts:1110-1112`).
   - **A slow handler blocks the main loop.** This includes `message_update` and `provider_stream_event` per token (`extensions.md:111`).
 - **No timeouts** exist anywhere in `ExtensionRunner`. Exocortex must enforce its own.
+- **Not one at a time:** `tool_result` handlers for the calls of one parallel tool batch overlap (§15).
 - **Error isolation:** each handler is wrapped in try/catch, and errors go to `emitError` → `onError`. The mode then reports them:
   - TUI: shows the error (`interactive-mode.ts:2022-2023`).
   - Print/json: `console.error` (`print-mode.ts:101-103`).
@@ -268,7 +269,7 @@ appendEntry<T = unknown>(customType: string, data?: T): void;
 - **Supervisor continuation should use this hook** instead of `sendUserMessage` from `agent_end`.
 
 ### Idle, abort and detecting user input
-- **Idle and signals:** `ctx.isIdle()` (`types.ts:348`) and `ctx.hasPendingMessages()`. `ctx.signal` is the current run's AbortSignal (undefined when idle). `ctx.abort()` aborts the run; queued messages return to the editor (`how-pi-works.md:13`).
+- **Idle and signals:** `ctx.isIdle()` (`types.ts:348`) and `ctx.hasPendingMessages()`. `ctx.signal` is the current run's AbortSignal (undefined when idle, and already undefined in `agent_before_settle`, §15). `ctx.abort()` aborts the run; queued messages return to the editor (`how-pi-works.md:13`).
 - **User submitted input:** an `input` event with `source === "interactive"` (or `"rpc"`). Its `streamingBehavior` is set when the user typed during a run. Ignore `source === "extension"`: Exocortex's own `sendUserMessage` also emits `input`.
 - **User is typing (not yet submitted):** `ctx.ui.onTerminalInput(handler)` gives raw keystrokes in the TUI only (`types.ts:162-163`). It is a no-op in RPC (`rpc-extension-ui.md:17`).
 
@@ -365,6 +366,7 @@ registerCommand(name: string, options: {
 - Writes a `custom` entry (`agent-session.ts:3359-3365`).
 - It is persisted on the current branch and **never sent to the LLM** (`session-format.md:164-172`).
 - It emits an `entry_appended` session event, which also appears in the json/RPC stream (`json.md:122`).
+- Exocortex writes two kinds (D-078): `exo.overrides` (the `/exo` toggles) and `exo.<module>.state` (a module's saved state). Both are read back from `getBranch()` at `session_start`; the last one of each type wins.
 - Use it for Exocortex markers and state, such as an injection ledger and original tool outputs.
 
 ---
@@ -550,7 +552,48 @@ The default active tools are `read, bash, edit, write`. `grep, find, ls` and `po
 - **Virtual models** (`pi.registerVirtualModel`) route each request to a physical model. They are an alternative way to wrap the main model (`types.ts:1861-1873`, `docs/virtual-models.md`).
 - **`message_end` replacement** can rewrite an assistant message before it is persisted. That is useful for normalizing provider errors, not for injection.
 - **Retries:** automatic retries on retryable provider errors, and an overflow compact-and-retry (`agent-session.ts:1169-1184`, `compaction.md:85-98`), make `agent_end` fire more than once per user prompt.
-- **Stale contexts:** after `/reload` or a session switch, old `pi`/`ctx` objects throw "stale". Re-capture them in `session_start` (`runner.ts:722-735`).
+- **Stale contexts:** after `/reload` or a session switch, old `pi`/`ctx` objects throw "stale". Re-capture them in `session_start` (`runner.ts:722-735`). §15 has what follows from it.
+
+---
+
+## 15. Behaviour the adapter's hook dispatcher relies on (D-078)
+
+Read in the installed 1.0.2 build under `node_modules/@earendil-works/`. Paths are relative to `pi-coding-agent/dist/` unless they start with `pi-agent-core/` or `pi-tui/`; line numbers are the `.js` files'. The integration test "pi behaves as the hook dispatcher assumes" (`packages/pi-adapter/test/pi-cli.integration.test.ts`) runs real pi with a probe extension and checks the items marked **tested**.
+
+### Session replacement and stale objects
+- **The extension factory runs again for every new, resumed or forked session and on `/reload`.**
+  - `newSession`, `switchSession` and `fork` call `teardownCurrent` and then `createRuntime` (`core/agent-session-runtime.js:127-173`). `createRuntime` builds new services (`main.js:587-600`), which make a new `DefaultResourceLoader` and reload it (`core/agent-session-services.js:63-69`), and loading an extension calls its factory (`core/extensions/loader.js:524-533`). The loader caches the imported factory function, not the result of calling it (`loader.js:461-467`).
+  - `/reload` reloads the resource loader and builds a new `ExtensionRunner` (`core/agent-session.js:2899-2921`).
+  - So everything the factory creates (Exocortex's `Runtime`, the trace store, `/exo` overrides held in memory) is per session, and anything the old instance leaves open is never closed. The adapter closes the trace store at every `session_shutdown` and keeps overrides in the session (§8).
+- **The old `pi` and `ctx` throw after that.** `session.dispose()` and `reload()` call `invalidate()` on the old runner (`core/agent-session.js:977-988`, `:2899-2903`), after the `session_shutdown` handlers have returned (`core/agent-session-runtime.js:102-113`).
+  - From then on every method of the old `pi` throws, **including `getFlag`** (`core/extensions/loader.js:295-300`, `assertActive` at `:194-199` and `:112-116`), and so does every getter and method of an old `ctx` (`core/extensions/runner.js:612-680`).
+  - Work still running from the old session (a background sidecar call, a `.catch` handler) must therefore not touch `pi`: a throw there is an unhandled rejection, which exits interactive pi (§2). The adapter's `onError` and `log` never throw and fall back to the last debug level read.
+  - During `session_shutdown` itself the old objects still work, so `pi.appendEntry` is allowed there.
+
+### `tool_result` runs concurrently (tested)
+- Tool execution is parallel by default (`pi-agent-core/dist/agent.js:145`; sequential only when configured or when a tool asks for it, `pi-agent-core/dist/agent-loop.js:366-372`).
+- In parallel mode each call's execute-then-finalize is its own promise and they are awaited together (`agent-loop.js:432-453`). Finalizing calls `afterToolCall` (`agent-loop.js:593-606`), which is where pi emits `tool_result` (`core/agent-session.js:336-351`, `core/extensions/runner.js:900`).
+- So `tool_result` fires as each tool finishes, in completion order, and **a handler that awaits is interleaved with the handlers of the other calls in the batch**. Result messages are still emitted in call order afterwards (`agent-loop.js:453-456`). The adapter queues its own `tool_result` work so modules see one result at a time.
+
+### Abort, and what `agent_before_settle` can know
+- **`ctx.signal` is the running agent loop's signal and nothing else** (`getSignal: () => this.agent.signal`, `core/agent-session.js:2720`; `pi-agent-core/dist/agent.js:214-216`). It is defined during `tool_call`/`tool_result`/`turn_end` and **undefined in `agent_before_settle`** (tested): the loop has returned and cleared its run (`agent.js:381-387`) before `_runBeforeSettleBoundary` is called (`core/agent-session.js:1354-1366`). It is also undefined in `before_agent_start` and `session_before_compact` (which has its own `event.signal`).
+- **`session.abort()` waits for the settle hook.** It sets a flag, aborts the (already finished) loop and awaits `waitForIdle()` (`core/agent-session.js:1873-1884`); the session is idle only after `agent_settled` (`:672-673`, `:1038-1040`). Escape in the TUI while `isStreaming` (`modes/interactive/interactive-mode.js:2374-2377`, `:3842-3843`), RPC `abort` (`modes/rpc/rpc-mode.js:327-330`) and every session replacement (`core/agent-session-runtime.js:102-105`) go through it. **Pi gives the handler no signal or event for this.**
+  - What an extension can see: `session_before_switch` and `session_before_fork` fire before the teardown (`core/agent-session-runtime.js:78-100`, `:129`, `:148`, `:176`); `session_shutdown` fires for `/reload` and quit without an abort first (`core/agent-session.js:2899-2902`, `core/agent-session-runtime.js:296-303`); and in the TUI `ctx.ui.onTerminalInput` sees raw keys before pi handles them (`pi-tui/dist/tui.js:685-695`, `interactive-mode.js:1985-1992`). The interrupt key is Escape unless rebound (`core/keybindings.js:28`). In RPC `onTerminalInput` is a no-op (`modes/rpc/rpc-mode.js:97-100`), so an RPC `abort` during the settle hook waits until the hook returns.
+  - **Entries returned after an abort are still persisted:** `_runBeforeSettleBoundary` commits the drafts (`core/agent-session.js:1423`) before it checks the abort flag (`:1426`), and then does not continue. A handler that was interrupted must return nothing.
+- `isStreaming` stays true through the settle hook (`core/agent-session.js:1034-1036`, `:1352`, `:673`), so the TUI's spinner and working message are still shown then.
+
+### `agent_before_settle` payload
+- `event.outcome` is `"completed" | "aborted" | "error"` (`core/extensions/types.d.ts:719`, `:753-758`). It is derived from the last assistant message's `stopReason` at each `turn_end` (`core/agent-session.js:475-477`) and starts as `"completed"` (`:125`).
+- `event.context.llmMessages` is `convertToLlm` over the projection of the persisted session plus the drafts returned so far (`core/agent-session.js:603-614`; type `BoundaryContextPreview`, `types.d.ts:746-752`). Custom messages appear in it with role `user` (§3), so the last `assistant` entry is the agent's final message.
+
+### `input.streamingBehavior`
+- Set only when the input arrives while the agent runs (`this.isStreaming ? options?.streamingBehavior : undefined`, `core/agent-session.js:1502`; type at `types.d.ts:881-882`): `"steer"` or `"followUp"`. Undefined means a new prompt on an idle agent. `before_agent_start` does not fire for a steered or follow-up message (§3).
+
+### Smaller facts
+- **`ctx.modelRegistry.getApiKeyForProvider(provider)`** resolves `string | undefined` and never rejects: failures are caught and become `undefined` (`core/model-registry.js:105-112`; `model-registry.d.ts:52`). It can take as long as the auth lookup does; the adapter gives it 2 s.
+- **Exit codes:** only `bash` reports one, as `structuredContent.exit_code` (`core/tools/bash.js:44`, `:292`); a process killed by a signal reports `128 + signal` (`:113`). No pi tool reports `exitCode`; the adapter's camel-case fallback is for other extensions' tools.
+- **`pi.appendEntry` makes the entry the new leaf** (`core/session-manager.js:901-912`, `:815-820`), also in the middle of a tool batch. The projection skips it, so the request prefix is unchanged (tested: the next request's messages start with the previous request's).
+- **Compaction entries keep `details`** (`core/session-manager.d.ts:46-59`), and `session_before_compact` hands over `branchEntries` (`core/extensions/types.d.ts:579-589`), so an extension can read back the details it returned with the previous compaction.
 
 ---
 

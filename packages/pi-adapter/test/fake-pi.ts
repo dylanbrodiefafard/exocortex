@@ -17,6 +17,14 @@ export interface FakePi {
 	readonly answers: string[];
 	/** Calls every handler for `name` in registration order; returns the last non-undefined result. */
 	emit(name: string, event?: Record<string, unknown>, ctx?: ExtensionContext): Promise<unknown>;
+	/** Session entries written with `appendEntry`; `ctx.sessionManager.getBranch()` returns them. */
+	readonly entries: Record<string, unknown>[];
+	/** What the user has typed in the editor (`getEditorText`). */
+	editorText: string;
+	/** Sends raw terminal input to the `onTerminalInput` listeners, as the TUI does for each key. */
+	key(data: string): void;
+	/** Makes `pi` stale, as a session replacement or reload does: its methods throw from then on. */
+	invalidate(): void;
 	/** Runs `/name args`. */
 	command(name: string, args?: string): Promise<void>;
 	ctx(overrides?: Partial<Record<string, unknown>>): ExtensionContext & ExtensionCommandContext;
@@ -28,6 +36,12 @@ export function createFakePi(options: { cwd: string; hasUI?: boolean; flags?: Re
 	const ui: UiCall[] = [];
 	const answers: string[] = [];
 	const flags = { ...options.flags };
+	const entries: Record<string, unknown>[] = [];
+	const keyListeners = new Set<(data: string) => unknown>();
+	let stale = false;
+	const assertActive = () => {
+		if (stale) throw new Error("This extension ctx is stale after session replacement or reload.");
+	};
 
 	const api = {
 		on(name: string, handler: Handler) {
@@ -39,7 +53,14 @@ export function createFakePi(options: { cwd: string; hasUI?: boolean; flags?: Re
 		registerFlag(name: string, spec: { default?: unknown }) {
 			if (!(name in flags)) flags[name] = spec.default;
 		},
-		getFlag: (name: string) => flags[name],
+		getFlag: (name: string) => {
+			assertActive();
+			return flags[name];
+		},
+		appendEntry: (customType: string, data?: unknown) => {
+			assertActive();
+			entries.push({ type: "custom", customType, data });
+		},
 	} as unknown as ExtensionAPI;
 
 	function ctx(overrides: Partial<Record<string, unknown>> = {}) {
@@ -48,11 +69,21 @@ export function createFakePi(options: { cwd: string; hasUI?: boolean; flags?: Re
 			hasUI: options.hasUI ?? true,
 			model: undefined,
 			modelRegistry: { getApiKeyForProvider: async () => undefined },
-			sessionManager: { getSessionId: () => "fake-session", getSessionFile: () => undefined },
+			signal: undefined,
+			sessionManager: {
+				getSessionId: () => "fake-session",
+				getSessionFile: () => undefined,
+				getBranch: () => [...entries],
+			},
 			ui: {
 				notify: (...args: unknown[]) => ui.push({ method: "notify", args }),
 				setStatus: (...args: unknown[]) => ui.push({ method: "setStatus", args }),
 				setEditorText: (...args: unknown[]) => ui.push({ method: "setEditorText", args }),
+				getEditorText: () => fake.editorText,
+				onTerminalInput: (handler: (data: string) => unknown) => {
+					keyListeners.add(handler);
+					return () => keyListeners.delete(handler);
+				},
 				setWorkingMessage: (...args: unknown[]) => ui.push({ method: "setWorkingMessage", args }),
 				select: async (...args: unknown[]) => {
 					ui.push({ method: "select", args });
@@ -67,11 +98,19 @@ export function createFakePi(options: { cwd: string; hasUI?: boolean; flags?: Re
 		} as unknown as ExtensionContext & ExtensionCommandContext;
 	}
 
-	return {
+	const fake: FakePi = {
 		api,
 		commands,
 		ui,
 		answers,
+		entries,
+		editorText: "",
+		key(data) {
+			for (const listener of [...keyListeners]) listener(data);
+		},
+		invalidate() {
+			stale = true;
+		},
 		ctx,
 		async emit(name, event = {}, context = ctx()) {
 			let result: unknown;
@@ -87,4 +126,5 @@ export function createFakePi(options: { cwd: string; hasUI?: boolean; flags?: Re
 			await spec.handler(args, ctx());
 		},
 	};
+	return fake;
 }

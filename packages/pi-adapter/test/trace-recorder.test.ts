@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { exitCodeOf, exoModuleOf } from "../src/trace-recorder.ts";
+import { exitCodeOf, exoModuleOf } from "../src/pi-shapes.ts";
 
 describe("exoModuleOf", () => {
 	it("identifies Exocortex-injected custom messages by customType prefix", () => {

@@ -64,6 +64,9 @@ describe("trace recorder (in process)", () => {
 		await h.pi.emit("agent_settled");
 		await h.pi.emit("session_shutdown", { reason: "reload" });
 		expect(h.runtime.traceSession).toBeUndefined();
+		// The session's end closed the store (D-078); the next activation opens it again.
+		expect(h.runtime.store).toBeUndefined();
+		h.runtime.activate(h.dir);
 
 		const store = h.runtime.store;
 		if (!store || !sessionId) throw new Error("no trace");

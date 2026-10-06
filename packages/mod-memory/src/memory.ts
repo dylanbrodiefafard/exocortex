@@ -204,10 +204,19 @@ export function createMemory(raw: Readonly<Record<string, unknown>>, ctx: Module
 			if (text === "") return undefined;
 			// Count only the ones that fit the budget.
 			const added = unsaid.filter((p) => text.includes(`- ${withKind(p)}`));
-			for (const p of added) shown.add(p.id);
-			store.markPreferencesInjected(added.map((p) => p.id));
-			ctx.record({ kind: "exo.memory", data: { action: "preferences_added", preferences: added.map((p) => p.id) } });
-			return text;
+			return {
+				text,
+				// Only once the note is in the prompt (D-078): a note that lost its time budget was
+				// never shown, and is offered again.
+				commit: () => {
+					for (const p of added) shown.add(p.id);
+					store.markPreferencesInjected(added.map((p) => p.id));
+					ctx.record({
+						kind: "exo.memory",
+						data: { action: "preferences_added", preferences: added.map((p) => p.id) },
+					});
+				},
+			};
 		},
 
 		onCompacted() {

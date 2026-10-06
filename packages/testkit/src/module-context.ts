@@ -5,6 +5,7 @@ import {
 	ENGINE_PROFILES,
 	type InferenceClient,
 	InferenceError,
+	type JsonValue,
 	type ModuleContext,
 	runShellCommand,
 	SIDECAR_MAX_TOKENS,
@@ -23,6 +24,11 @@ export interface TestModuleContext {
 	readonly logs: string[];
 	/** Every progress message the module showed the user. */
 	readonly progress: string[];
+	/**
+	 * Every value the module passed to `saveState`, in order. To test a restore, build the next
+	 * context with `savedState: first.states.at(-1)` (and the same `sessionId`).
+	 */
+	readonly states: JsonValue[];
 }
 
 /**
@@ -35,11 +41,16 @@ export function createTestModuleContext(options: {
 	readonly reply?: (request: ChatRequest, index: number) => SidecarReply | Promise<SidecarReply>;
 	/** A scripted embeddings model: one vector per text, or undefined for "the server failed". */
 	readonly embed?: (texts: readonly string[]) => number[][] | undefined;
+	/** The harness session the module serves; defaults to "test-session". */
+	readonly sessionId?: string;
+	/** What an earlier instance of the module saved in this session (`ModuleContext.savedState`). */
+	readonly savedState?: JsonValue;
 }): TestModuleContext {
 	const requests: ChatRequest[] = [];
 	const records: Omit<TraceEventInput, "module" | "synthetic">[] = [];
 	const logs: string[] = [];
 	const progress: string[] = [];
+	const states: JsonValue[] = [];
 	const { reply } = options;
 	const client: InferenceClient | undefined = reply && {
 		async chat(request) {
@@ -82,8 +93,13 @@ export function createTestModuleContext(options: {
 		records,
 		logs,
 		progress,
+		states,
 		context: {
 			cwd: options.cwd,
+			sessionId: options.sessionId ?? "test-session",
+			savedState: options.savedState,
+			// As the real host does: what is kept is the JSON, not the module's live object.
+			saveState: (value) => states.push(JSON.parse(JSON.stringify(value)) as JsonValue),
 			pool: () => pool,
 			embedder: () => embedder,
 			record: (event) => records.push(event),

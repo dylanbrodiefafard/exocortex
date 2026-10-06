@@ -144,6 +144,82 @@ describe("sidecar lifecycle", () => {
 		expect((await call).ok).toBe(true);
 	});
 
+	it("leaves the turn's sidecar work alone when the user steers or follows up mid-run (B7)", async () => {
+		server = await startFakeOpenAIServer([], { fallback: { kind: "text", text: "ok", delayMs: 100 } });
+		const h = setup({ engine: { baseUrl: server.baseUrl, model: "m" } });
+		await h.pi.emit("session_start");
+		const pool = h.runtime.pool;
+		if (!pool) throw new Error("no pool");
+		const request = { messages: [{ role: "user" as const, content: "x" }], maxTokens: 4 };
+		const call = () => pool.run({ module: "t", priority: "interactive", timeoutMs: 5_000, request });
+		const steered = call();
+		await h.pi.emit("input", { text: "use the other file", source: "interactive", streamingBehavior: "steer" });
+		const followed = call();
+		await h.pi.emit("input", { text: "then run the tests", source: "rpc", streamingBehavior: "followUp" });
+		expect([(await steered).ok, (await followed).ok]).toEqual([true, true]);
+	});
+
+	describe("rebuilding the pool (B9)", () => {
+		/** A main model whose key lookup resolves when the test says so. */
+		function slowModel(baseUrl: string) {
+			const releases: (() => void)[] = [];
+			const model = { api: "openai-completions", provider: "local", id: "fake-model", baseUrl };
+			const modelRegistry = {
+				getApiKeyForProvider: () => new Promise<undefined>((resolve) => releases.push(() => resolve(undefined))),
+			};
+			return { releases, slow: { model, modelRegistry }, fast: { model } };
+		}
+		const tick = () => new Promise((resolve) => setTimeout(resolve, 5));
+
+		it("keeps the old pool until the new one is ready, and carries over that the agent is running", async () => {
+			server = await startFakeOpenAIServer([], { fallback: { kind: "text", text: "ok", delayMs: 50 } });
+			const h = setup({});
+			const { releases, slow, fast } = slowModel(server.baseUrl);
+			await h.pi.emit("session_start", {}, h.pi.ctx(fast));
+			const first = h.runtime.pool;
+			expect(first).toBeDefined();
+			await h.pi.emit("agent_start");
+			const rebuilding = h.pi.emit("model_select", {}, h.pi.ctx(slow));
+			await tick();
+			// The key lookup is still running: modules must find a pool, not a gap.
+			expect(h.runtime.pool).toBe(first);
+			releases[0]?.();
+			await rebuilding;
+			const second = h.runtime.pool;
+			expect(second).toBeDefined();
+			expect(second).not.toBe(first);
+			const request = { messages: [{ role: "user" as const, content: "x" }], maxTokens: 4 };
+			// The old pool is closed; the new one knows the agent is mid-run and holds background work.
+			expect((await first?.run({ module: "t", priority: "interactive", timeoutMs: 1_000, request }))?.ok).toBe(false);
+			const background = second?.run({ module: "t", priority: "background", timeoutMs: 5_000, request });
+			await tick();
+			expect(second?.stats().queued.background).toBe(1);
+			await h.pi.emit("agent_settled");
+			expect((await background)?.ok).toBe(true);
+		});
+
+		it("drops a rebuild that a newer one, or the session's end, overtook", async () => {
+			server = await startFakeOpenAIServer([]);
+			const h = setup({});
+			const { releases, slow, fast } = slowModel(server.baseUrl);
+			await h.pi.emit("session_start", {}, h.pi.ctx(fast));
+			const overtaken = h.pi.emit("model_select", {}, h.pi.ctx(slow));
+			await h.pi.emit("model_select", {}, h.pi.ctx(fast));
+			const current = h.runtime.pool;
+			releases[0]?.();
+			await overtaken;
+			expect(h.runtime.pool).toBe(current);
+
+			const late = h.pi.emit("model_select", {}, h.pi.ctx(slow));
+			await h.pi.emit("session_shutdown");
+			releases[1]?.();
+			await late;
+			// No pool is left behind for a session that is gone.
+			expect(h.runtime.pool).toBeUndefined();
+			expect(h.runtime.embedder).toBeUndefined();
+		});
+	});
+
 	it("builds nothing when Exocortex is disabled", async () => {
 		const h = setup({ enabled: false, engine: { baseUrl: "http://127.0.0.1:1/v1", model: "m" } });
 		await h.pi.emit("session_start");

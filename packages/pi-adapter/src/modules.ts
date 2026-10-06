@@ -1,13 +1,15 @@
-import {
-	type AgentBeforeSettleEvent,
-	convertToLlm,
-	type ExtensionAPI,
-	type ExtensionContext,
-	type SessionBeforeCompactEvent,
-	serializeConversation,
-	type ToolResultEvent,
+import type {
+	AgentBeforeSettleEvent,
+	BoundaryResult,
+	ExtensionAPI,
+	ExtensionContext,
+	SessionBeforeCompactEvent,
+	ToolResultEvent,
 } from "@earendil-works/pi-coding-agent";
 import {
+	type Committable,
+	type CompactionRequest,
+	canonicalJson,
 	type ExoModule,
 	hiddenRun,
 	type JsonValue,
@@ -22,14 +24,33 @@ import {
 	type ToolResultDraft,
 	toJsonValue,
 	type UserTurn,
+	type UserTurnContext,
 } from "@exocortex/core";
 import { COMPACTION_ID, createCompaction } from "@exocortex/mod-compaction";
 import { createMemory, MEMORY_ID } from "@exocortex/mod-memory";
 import { createSupervisor, SUPERVISOR_ID } from "@exocortex/mod-supervisor";
 import { createTriage, TRIAGE_ID } from "@exocortex/mod-triage";
 import { createTrimmer, TRIMMER_ID } from "@exocortex/mod-trimmer";
+import { remainingMs, withBudget } from "./budget.ts";
+import { createHoldUi } from "./hold.ts";
+import {
+	exitCodeOf,
+	fullOutputPathOf,
+	isEscapeKey,
+	isRecord,
+	lastAssistantText,
+	lastCustomEntries,
+	previousCompactionDetails,
+	type RewriteNote,
+	rewrittenResult,
+	sameText,
+	serializeSpan,
+	signalOf,
+	statusOf,
+	textOf,
+	toObject,
+} from "./pi-shapes.ts";
 import type { Runtime } from "./runtime.ts";
-import { exitCodeOf } from "./trace-recorder.ts";
 
 /**
  * Every module Exocortex knows, by config id. Order matters: tool-result rewrites run in this
@@ -55,7 +76,21 @@ const HIDDEN_RUN_MODULE = "runs";
 const COMPACT_BUDGET_MS = 120_000;
 /** Hard cap on how long modules may hold a new user prompt before the agent starts on it. */
 const USER_TURN_BUDGET_MS = 6_000;
-const STATUS_KEY = "exo";
+/** Hard cap on how long modules' `dispose` may hold a session's end. */
+const DISPOSE_BUDGET_MS = 2_000;
+/**
+ * How many times in a row modules may continue the agent before the user speaks again. Modules
+ * keep their own, lower limits (the supervisor's `maxContinuations`); this one holds if theirs fails.
+ */
+const MAX_CONSECUTIVE_CONTINUATIONS = 20;
+/** A module's saved state is one line in pi's session file: keep it far from the megabytes. */
+const MAX_STATE_CHARS = 256 * 1024;
+/** `customType` of the session entry that keeps `/exo` toggles (see `command.ts`). */
+export const OVERRIDES_ENTRY = "exo.overrides";
+/** `customType` of a user-turn message more than one module contributed to. */
+const SHARED_CONTEXT_TYPE = "exo.context";
+
+const stateEntryOf = (id: string): string => `exo.${id}.state`;
 
 export interface ModuleHostOptions {
 	readonly runtime: Runtime;
@@ -70,7 +105,19 @@ export interface ModuleHostOptions {
 		readonly settle?: number;
 		readonly compact?: number;
 		readonly userTurn?: number;
+		readonly dispose?: number;
 	};
+	/** Overrides {@link MAX_CONSECUTIVE_CONTINUATIONS} (tests). */
+	readonly maxContinuations?: number;
+}
+
+/** A module instance, the settings it was built from, and the switch that turns its context off. */
+interface Slot {
+	readonly id: string;
+	readonly module: ExoModule;
+	/** Canonical JSON of the merged settings: an instance is kept while this does not change. */
+	readonly settingsKey: string;
+	readonly life: { over: boolean };
 }
 
 /**
@@ -80,6 +127,9 @@ export interface ModuleHostOptions {
  * - `suggest` → pre-fill the editor (Enter sends it); RPC clients receive `set_editor_text`;
  * - `continue` → a persisted `exo.<module>` custom message plus `continue: true` (D-029);
  * - `notify` → status line, and a notification for warnings.
+ *
+ * Every hook that holds pi runs under `withBudget`: a module that hangs, throws or ignores its
+ * signal costs the user at most the hook's budget and never an unhandled rejection (D-078).
  */
 export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions): void {
 	const { runtime, onError } = options;
@@ -89,83 +139,116 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 	const settleBudgetMs = options.budgetsMs?.settle ?? SETTLE_BUDGET_MS;
 	const compactBudgetMs = options.budgetsMs?.compact ?? COMPACT_BUDGET_MS;
 	const userTurnBudgetMs = options.budgetsMs?.userTurn ?? USER_TURN_BUDGET_MS;
-	let modules: ExoModule[] = [];
+	const disposeBudgetMs = options.budgetsMs?.dispose ?? DISPOSE_BUDGET_MS;
+	const maxContinuations = options.maxContinuations ?? MAX_CONSECUTIVE_CONTINUATIONS;
+	const hold = createHoldUi(onError);
+	let slots: Slot[] = [];
 	let cwd = process.cwd();
+	let sessionId = "";
+	/** Each module's last saved state in this session, as it was written (see `ModuleContext.saveState`). */
+	const savedStates = new Map<string, { readonly value: JsonValue; readonly json: string }>();
 	/** The follow-up a module last put in the editor: sent unchanged, it is not the user's wording. */
 	let suggested: string | undefined;
 	let turn: UserTurn | undefined;
-	/** The UI of the hooks now holding pi, how many there are, and whether one of them reported progress. */
-	let holding: { ui: ExtensionContext["ui"]; hooks: number; shown: boolean } | undefined;
-	/** The status the last settle left on the status line: progress replaces it only for a while. */
-	let settledStatus: string | undefined;
+	/** Continuations applied since the user last spoke. */
+	let continuations = 0;
+	/** Aborts the settle hook now running: the user interrupted it or is leaving the session. */
+	let settling: AbortController | undefined;
+	/** Tool results are handled one after another: each waits for the one before it. */
+	let toolResults: Promise<unknown> = Promise.resolve();
 
-	/**
-	 * Runs a hook that holds pi, letting modules say what they are waiting on (`ctx.progress`):
-	 * the message goes on the status line and next to pi's working spinner, and both are restored
-	 * when the last such hook returns.
-	 */
-	async function whileHolding<T>(ctx: ExtensionContext, hook: () => Promise<T>): Promise<T> {
-		if (!ctx.hasUI) return hook();
-		holding = holding ?? { ui: ctx.ui, hooks: 0, shown: false };
-		const held = holding;
-		held.hooks += 1;
-		try {
-			return await hook();
-		} finally {
-			held.hooks -= 1;
-			if (held.hooks === 0) {
-				if (held.shown) {
-					held.ui.setStatus(STATUS_KEY, settledStatus);
-					held.ui.setWorkingMessage();
-				}
-				if (holding === held) holding = undefined;
-			}
-		}
-	}
-
-	function progress(message: string): void {
-		if (!holding) return;
-		holding.shown = true;
-		holding.ui.setStatus(STATUS_KEY, `exo: ${message}`);
-		holding.ui.setWorkingMessage(message);
-	}
+	const modules = (): ExoModule[] => slots.map((slot) => slot.module);
+	const reporter = (where: string) => (error: unknown) => onError(where, error);
 
 	function build(): void {
-		modules = [];
 		const config = runtime.config;
-		if (!config?.enabled || runtime.overrides.allOff) return;
+		const on = config?.enabled === true && !runtime.overrides.allOff;
+		const previous = new Map(slots.map((slot) => [slot.id, slot]));
+		const next: Slot[] = [];
 		for (const [id, factory] of Object.entries(factories)) {
-			const settings = { ...config.modules[id], ...runtime.overrides.modules[id] };
-			if (settings.enabled !== true) continue;
+			const settings = { ...config?.modules[id], ...runtime.overrides.modules[id] };
+			if (!on || settings.enabled !== true) continue;
+			const settingsKey = canonicalJson(toJsonValue(settings));
+			const kept = previous.get(id);
+			if (kept?.settingsKey === settingsKey) {
+				// Unchanged: the instance keeps what it has learned this session.
+				previous.delete(id);
+				next.push(kept);
+				continue;
+			}
+			if (kept) {
+				// Before its replacement is built: the two may share a file or a database.
+				previous.delete(id);
+				void retire(kept);
+			}
+			const life = { over: false };
 			try {
-				modules.push(factory(settings, moduleContext(id)));
+				next.push({ id, module: factory(settings, moduleContext(id, life)), settingsKey, life });
 			} catch (error) {
 				onError(`module ${id}`, error);
 			}
 		}
+		for (const dropped of previous.values()) void retire(dropped);
+		slots = next;
 	}
+
+	/** Disposes one instance and turns its context off. Never rejects. */
+	async function retire(slot: Slot): Promise<void> {
+		try {
+			await slot.module.dispose?.();
+		} catch (error) {
+			onError(`${slot.id}.dispose`, error);
+		} finally {
+			slot.life.over = true;
+		}
+	}
+
+	async function disposeAll(): Promise<void> {
+		settling?.abort();
+		const retiring = slots;
+		slots = [];
+		if (retiring.length === 0) return;
+		await withBudget(disposeBudgetMs, undefined, () => Promise.all(retiring.map(retire)), reporter("modules.dispose"));
+		// A dispose still running has had its time: its instance may not write into the next session.
+		for (const slot of retiring) slot.life.over = true;
+	}
+
 	runtime.rebuildModules = build;
-	runtime.moduleStatus = () => modules.map((m) => m.status?.() ?? m.id);
+	runtime.disposeModules = disposeAll;
+	runtime.moduleStatus = () => modules().map((m) => m.status?.() ?? m.id);
 	runtime.moduleIds = () => Object.keys(factories);
 	runtime.moduleCommand = async (id, args, dialog) => {
 		try {
-			return await modules.find((m) => m.id === id)?.command?.(args, dialog);
+			return await modules()
+				.find((m) => m.id === id)
+				?.command?.(args, dialog);
 		} catch (error) {
 			onError(`${id}.command`, error);
 			return undefined;
 		}
 	};
 
-	function moduleContext(id: string): ModuleContext {
+	function moduleContext(id: string, life: { readonly over: boolean }): ModuleContext {
 		return {
 			cwd,
+			sessionId,
+			savedState: savedStates.get(id)?.value,
+			saveState: (value) => {
+				if (life.over) return;
+				try {
+					saveState(id, value);
+				} catch (error) {
+					onError(`${id}.saveState`, error);
+				}
+			},
 			pool: () => runtime.pool,
 			embedder: () => runtime.embedder,
-			record: (event) => runtime.traceSession?.append({ ...event, module: id, synthetic: true }),
+			record: (event) => runtime.record({ ...event, module: id, synthetic: true }),
 			runCommand: (command, opts) => runShellCommand(command, { cwd, ...opts }),
 			progress: (message) => {
+				if (life.over) return;
 				try {
-					progress(message);
+					hold.progress(message);
 				} catch (error) {
 					onError(`${id}.progress`, error);
 				}
@@ -174,40 +257,56 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 		};
 	}
 
-	/**
-	 * For a test or build run whose exit code a pipe hid, what its output shows (D-075): read once
-	 * here, so every module acts on the same answer. A sidecar is asked only about a test run the
-	 * output grammar cannot read, within its own deadline; modules get `unknown` if it fails.
-	 */
-	async function readHidden(tool: ToolOutcome, toolCallId: string): Promise<RunVerdict | undefined> {
-		if (modules.length === 0 || !hiddenRun(tool)) return undefined;
-		const controller = new AbortController();
-		const budget = setTimeout(() => controller.abort(), hiddenRunBudgetMs);
+	/** Writes a module's state as an `exo.<module>.state` session entry (never sent to the model). */
+	function saveState(id: string, value: JsonValue): void {
+		const json = JSON.stringify(value);
+		if (json === undefined) throw new Error("state is not JSON");
+		if (json === savedStates.get(id)?.json) return;
+		if (json.length > MAX_STATE_CHARS) {
+			throw new Error(`state of ${json.length} characters is over the ${MAX_STATE_CHARS} limit: not saved`);
+		}
+		const stored = JSON.parse(json) as JsonValue;
+		pi.appendEntry(stateEntryOf(id), stored);
+		savedStates.set(id, { value: stored, json });
+	}
+
+	/** Reads what this session's entries hold for Exocortex: `/exo` toggles and each module's state. */
+	function restore(ctx: ExtensionContext): void {
+		runtime.overrides.allOff = false;
+		runtime.overrides.modules = {};
+		savedStates.clear();
+		const stateEntries = new Map(Object.keys(factories).map((id) => [stateEntryOf(id), id]));
+		const entries = lastCustomEntries(ctx, new Set([OVERRIDES_ENTRY, ...stateEntries.keys()]));
+		for (const [customType, data] of entries) {
+			const id = stateEntries.get(customType);
+			if (id === undefined) restoreOverrides(data);
+			else if (data !== undefined) {
+				const value = toJsonValue(data);
+				savedStates.set(id, { value, json: JSON.stringify(value) });
+			}
+		}
+	}
+
+	/** Applies persisted toggles, ignoring anything that is not the shape `command.ts` writes. */
+	function restoreOverrides(data: unknown): void {
+		if (!isRecord(data) || typeof data["allOff"] !== "boolean" || !isRecord(data["modules"])) return;
+		runtime.overrides.allOff = data["allOff"];
+		for (const [id, override] of Object.entries(data["modules"])) {
+			if (id in factories && isRecord(override)) runtime.overrides.modules[id] = { ...override };
+		}
+	}
+
+	/** Tells a module its result was used. A throwing `commit` must not undo the result. */
+	function commit(id: string, result: Committable): void {
 		try {
-			if (readHiddenRun(tool) === "unknown" && runtime.pool) progress("Reading the test run's result…");
-			const reading = await judgeHiddenRun(
-				tool,
-				{ pool: runtime.pool, module: HIDDEN_RUN_MODULE, timeoutMs: hiddenRunBudgetMs },
-				controller.signal,
-			);
-			if (!reading) return undefined;
-			runtime.traceSession?.append({
-				kind: "exo.run",
-				module: HIDDEN_RUN_MODULE,
-				synthetic: true,
-				data: { toolCallId, ...reading },
-			});
-			return reading.verdict;
+			result.commit?.();
 		} catch (error) {
-			onError("modules.readHidden", error);
-			return undefined;
-		} finally {
-			clearTimeout(budget);
+			onError(`${id}.commit`, error);
 		}
 	}
 
 	function each(where: string, fn: (module: ExoModule) => void): void {
-		for (const module of modules) {
+		for (const module of modules()) {
 			try {
 				fn(module);
 			} catch (error) {
@@ -216,44 +315,117 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 		}
 	}
 
-	pi.on("session_start", (_event, ctx) => {
-		try {
-			cwd = ctx.cwd;
-			runtime.activate(ctx.cwd);
-			build();
-		} catch (error) {
-			onError("modules.session_start", error);
-		}
-		return undefined;
-	});
-
-	pi.on("input", (event) => {
-		const accepted = suggested !== undefined && sameText(suggested, event.text);
-		suggested = undefined;
-		const current: UserTurn = {
-			text: event.text,
-			origin: event.source === "extension" ? "extension" : accepted ? "suggestion" : "user",
+	/** Registers a handler that reports its own errors and resolves undefined instead of throwing. */
+	function guarded<E, R>(where: string, handler: (event: E, ctx: ExtensionContext) => R | Promise<R>) {
+		return async (event: E, ctx: ExtensionContext): Promise<R | undefined> => {
+			try {
+				return await handler(event, ctx);
+			} catch (error) {
+				onError(`modules.${where}`, error);
+				return undefined;
+			}
 		};
-		turn = current;
-		each("onUserTurn", (m) => m.onUserTurn?.(current));
-		return undefined;
-	});
+	}
 
-	pi.on("before_agent_start", async (_event, ctx) => {
-		try {
-			return await whileHolding(ctx, userTurnContext);
-		} catch (error) {
-			onError("modules.before_agent_start", error);
+	pi.on(
+		"session_start",
+		guarded("session_start", async (_event, ctx) => {
+			// A new session, or the same one reloaded: modules start over from what the session holds.
+			await disposeAll();
+			cwd = ctx.cwd;
+			sessionId = ctx.sessionManager.getSessionId();
+			suggested = undefined;
+			turn = undefined;
+			continuations = 0;
+			toolResults = Promise.resolve();
+			runtime.activate(ctx.cwd);
+			try {
+				restore(ctx);
+			} catch (error) {
+				onError("modules.restore", error);
+			}
+			build();
 			return undefined;
-		}
-	});
+		}),
+	);
 
-	pi.on("session_compact", () => {
-		each("onCompacted", (m) => m.onCompacted?.());
+	pi.on(
+		"input",
+		guarded("input", (event) => {
+			const accepted = suggested !== undefined && sameText(suggested, event.text);
+			suggested = undefined;
+			if (event.source !== "extension") continuations = 0;
+			const current: UserTurn = {
+				text: event.text,
+				origin: event.source === "extension" ? "extension" : accepted ? "suggestion" : "user",
+			};
+			turn = current;
+			each("onUserTurn", (m) => m.onUserTurn?.(current));
+			return undefined;
+		}),
+	);
+
+	pi.on(
+		"before_agent_start",
+		guarded("before_agent_start", (_event, ctx) => hold.whileHolding(ctx, () => userTurnContext(ctx))),
+	);
+
+	pi.on(
+		"session_compact",
+		guarded("session_compact", () => {
+			each("onCompacted", (m) => m.onCompacted?.());
+			return undefined;
+		}),
+	);
+
+	pi.on(
+		"tool_result",
+		guarded("tool_result", (event, ctx) =>
+			hold.whileHolding(ctx, () => inOrder(() => toolResult(event, signalOf(ctx)))),
+		),
+	);
+
+	pi.on(
+		"agent_before_settle",
+		guarded("agent_before_settle", (event, ctx) => hold.whileHolding(ctx, () => settle(event, ctx))),
+	);
+
+	pi.on(
+		"session_before_compact",
+		guarded("session_before_compact", (event, ctx) => hold.whileHolding(ctx, () => compact(event))),
+	);
+
+	// The user is leaving the session: pi waits for a running settle hook before it switches
+	// (PI_API_NOTES §5), so stop it now. If another extension then cancels the switch, the cost is
+	// one settle check that reported nothing.
+	const stopSettling = guarded("stop_settling", () => {
+		settling?.abort();
 		return undefined;
 	});
+	pi.on("session_before_switch", stopSettling);
+	pi.on("session_before_fork", stopSettling);
 
-	pi.on("tool_result", async (event, ctx) => {
+	pi.on(
+		"session_shutdown",
+		guarded("session_shutdown", async () => {
+			await disposeAll();
+			return undefined;
+		}),
+	);
+
+	/** Runs `fn` after every tool result before it has been handled, whether those succeeded or not. */
+	function inOrder<T>(fn: () => Promise<T>): Promise<T> {
+		const run = toolResults.then(fn, fn);
+		toolResults = run.catch(() => undefined);
+		return run;
+	}
+
+	/**
+	 * One finished tool call: reads a hidden exit code, tells every module, then offers the result
+	 * for rewriting. Pi runs tools in parallel and fires `tool_result` as each finishes, so without
+	 * `inOrder` two results' hooks would interleave (PI_API_NOTES §2).
+	 */
+	async function toolResult(event: ToolResultEvent, parent: AbortSignal | undefined) {
 		const reported: ToolOutcome = {
 			toolName: event.toolName,
 			input: toObject(event.input),
@@ -261,80 +433,84 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 			exitCode: exitCodeOf(event.structuredContent),
 			output: textOf(event.content),
 		};
-		try {
-			return await whileHolding(ctx, async () => {
-				const hidden = await readHidden(reported, event.toolCallId);
-				const outcome: ToolOutcome = hidden ? { ...reported, hidden } : reported;
-				each("onToolResult", (m) => m.onToolResult?.(outcome));
-				return rewrite(event, outcome);
-			});
-		} catch (error) {
-			onError("modules.tool_result", error);
-			return undefined;
-		}
-	});
+		const hidden = await readHidden(reported, event.toolCallId, parent);
+		const outcome: ToolOutcome = hidden ? { ...reported, hidden } : reported;
+		each("onToolResult", (m) => m.onToolResult?.(outcome));
+		return rewrite(event, outcome, parent);
+	}
 
-	pi.on("agent_before_settle", async (event, ctx) => {
-		try {
-			return await settle(event, ctx);
-		} catch (error) {
-			onError("modules.agent_before_settle", error);
-			return undefined;
-		}
-	});
-
-	pi.on("session_before_compact", async (event, ctx) => {
-		try {
-			return await whileHolding(ctx, () => compact(event));
-		} catch (error) {
-			onError("modules.session_before_compact", error);
-			return undefined;
-		}
-	});
-
-	pi.on("session_shutdown", () => {
-		modules = [];
-		return undefined;
-	});
+	/**
+	 * For a test or build run whose exit code a pipe hid, what its output shows (D-075): read once
+	 * here, so every module acts on the same answer. A sidecar is asked only about a test run the
+	 * output grammar cannot read, within its own deadline; modules get `unknown` if it fails.
+	 */
+	async function readHidden(
+		tool: ToolOutcome,
+		toolCallId: string,
+		parent: AbortSignal | undefined,
+	): Promise<RunVerdict | undefined> {
+		if (slots.length === 0 || !hiddenRun(tool)) return undefined;
+		const reading = await withBudget(
+			hiddenRunBudgetMs,
+			parent,
+			(signal) => {
+				if (readHiddenRun(tool) === "unknown" && runtime.pool) hold.progress("Reading the test run's result…");
+				return judgeHiddenRun(
+					tool,
+					{ pool: runtime.pool, module: HIDDEN_RUN_MODULE, timeoutMs: hiddenRunBudgetMs },
+					signal,
+				);
+			},
+			reporter("modules.readHidden"),
+		);
+		if (!reading) return undefined;
+		runtime.record({
+			kind: "exo.run",
+			module: HIDDEN_RUN_MODULE,
+			synthetic: true,
+			data: { toolCallId, ...reading },
+		});
+		return reading.verdict;
+	}
 
 	/**
 	 * Lets modules add context to a new user prompt (D-029): their texts become one persisted
-	 * `exo.<module>` custom message right after the user's message. `before_agent_start` fires once
-	 * per prompt, so each `input` is offered once.
+	 * custom message right after the user's message, `exo.<module>` or, from several modules,
+	 * `exo.context`. `before_agent_start` fires once per prompt, so each `input` is offered once.
 	 */
-	async function userTurnContext() {
+	async function userTurnContext(ctx: ExtensionContext) {
 		const current = turn;
 		turn = undefined;
-		const providers = modules.filter((m) => m.contextForUserTurn);
+		const providers = modules().filter((m) => m.contextForUserTurn);
 		if (!current || providers.length === 0) return undefined;
-		const controller = new AbortController();
-		const budget = setTimeout(() => controller.abort(), userTurnBudgetMs);
-		try {
-			const parts: { module: string; text: string }[] = [];
-			for (const module of providers) {
-				if (controller.signal.aborted) break;
-				const text = await untilAborted(
-					module.contextForUserTurn?.(current, controller.signal),
-					controller.signal,
-				).catch((error: unknown) => {
-					onError(`${module.id}.contextForUserTurn`, error);
-					return undefined;
-				});
-				if (text?.trim()) parts.push({ module: module.id, text: text.trim() });
-			}
-			const [first] = parts;
-			if (!first) return undefined;
-			return {
-				message: {
-					customType: `exo.${first.module}`,
-					content: parts.map((p) => p.text).join("\n\n"),
-					display: true,
-					details: { exo: { module: first.module, modules: parts.map((p) => p.module) } },
-				},
-			};
-		} finally {
-			clearTimeout(budget);
+		const parent = signalOf(ctx);
+		const deadline = Date.now() + userTurnBudgetMs;
+		const parts: { readonly module: string; readonly text: string; readonly result: UserTurnContext }[] = [];
+		for (const [index, module] of providers.entries()) {
+			const result = await withBudget(
+				remainingMs(deadline) / (providers.length - index),
+				parent,
+				(signal) => module.contextForUserTurn?.(current, signal),
+				reporter(`${module.id}.contextForUserTurn`),
+			);
+			const text = typeof result?.text === "string" ? result.text.trim() : "";
+			if (result && text !== "") parts.push({ module: module.id, text, result });
 		}
+		const [first] = parts;
+		if (!first) return undefined;
+		for (const part of parts) commit(part.module, part.result);
+		const contributors = parts.map((p) => p.module);
+		return {
+			message: {
+				customType: parts.length === 1 ? `exo.${first.module}` : SHARED_CONTEXT_TYPE,
+				content: parts.map((p) => p.text).join("\n\n"),
+				// Shown to the user (D-060): text added on their behalf should be visible.
+				display: true,
+				details: {
+					exo: parts.length === 1 ? { module: first.module, modules: contributors } : { modules: contributors },
+				},
+			},
+		};
 	}
 
 	/**
@@ -342,48 +518,42 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 	 * recorder's `tool.result` runs first); each rewrite is traced as `exo.rewrite` and noted in
 	 * merged `details.exo.rewrites` (D-029).
 	 */
-	async function rewrite(event: ToolResultEvent, outcome: ToolOutcome) {
-		const rewriters = modules.filter((m) => m.rewriteToolResult);
+	async function rewrite(event: ToolResultEvent, outcome: ToolOutcome, parent: AbortSignal | undefined) {
+		const rewriters = modules().filter((m) => m.rewriteToolResult);
 		if (rewriters.length === 0 || !event.content.every((part) => part.type === "text")) return undefined;
-		const controller = new AbortController();
-		const budget = setTimeout(() => controller.abort(), rewriteBudgetMs);
-		const draft = {
+		const draft: ToolResultDraft = {
 			...outcome,
 			toolCallId: event.toolCallId,
 			current: outcome.output,
 			fullOutputPath: fullOutputPathOf(event.details, event.structuredContent),
 			status: statusOf(outcome.output),
 		};
-		try {
-			const { text, notes } = await applyRewrites(rewriters, draft, controller.signal);
-			return notes.length === 0 ? undefined : rewrittenResult(event, text, notes);
-		} finally {
-			clearTimeout(budget);
-		}
-	}
-
-	async function applyRewrites(rewriters: readonly ExoModule[], draft: ToolResultDraft, signal: AbortSignal) {
+		const deadline = Date.now() + rewriteBudgetMs;
 		const notes: RewriteNote[] = [];
+		const applied: { readonly module: string; readonly result: Committable }[] = [];
 		let current = draft.current;
-		for (const module of rewriters) {
-			if (signal.aborted) break;
-			const result = await untilAborted(module.rewriteToolResult?.({ ...draft, current }, signal), signal).catch(
-				(error: unknown) => {
-					onError(`${module.id}.rewriteToolResult`, error);
-					return undefined;
-				},
+		for (const [index, module] of rewriters.entries()) {
+			// An equal share of what is left: a slow module cannot use up the time of the ones after it.
+			const result = await withBudget(
+				remainingMs(deadline) / (rewriters.length - index),
+				parent,
+				(signal) => module.rewriteToolResult?.({ ...draft, current }, signal),
+				reporter(`${module.id}.rewriteToolResult`),
 			);
-			if (!result || result.text === current) continue;
+			if (!result || typeof result.text !== "string" || result.text === current) continue;
 			current = result.text;
 			notes.push({ module: module.id, note: result.note });
-			runtime.traceSession?.append({
+			applied.push({ module: module.id, result });
+			runtime.record({
 				kind: "exo.rewrite",
 				synthetic: true,
 				module: module.id,
 				data: { ...result.details, toolCallId: draft.toolCallId, note: result.note, chars: result.text.length },
 			});
 		}
-		return { text: current, notes };
+		if (notes.length === 0) return undefined;
+		for (const { module, result } of applied) commit(module, result);
+		return rewrittenResult(event, current, notes);
 	}
 
 	/**
@@ -391,14 +561,14 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 	 * `exo.compaction`; otherwise (or on any failure) pi compacts as usual.
 	 */
 	async function compact(event: SessionBeforeCompactEvent) {
-		const compactors = modules.filter((m) => m.compact);
+		const compactors = modules().filter((m) => m.compact);
 		if (compactors.length === 0) return undefined;
 		const { preparation } = event;
 		const span = [...preparation.messagesToSummarize, ...preparation.turnPrefixMessages];
 		const modified = new Set([...preparation.fileOps.written, ...preparation.fileOps.edited]);
-		const request = {
+		const request: Omit<CompactionRequest, "previousDetails"> = {
 			reason: event.reason,
-			conversation: serializeConversation(convertToLlm(span)),
+			conversation: serializeSpan(span),
 			userMessages: span.filter((m) => m.role === "user").map((m) => textOf(m.content)),
 			previousSummary: preparation.previousSummary ?? null,
 			filesRead: [...preparation.fileOps.read].filter((f) => !modified.has(f)),
@@ -406,179 +576,153 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 			tokensBefore: preparation.tokensBefore,
 			customInstructions: event.customInstructions ?? null,
 		};
-		const controller = new AbortController();
-		const abort = () => controller.abort();
-		event.signal.addEventListener("abort", abort, { once: true });
-		const budget = setTimeout(abort, compactBudgetMs);
-		try {
-			for (const module of compactors) {
-				const summary = await untilAborted(module.compact?.(request, controller.signal), controller.signal).catch(
-					(error: unknown) => {
-						onError(`${module.id}.compact`, error);
-						return undefined;
-					},
-				);
-				if (!summary) continue;
-				return {
-					compaction: {
-						summary,
-						firstKeptEntryId: preparation.firstKeptEntryId,
-						tokensBefore: preparation.tokensBefore,
-						details: { exo: { module: module.id } },
-					},
-				};
-			}
-			return undefined;
-		} finally {
-			clearTimeout(budget);
-			event.signal.removeEventListener("abort", abort);
+		const deadline = Date.now() + compactBudgetMs;
+		for (const module of compactors) {
+			if (event.signal.aborted) break;
+			const previousDetails = previousCompactionDetails(event.branchEntries, module.id);
+			const result = await withBudget(
+				remainingMs(deadline),
+				event.signal,
+				(signal) => module.compact?.({ ...request, previousDetails }, signal),
+				reporter(`${module.id}.compact`),
+			);
+			if (!result || typeof result.summary !== "string" || result.summary === "") continue;
+			commit(module.id, result);
+			return {
+				compaction: {
+					summary: result.summary,
+					firstKeptEntryId: preparation.firstKeptEntryId,
+					tokensBefore: preparation.tokensBefore,
+					details: { exo: { ...result.details, module: module.id } },
+				},
+			};
 		}
+		return undefined;
 	}
 
+	/**
+	 * Asks modules what to do now that the agent has stopped. Pi waits for this hook, also when the
+	 * user presses Escape or leaves the session, and gives no abort signal for it (PI_API_NOTES §5):
+	 * so the hook stops itself on its budget, on Escape, and when the session is being replaced.
+	 * Nothing is applied after that: pi would persist a continuation and then not continue.
+	 */
 	async function settle(event: AgentBeforeSettleEvent, ctx: ExtensionContext) {
-		const settling = modules.filter((m) => m.onSettle);
-		if (settling.length === 0) return undefined;
+		const asked = modules().filter((m) => m.onSettle);
+		if (asked.length === 0) return undefined;
 		const info = { outcome: event.outcome, lastAssistantText: lastAssistantText(event) };
-		const controller = new AbortController();
-		const budget = setTimeout(() => controller.abort(), settleBudgetMs);
-		if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, "exo: checking the work…");
-		let acted = false;
+		const stop = new AbortController();
+		settling = stop;
+		const unwatch = watchEscape(ctx, () => stop.abort());
+		const deadline = Date.now() + settleBudgetMs;
+		hold.progress("checking the work…");
+		// Nothing to report leaves nothing on the status line.
+		hold.settled(ctx, undefined);
 		try {
-			for (const module of settling) {
-				const action = await module.onSettle?.(info, controller.signal).catch((error: unknown) => {
-					onError(`${module.id}.onSettle`, error);
-					return undefined;
-				});
+			for (const module of asked) {
+				const action = await withBudget(
+					remainingMs(deadline),
+					stop.signal,
+					(signal) => module.onSettle?.(info, signal),
+					reporter(`${module.id}.onSettle`),
+				);
+				if (stop.signal.aborted) break;
 				if (!action) continue;
-				acted = true;
-				const result = apply(module.id, action, ctx);
-				if (action.kind !== "notify") return result; // one actionable result per settle
+				const applied = apply(module.id, action, ctx);
+				if (applied.used) commit(module.id, action);
+				if (action.kind !== "notify") return applied.result; // one actionable result per settle
 			}
 			return undefined;
 		} finally {
-			// Nothing to report: don't leave "checking the work…" on the status line.
-			if (!acted) settledStatus = undefined;
-			if (!acted && ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, undefined);
-			clearTimeout(budget);
+			unwatch();
+			if (settling === stop) settling = undefined;
 		}
 	}
 
-	function apply(moduleId: string, action: SettleAction, ctx: ExtensionContext) {
-		const status = (text: string | undefined) => {
-			settledStatus = text;
-			if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, text);
-		};
-		switch (action.kind) {
-			case "suggest":
-				suggested = action.text;
-				status(`exo: ${action.summary} (suggestion in editor)`);
-				if (ctx.hasUI) {
-					ctx.ui.setEditorText(action.text);
-					ctx.ui.notify(`${action.summary}. Suggested follow-up is in the editor: Enter sends it.`, "info");
-				}
+	/** Calls `onEscape` when the user presses Escape (the TUI's interrupt key) until the returned function is called. */
+	function watchEscape(ctx: ExtensionContext, onEscape: () => void): () => void {
+		try {
+			if (!ctx.hasUI || typeof ctx.ui.onTerminalInput !== "function") return () => {};
+			const unsubscribe = ctx.ui.onTerminalInput((data) => {
+				if (isEscapeKey(data)) onEscape();
 				return undefined;
-			case "continue":
-				status(`exo: ${action.summary} (continuing)`);
+			});
+			return () => {
+				try {
+					unsubscribe();
+				} catch (error) {
+					onError("modules.watchEscape", error);
+				}
+			};
+		} catch (error) {
+			onError("modules.watchEscape", error);
+			return () => {};
+		}
+	}
+
+	/** Carries out a settle action. `used` is false when the action was dropped instead. */
+	function apply(
+		moduleId: string,
+		action: SettleAction,
+		ctx: ExtensionContext,
+	): { readonly used: boolean; readonly result?: BoundaryResult } {
+		switch (action.kind) {
+			case "suggest": {
+				// Nothing can show it: the module is not told it was used.
+				if (!ctx.hasUI) return { used: false };
+				suggested = action.text;
+				// The user is typing: their draft stays, the suggestion is shown beside it.
+				if (ctx.ui.getEditorText().trim() !== "") {
+					hold.settled(ctx, `exo: ${action.summary} (suggestion shown)`);
+					ctx.ui.notify(`${action.summary}. Suggested follow-up (your draft is untouched):\n${action.text}`, "info");
+					return { used: true };
+				}
+				hold.settled(ctx, `exo: ${action.summary} (suggestion in editor)`);
+				ctx.ui.setEditorText(action.text);
+				ctx.ui.notify(`${action.summary}. Suggested follow-up is in the editor: Enter sends it.`, "info");
+				return { used: true };
+			}
+			case "continue": {
+				if (continuations >= maxContinuations) {
+					const refusal = `${action.summary}: not continuing, the agent was continued ${continuations} times in a row`;
+					hold.settled(ctx, `exo: ${refusal}`);
+					if (ctx.hasUI) ctx.ui.notify(refusal, "warning");
+					runtime.record({
+						kind: "exo.action",
+						synthetic: true,
+						module: moduleId,
+						data: { action: "continue_refused", continuations },
+					});
+					return { used: false };
+				}
+				continuations += 1;
+				hold.settled(ctx, `exo: ${action.summary} (continuing)`);
 				// Boundary entries skip pi's message_end, so record the injection here (brief §9).
-				runtime.traceSession?.append({
+				runtime.record({
 					kind: "message",
 					synthetic: true,
 					module: moduleId,
 					data: { role: "custom", customType: `exo.${moduleId}`, content: action.text },
 				});
 				return {
-					entries: [
-						{
-							type: "custom_message" as const,
-							customType: `exo.${moduleId}`,
-							content: action.text,
-							display: true,
-							details: { exo: { module: moduleId } },
-						},
-					],
-					continue: true,
+					used: true,
+					result: {
+						entries: [
+							{
+								type: "custom_message",
+								customType: `exo.${moduleId}`,
+								content: action.text,
+								display: true,
+								details: { exo: { module: moduleId } },
+							},
+						],
+						continue: true,
+					},
 				};
+			}
 			case "notify":
-				status(`exo: ${action.summary}`);
+				hold.settled(ctx, `exo: ${action.summary}`);
 				if (action.level === "warning" && ctx.hasUI) ctx.ui.notify(action.summary, "warning");
-				return undefined;
+				return { used: true };
 		}
 	}
-}
-
-function sameText(a: string, b: string): boolean {
-	return a.replace(/\s+/g, " ").trim() === b.replace(/\s+/g, " ").trim();
-}
-
-function lastAssistantText(event: AgentBeforeSettleEvent): string {
-	const messages = event.context.llmMessages;
-	for (let i = messages.length - 1; i >= 0; i--) {
-		const message = messages[i];
-		if (message?.role === "assistant") return textOf(message.content);
-	}
-	return "";
-}
-
-function textOf(content: unknown): string {
-	if (typeof content === "string") return content;
-	if (!Array.isArray(content)) return "";
-	return content
-		.filter(
-			(part: unknown) => typeof part === "object" && part !== null && (part as { type?: unknown }).type === "text",
-		)
-		.map((part: { text?: unknown }) => String(part.text ?? ""))
-		.join("\n");
-}
-
-function toObject(value: unknown): { readonly [key: string]: JsonValue } {
-	const json = toJsonValue(value);
-	return isJsonObject(json) ? json : {};
-}
-
-function isJsonObject(value: JsonValue): value is { readonly [key: string]: JsonValue } {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-interface RewriteNote {
-	readonly module: string;
-	readonly note: string;
-}
-
-/** The pi `tool_result` patch for rewritten text: merged `details.exo`, structuredContent kept. */
-function rewrittenResult(event: ToolResultEvent, text: string, notes: readonly RewriteNote[]) {
-	const details = isRecord(event.details) ? event.details : {};
-	const exo = isRecord(details["exo"]) ? details["exo"] : {};
-	return {
-		content: [{ type: "text" as const, text }],
-		details: { ...details, exo: { ...exo, rewrites: notes } },
-		// Replacing content without structuredContent would drop it (PI_API_NOTES §4).
-		...(event.structuredContent === undefined ? {} : { structuredContent: event.structuredContent }),
-	};
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-/** Bash reports where it saved untruncated output in `details` and `structuredContent`. */
-function fullOutputPathOf(details: unknown, structured: unknown): string | null {
-	const fromDetails = isRecord(details) ? details["fullOutputPath"] : undefined;
-	const fromStructured = isRecord(structured) ? structured["full_output_path"] : undefined;
-	const path = fromDetails ?? fromStructured;
-	return typeof path === "string" && path !== "" ? path : null;
-}
-
-/** Bash ends a failing command's text with its exit status, after the output (PI_API_NOTES, `bash`). */
-function statusOf(text: string): string | null {
-	return /\n\n(Command exited with code \d+)$/.exec(text)?.[1] ?? null;
-}
-
-/** Resolves with `promise`, or with undefined once `signal` aborts (a module that ignores its signal cannot hold pi). */
-function untilAborted<T>(promise: Promise<T | undefined> | undefined, signal: AbortSignal): Promise<T | undefined> {
-	if (!promise) return Promise.resolve(undefined);
-	return new Promise((resolve, reject) => {
-		const onAbort = () => resolve(undefined);
-		signal.addEventListener("abort", onAbort, { once: true });
-		promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
-	});
 }

@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type CompactionRequest, runShellCommand } from "@exocortex/core";
+import { type CompactionRequest, type ExoModule, runShellCommand } from "@exocortex/core";
 import { createTestModuleContext, type SidecarReply } from "@exocortex/testkit";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createCompaction, grounded, parseSummary } from "../src/compaction.ts";
@@ -38,12 +38,18 @@ const SUMMARY = [
 	"- src/lib.rs: the interpreter",
 ].join("\n");
 
+/** The text of the summary the module wrote, if it wrote one. */
+async function summaryOf(module: ExoModule, req: CompactionRequest): Promise<string | undefined> {
+	return (await module.compact?.(req, signal))?.summary;
+}
+
 function request(extra: Partial<CompactionRequest> = {}): CompactionRequest {
 	return {
 		reason: "threshold",
 		conversation: "[User]: implement forth\n\n[Assistant]: on it",
 		userMessages: ["implement forth"],
 		previousSummary: null,
+		previousDetails: null,
 		filesRead: ["src/lib.rs", "README.md"],
 		filesModified: ["src/lib.rs"],
 		tokensBefore: 120_000,
@@ -83,7 +89,7 @@ describe("compaction", () => {
 		bash("cargo fmt", 0);
 		module.onToolResult?.({ toolName: "read", input: { path: "x" }, isError: false, exitCode: null, output: "" });
 
-		const summary = await module.compact?.(request({ conversation: "[User]: implement forth in src/lib.rs" }), signal);
+		const summary = await summaryOf(module, request({ conversation: "[User]: implement forth in src/lib.rs" }));
 		expect(summary).toBe(
 			[
 				SUMMARY,
@@ -135,9 +141,9 @@ describe("compaction", () => {
 		});
 		const previousSummary = `${SUMMARY.replace("Fixing the borrow", "Was parsing")}\n\n${FACTS.replace("implement forth", "old")}`;
 		const conversation = `${"x".repeat(5_000)}THE END src/lib.rs`;
-		const summary = await module.compact?.(
+		const summary = await summaryOf(
+			module,
 			request({ previousSummary, conversation, customInstructions: "the parser", userMessages: ["from the span"] }),
-			signal,
 		);
 		expect(prompts[0]).toContain("<prior-summary>\n## Objective");
 		expect(prompts[0]).toContain("- Was parsing in Interpreter::eval.");
@@ -160,7 +166,7 @@ describe("compaction", () => {
 				prompts.push(p);
 				return SUMMARY;
 			});
-			await module.compact?.(request({ previousSummary, conversation: "[User]: src/lib.rs" }), signal);
+			await summaryOf(module, request({ previousSummary, conversation: "[User]: src/lib.rs" }));
 			return prompts[0] ?? "";
 		};
 		expect(await prior("The agent was adding a parser.")).toContain(
@@ -175,15 +181,15 @@ describe("compaction", () => {
 
 	it("leaves compaction to the harness when the sidecar fails or ignores the template, unless the fallback is deterministic", async () => {
 		const failing = setup({}, () => new Error("down"));
-		expect(await failing.module.compact?.(request(), signal)).toBeUndefined();
+		expect(await summaryOf(failing.module, request())).toBeUndefined();
 		expect(failing.t.records).toEqual([]);
 		const noEngine = setup();
-		expect(await noEngine.module.compact?.(request(), signal)).toBeUndefined();
+		expect(await summaryOf(noEngine.module, request())).toBeUndefined();
 		const chatty = setup({}, () => "Sure! I will keep implementing forth.");
-		expect(await chatty.module.compact?.(request(), signal)).toBeUndefined();
+		expect(await summaryOf(chatty.module, request())).toBeUndefined();
 		expect(chatty.t.logs).toContain("summary did not follow the template: not used");
 		const deterministic = setup({ fallback: "deterministic" }, () => "## Objective\n- cut off");
-		const summary = await deterministic.module.compact?.(request({ filesRead: [], filesModified: [] }), signal);
+		const summary = await summaryOf(deterministic.module, request({ filesRead: [], filesModified: [] }));
 		expect(summary).toBe(FACTS);
 		expect(deterministic.t.records[0]?.data).toMatchObject({ narrative: false, updated: false });
 	});
@@ -196,7 +202,7 @@ describe("compaction", () => {
 		});
 		writeFileSync(join(dir, "a.txt"), "one\ntwo\nthree\n");
 		const { module } = setup({ fallback: "deterministic" });
-		const summary = await module.compact?.(request({ filesModified: ["b.txt"] }), signal);
+		const summary = await summaryOf(module, request({ filesModified: ["b.txt"] }));
 		expect(summary).toContain("## Files modified\n\n- a.txt (+2 −0)\n- b.txt");
 	});
 
@@ -205,10 +211,7 @@ describe("compaction", () => {
 		expect(invalid.t.logs.some((l) => l.startsWith("compaction /timeoutMs"))).toBe(true);
 		const { module } = setup({ fallback: "deterministic", maxUserMessageChars: 200 });
 		const files = Array.from({ length: 45 }, (_, i) => `f${String(i).padStart(2, "0")}.ts`);
-		const summary = await module.compact?.(
-			request({ userMessages: ["y".repeat(5_000)], filesModified: files }),
-			signal,
-		);
+		const summary = await summaryOf(module, request({ userMessages: ["y".repeat(5_000)], filesModified: files }));
 		expect(summary).toContain("… [truncated]");
 		expect(summary).toContain("- … and 5 more");
 	});
@@ -286,7 +289,7 @@ describe("grounded", () => {
 		);
 		module.onUserTurn?.({ text: "implement forth", origin: "user" });
 		module.onUserTurn?.({ text: "Not done yet. 1. Add the README", origin: "suggestion" });
-		const summary = await module.compact?.(request({ conversation: "[User]: src/lib.rs" }), signal);
+		const summary = await summaryOf(module, request({ conversation: "[User]: src/lib.rs" }));
 		expect(summary).toContain("2. Not done yet. 1. Add the README");
 		expect(summary).toContain("## Next Move\n2. (none)\n\n## Relevant Files");
 	});

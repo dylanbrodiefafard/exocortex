@@ -104,7 +104,7 @@ export function createCompaction(raw: Readonly<Record<string, unknown>>, ctx: Mo
 					commands: facts.commands.length,
 				},
 			});
-			return renderSummary(facts, summary, settings);
+			return { summary: renderSummary(facts, summary, settings) };
 		},
 
 		status() {

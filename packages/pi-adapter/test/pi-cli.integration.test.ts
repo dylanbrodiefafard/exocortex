@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type ChatRequestFingerprint, openTraceStore, type StoredTraceEvent, sharedPrefix } from "@exocortex/core";
@@ -41,7 +41,12 @@ async function runPi(
 	script: readonly ScriptedReply[],
 	env: Record<string, string> = {},
 	prompt = "do the task",
-	extra: { readonly exoConfig?: object; readonly server?: FakeOpenAIServerOptions } = {},
+	extra: {
+		readonly exoConfig?: object;
+		readonly server?: FakeOpenAIServerOptions;
+		/** Source of a second extension, loaded before ours: it observes pi from the inside. */
+		readonly probe?: string;
+	} = {},
 ): Promise<PiRun> {
 	server = await startFakeOpenAIServer(script, extra.server ?? {});
 	tmp = await mkdtemp(join(tmpdir(), "exo-pi-"));
@@ -59,6 +64,7 @@ async function runPi(
 	};
 	await writeFile(join(tmp, "models.json"), JSON.stringify(models));
 	await writeFile(join(tmp, "exo.jsonc"), JSON.stringify({ ...extra.exoConfig, trace: { dbPath } }));
+	if (extra.probe !== undefined) await writeFile(join(tmp, "probe.ts"), extra.probe);
 	const args = [
 		"-p",
 		"--offline",
@@ -70,6 +76,7 @@ async function runPi(
 		"--no-session",
 		"--model",
 		"fake/fake-model",
+		...(extra.probe === undefined ? [] : ["-e", join(tmp, "probe.ts")]),
 		"-e",
 		ADAPTER_DIR,
 		prompt,
@@ -357,6 +364,71 @@ describe("pi CLI with the Exocortex extension", { timeout: 30_000 }, () => {
 			expect(events.some((e) => e.kind === "message" && e.synthetic && e.module === "memory")).toBe(true);
 		} finally {
 			await rm(memoryDir, { recursive: true, force: true });
+		}
+	});
+
+	it("pi behaves as the hook dispatcher assumes (D-078; PI_API_NOTES §2, §5, §8)", async () => {
+		// The probe waits in `tool_result`, long enough for the slower of two parallel tools to finish.
+		const probe = `
+			import { writeFileSync } from "node:fs";
+			export default function probe(pi) {
+				const seen = { order: [], signalInToolResult: null, signalAtSettle: null, customEntries: [] };
+				pi.on("tool_result", async (event, ctx) => {
+					seen.order.push("start " + event.input.command);
+					seen.signalInToolResult = ctx.signal !== undefined;
+					pi.appendEntry("exo.probe.state", { results: seen.order.length });
+					await new Promise((resolve) => setTimeout(resolve, 700));
+					seen.order.push("end " + event.input.command);
+				});
+				pi.on("agent_before_settle", (_event, ctx) => {
+					seen.signalAtSettle = ctx.signal !== undefined;
+					seen.customEntries = ctx.sessionManager.getBranch().filter((e) => e.type === "custom").map((e) => e.customType);
+					writeFileSync(process.env.EXO_PROBE_OUT, JSON.stringify(seen));
+				});
+			}`;
+		const out = join(await mkdtemp(join(tmpdir(), "exo-pi-probe-")), "seen.json");
+		try {
+			const run = await runPi(
+				[
+					{
+						kind: "tool_calls",
+						calls: [
+							{ name: "bash", arguments: { command: "sleep 0.2; echo slow" } },
+							{ name: "bash", arguments: { command: "echo fast" } },
+						],
+					},
+					{ kind: "text", text: "All done." },
+				],
+				{ EXO_PROBE_OUT: out },
+				"do the task",
+				{ probe },
+			);
+			expect(run.code).toBe(0);
+			const seen = JSON.parse(await readFile(out, "utf8")) as {
+				order: string[];
+				signalInToolResult: boolean;
+				signalAtSettle: boolean;
+				customEntries: string[];
+			};
+			// Tools run in parallel and `tool_result` fires as each finishes: handlers overlap.
+			expect(seen.order).toEqual([
+				"start echo fast",
+				"start sleep 0.2; echo slow",
+				"end echo fast",
+				"end sleep 0.2; echo slow",
+			]);
+			// The run's abort signal exists while tools run and is gone by the settle hook.
+			expect(seen.signalInToolResult).toBe(true);
+			expect(seen.signalAtSettle).toBe(false);
+			// An entry appended in the middle of a tool batch stays on the branch and out of the context.
+			expect(seen.customEntries).toEqual(["exo.probe.state", "exo.probe.state"]);
+			type Request = { messages: { role: string; content: unknown }[] };
+			const [first, second] = (server?.requests ?? []) as Request[];
+			expect(second?.messages.slice(0, first?.messages.length)).toEqual(first?.messages);
+			expect(second?.messages.map((m) => m.role).slice(-3)).toEqual(["assistant", "tool", "tool"]);
+			expect(JSON.stringify(second?.messages)).not.toContain("exo.probe.state");
+		} finally {
+			await rm(join(out, ".."), { recursive: true, force: true });
 		}
 	});
 

@@ -1216,6 +1216,50 @@ Open check: Exocortex's injected `custom_message` reaches ninfer as a second con
 
 ---
 
+### D-078 — The adapter's hooks are bounded, serialised and told what was used; module state lives in the session · accepted (2026-10-06; hardening stream B of D-076; amends D-029, D-039, D-041, D-063 and D-075)
+- **Context:** the audit's sixteen findings on the pi adapter (`docs/HARDENING_PLAN.md`, section B). Each finding about behaviour was reproduced by a failing test before its fix (`packages/pi-adapter/test/dispatcher.test.ts`, and additions to the sidecar and entrypoint tests); none failed to reproduce. B11 is a new interface and B16 is documentation. What they rest on in pi was read in pi's source and is in `PI_API_NOTES.md` §15; three of those facts are also checked against real pi by an integration test.
+- **Decision.**
+  1. **One deadline helper** (`withBudget(ms, parentSignal, fn, onError)`, `pi-adapter/src/budget.ts`) replaces the four hand-written timer blocks. Its result is `undefined` from the moment the time is up or the parent signal aborts, whether or not the module listens to its signal; it does not start under an aborted parent; it never rejects, and a rejection that arrives late is still reported. Every awaited module call goes through it, so the settle hook is now really bounded (B2) and an abort that already happened is honoured (B14).
+  2. **The settle hook stops when the user moves on.** Pi waits for the hook on Escape and on every session replacement, and gives it no signal: `ctx.signal` is already undefined there (the audit's proposed fix, linking it, would have done nothing). So the hook stops itself on `session_before_switch`, `session_before_fork`, `session_shutdown`, and on the Escape key read from `ctx.ui.onTerminalInput`. After any of these nothing is applied: pi would persist a continuation and then not continue. The other hooks link `ctx.signal` (tool results) or pi's own `event.signal` (compaction).
+  3. **Tool results are handled one at a time** (B8). Pi runs a batch's tools in parallel and fires `tool_result` as each finishes; the host now queues them, so a module sees one result's `onToolResult` and rewrite finish before the next begins. This removes D-075's open risk about results overtaking each other. Each rewriter gets an equal share of the time left instead of first come, first served (amends D-041), and user-turn context providers share their budget the same way: one hanging module no longer costs the modules after it their turn.
+  4. **A module learns whether its result was used** (B4). Every hook result may carry `commit()`, which the host calls when it hands the result to pi, and not for a result that came after the budget or an abort, changed nothing, lost to another module, or was refused. State that assumes the model or user saw something is changed there. `contextForUserTurn` now returns `{ text, commit? }` and `compact` returns `{ summary, details?, commit? }` (they returned strings). Memory marks preferences as shown in `commit`.
+  5. **Module state that outlives the instance** (B11), on `ModuleContext`:
+     - `sessionId`: pi's id for the session, the same across reloads and resumes;
+     - `saveState(value)`: writes the module's whole state as an `exo.<module>.state` custom entry (never sent to the model). An unchanged value is not written again; one over 256 KB is dropped and reported;
+     - `savedState`: the last value saved on the session's current branch, read once at `session_start` and given to each new instance.
+     - Compaction has its own channel, because its facts belong to a compaction and must follow the branch: `CompactionSummary.details` is stored in the entry's `details.exo` beside `module`, and comes back as `CompactionRequest.previousDetails` when the previous summary was that module's.
+     - `@exocortex/testkit`'s context captures saved values in `states` and takes `savedState` and `sessionId`.
+  6. **Lifecycle** (B10). `/exo` toggles rebuild only the module whose merged settings changed. `ExoModule.dispose()` is called when an instance is replaced, switched off or the session ends (awaited for at most 2 s then); afterwards its `saveState` and `progress` do nothing. Modules are disposed before the pool closes and the trace session ends. The trace store is closed at every `session_shutdown`, since pi runs the extension again for the next session and the old runtime is never seen again. Toggles are written to an `exo.overrides` entry and restored at `session_start`, so `/reload` and `/resume` keep them; "this session only" still holds for `/new`.
+  7. **The host caps continuations** (B3): after 20 in a row without the user speaking, a `continue` is refused, shown as a warning and traced as `exo.action` `continue_refused`. Modules keep their own lower limits (D-039's `maxContinuations`, default 3); this one holds if a module's fails.
+  8. **Smaller fixes.**
+     - **B1:** the debug level falls back to the last one read when `pi.getFlag` throws on a stale `pi`; `onError` and `log` cannot throw.
+     - **B5:** a suggestion is shown in a notification, not put in the editor, when the user has a draft there. Sent unchanged, it is still recognised as the suggestion.
+     - **B6:** in a compaction request, messages Exocortex injected are labelled `[Exocortex <module>, not the user]` instead of `[User]`. They are kept, since "Not done yet: …" is part of what happened.
+     - **B7:** input typed while the agent runs (`streamingBehavior` set) no longer cancels the turn's sidecar calls.
+     - **B9:** the pool is replaced in one step after the new one is built, the new one is told whether the agent is running, and a rebuild overtaken by a newer one or by shutdown builds nothing.
+     - **B12:** a user-turn message from several modules has `customType` `exo.context` and `details.exo.modules`; from one module it stays `exo.<module>`.
+     - **B13:** `runtime.record` stamps every synthetic trace event with the current turn.
+     - **B15:** the settle hook runs inside the progress display (amends D-063), so a module's `ctx.progress("running: cargo test")` reaches the status line as D-011 requires. "checking the work…" now also shows beside the spinner.
+  9. **`modules.ts` is split:** `budget.ts` (the deadline), `hold.ts` (status line and progress), `pi-shapes.ts` (reading and building pi's data shapes); `modules.ts` keeps the dispatcher.
+- **How this sits with earlier entries.**
+  - **D-029** said injected messages have `display: false`. They have been shown since D-060 ("text added on their behalf should be visible"), and the supervisor's continuation always was; `display: true` is the rule. Everything else in D-029 holds: injection only through persisted custom messages and tool-result rewrites, `customType` under `exo.`, `details.exo` merged. The two new entry kinds are `custom` entries, which pi never sends to the model.
+  - **D-040:** the fake pi gained session entries, the editor's text, raw key input and a way to go stale.
+  - **D-052:** modules are off by default; nothing measured changes meaning.
+- **Not done.**
+  - **Aborting the embedder** (B1's wording): it holds nothing to abort. Shutdown drops it with the pool; a request in flight ends on its own timeout.
+  - **Memory's own database is not closed on dispose.** Memory has no `dispose` yet; M9 and M10 own that file.
+  - **Modules do not use `saveState`, `sessionId`, `previousDetails` or `commit` yet**, memory's preference marking aside. That is wave 2 (M9, T5, T6, S10, K1).
+  - **A steered message still reaches `onUserTurn`** like any other input. What a module makes of it is the module's (T3).
+- **Open risks.**
+  - **An RPC `abort` during the settle hook is not seen:** pi offers no event for it and RPC has no key input. The hook then runs to its end or its budget (5 min). The eval's driver does not send `abort` at settle.
+  - **Escape is matched as the key, not as pi's `app.interrupt` binding.** A user who rebound it waits as before; a user pressing Escape for another reason during a settle check loses that check.
+  - **Serialised tool results wait on each other:** five failing results in one batch, each holding the full 24 s, would hold the loop for two minutes where it was 24 s. In practice the wait is the sidecar calls', which the pool runs a few at a time anyway.
+  - **State follows the branch only at `session_start`.** After `/tree` moves to an earlier point, a module's in-memory state is ahead of the branch until the next reload.
+  - **Each state change is a line in the session file.** A module that saves on every tool result will bloat it; the type's comment says when to save.
+  - **Untested with a real model.** The dispatcher is covered in process and against real pi with a scripted model.
+
+---
+
 ## Open questions (carried from brief §10, updated)
 
 1. ~~Resolved by D-029.~~ Exact pi mechanism for injecting into the current user turn without altering prior messages. *(Phase 0)*

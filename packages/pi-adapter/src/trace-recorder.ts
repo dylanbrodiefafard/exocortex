@@ -1,15 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import {
-	fingerprintChatRequest,
-	type JsonValue,
-	type TraceEventInput,
-	type TraceSession,
-	toJsonValue,
-} from "@exocortex/core";
+import { fingerprintChatRequest, type TraceEventInput, type TraceSession, toJsonValue } from "@exocortex/core";
+import { exitCodeOf, exoModuleOf, toObject } from "./pi-shapes.ts";
 import type { Runtime } from "./runtime.ts";
-
-/** Prefix of `customType` on every message Exocortex injects (D-029). */
-const EXO_CUSTOM_TYPE_PREFIX = "exo.";
 
 export interface RecorderOptions {
 	readonly runtime: Runtime;
@@ -26,10 +18,9 @@ export interface RecorderOptions {
 export function registerTraceRecorder(pi: ExtensionAPI, options: RecorderOptions): void {
 	const { runtime, onError } = options;
 	let session: TraceSession | undefined;
-	let turn: number | undefined;
 
 	function record(event: Omit<TraceEventInput, "turn">): void {
-		session?.append(turn === undefined ? event : { ...event, turn });
+		if (session) runtime.record(event);
 	}
 
 	function guard<A extends unknown[]>(where: string, fn: (...args: A) => void): (...args: A) => undefined {
@@ -53,7 +44,7 @@ export function registerTraceRecorder(pi: ExtensionAPI, options: RecorderOptions
 			if (!config.enabled) return;
 			const store = runtime.store;
 			if (!store) return;
-			turn = undefined;
+			runtime.turn = undefined;
 			const label = options.env["EXO_TRACE_LABEL"];
 			session = store.startSession({
 				harness: "pi",
@@ -78,8 +69,9 @@ export function registerTraceRecorder(pi: ExtensionAPI, options: RecorderOptions
 			session?.end();
 			session = undefined;
 			runtime.traceSession = undefined;
-			if (event.reason === "quit") runtime.shutdown();
-			else runtime.store?.flush();
+			// Every session end, not only quit: pi runs the extension factory again for the next
+			// session (PI_API_NOTES §14), so a store left open here would never be closed.
+			runtime.shutdown();
 		}),
 	);
 
@@ -96,7 +88,7 @@ export function registerTraceRecorder(pi: ExtensionAPI, options: RecorderOptions
 	pi.on(
 		"turn_start",
 		guard("turn_start", (event) => {
-			turn = event.turnIndex;
+			runtime.turn = event.turnIndex;
 		}),
 	);
 
@@ -215,32 +207,4 @@ export function registerTraceRecorder(pi: ExtensionAPI, options: RecorderOptions
 			});
 		}),
 	);
-}
-
-/** Module id for messages Exocortex injected (`customType: "exo.<module>[.<detail>]"`). */
-export function exoModuleOf(message: unknown): string | undefined {
-	if (typeof message !== "object" || message === null) return undefined;
-	const { role, customType } = message as { role?: unknown; customType?: unknown };
-	if (role !== "custom" || typeof customType !== "string" || !customType.startsWith(EXO_CUSTOM_TYPE_PREFIX)) {
-		return undefined;
-	}
-	return customType.slice(EXO_CUSTOM_TYPE_PREFIX.length).split(".")[0] || undefined;
-}
-
-/** Bash and similar tools report `{ exit_code }` in structured content. */
-export function exitCodeOf(structured: unknown): number | null {
-	if (typeof structured !== "object" || structured === null) return null;
-	const code =
-		(structured as { exit_code?: unknown; exitCode?: unknown }).exit_code ??
-		(structured as { exitCode?: unknown }).exitCode;
-	return typeof code === "number" ? code : null;
-}
-
-function toObject(value: Record<string, unknown>): { readonly [key: string]: JsonValue } {
-	const json = toJsonValue(value);
-	return isJsonObject(json) ? json : {};
-}
-
-function isJsonObject(value: JsonValue): value is { readonly [key: string]: JsonValue } {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
 }

@@ -65,6 +65,32 @@ describe("extension entrypoint", () => {
 		expect(debugLines().some((l) => l.includes("agent_start"))).toBe(true);
 	});
 
+	it("keeps working once pi is stale: logging uses the last level and nothing throws (B1)", async () => {
+		vi.stubEnv("EXO_DEBUG", "");
+		const pi = createFakePi({ cwd: dir, flags: { "exo-debug": true } });
+		exocortex(pi.api);
+		await pi.emit("session_start", { reason: "startup" });
+		// A session replacement or reload: from here `pi.getFlag` throws (PI_API_NOTES §14).
+		pi.invalidate();
+		// A hook error reported after that, as background work from the old session would.
+		await pi.emit("turn_end", { turnIndex: 0, message: {}, toolResults: undefined });
+		await pi.emit("session_shutdown", { reason: "reload" });
+		const lines = debugLines();
+		expect(lines.filter((l) => l.includes("exo.error where=turn_end"))).toHaveLength(1);
+		expect(lines.some((l) => l.includes("session_shutdown"))).toBe(true);
+	});
+
+	it("never throws when the debug log cannot be written (B1)", async () => {
+		vi.stubEnv("EXO_DEBUG", "1");
+		// A directory: every write fails.
+		vi.stubEnv("EXO_DEBUG_FILE", dir);
+		const pi = createFakePi({ cwd: dir });
+		exocortex(pi.api);
+		await pi.emit("session_start", { reason: "startup" });
+		await pi.emit("turn_end", { turnIndex: 0, message: {}, toolResults: undefined });
+		await pi.emit("session_shutdown", { reason: "quit" });
+	});
+
 	it("logs swallowed hook errors as exo.error", async () => {
 		vi.stubEnv("EXO_DEBUG", "1");
 		const pi = createFakePi({ cwd: dir });

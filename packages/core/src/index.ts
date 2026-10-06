@@ -79,7 +79,9 @@ export {
 	verifyingRun,
 } from "./modules/runs.ts";
 export type {
+	Committable,
 	CompactionRequest,
+	CompactionSummary,
 	Dialog,
 	ExoModule,
 	ModuleContext,
@@ -90,6 +92,7 @@ export type {
 	ToolResultDraft,
 	ToolRewrite,
 	UserTurn,
+	UserTurnContext,
 } from "./modules/types.ts";
 export { openDatabase } from "./trace/sqlite.ts";
 export {

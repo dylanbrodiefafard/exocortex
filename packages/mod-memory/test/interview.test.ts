@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Dialog } from "@exocortex/core";
+import type { Dialog, UserTurnContext } from "@exocortex/core";
 import { createTestModuleContext, type SidecarReply } from "@exocortex/testkit";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { INTERVIEW, INTERVIEW_OPEN_QUESTION, runInterview } from "../src/interview.ts";
@@ -17,6 +17,12 @@ beforeEach(() => {
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
 const signal = new AbortController().signal;
+/** The note the module adds to a prompt, taken as shown: the host commits what it hands to the harness (D-078). */
+const shown = async (context: Promise<UserTurnContext | undefined> | undefined): Promise<string | undefined> => {
+	const added = await context;
+	added?.commit?.();
+	return added?.text;
+};
 const NONE = "No preference";
 const first = (question: number) => INTERVIEW[question]?.options[0] ?? { label: "" };
 
@@ -84,7 +90,7 @@ describe("interview questions (D-066)", () => {
 describe("/exo memory interview (D-066)", () => {
 	const actions = (t: { records: { data: unknown }[] }) => t.records.map((r) => (r.data as { action: string }).action);
 	const ask = (memory: ReturnType<typeof createMemory>, text: string) =>
-		memory.contextForUserTurn?.({ text, origin: "user" }, signal);
+		shown(memory.contextForUserTurn?.({ text, origin: "user" }, signal));
 
 	it("stores each chosen option as a standing preference that applies at once, and nothing for 'no preference'", async () => {
 		const { memory, t } = setup({ preferences: true, preferenceSelect: false });

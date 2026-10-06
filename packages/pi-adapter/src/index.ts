@@ -1,6 +1,6 @@
 import { appendFileSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { createDebugLog, type DebugLog } from "@exocortex/core";
+import { createDebugLog, type DebugFields, type DebugLog } from "@exocortex/core";
 import { registerExoCommand } from "./command.ts";
 import { registerModuleHost } from "./modules.ts";
 import { HIGH_FREQUENCY_EVENTS, PI_EVENT_NAMES, type PiEventName } from "./pi-events.ts";
@@ -34,12 +34,39 @@ export default function exocortex(pi: ExtensionAPI): void {
 
 	const log = createDebugLog({ enabled: true, write: createWriter(env["EXO_DEBUG_FILE"]) });
 	// Flags are parsed after extensions load, so the level is resolved per event, not here.
-	const level = (): DebugLevel => resolveDebugLevel(env["EXO_DEBUG"], pi.getFlag(DEBUG_FLAG));
-	const onError = (where: string, error: unknown): void => {
-		if (level() !== "off") log.event("exo.error", { where, error: String(error) });
+	let lastLevel: DebugLevel = resolveDebugLevel(env["EXO_DEBUG"], undefined);
+	/**
+	 * Never throws. Once the session is replaced or reloaded, `pi` is stale and `getFlag` throws
+	 * (PI_API_NOTES §14); work still running from that session keeps the last level it read.
+	 */
+	const level = (): DebugLevel => {
+		try {
+			lastLevel = resolveDebugLevel(env["EXO_DEBUG"], pi.getFlag(DEBUG_FLAG));
+		} catch {
+			// Stale: keep the last value.
+		}
+		return lastLevel;
 	};
+	/** Writes one debug line; never throws, since it runs inside `catch` blocks and background work. */
+	const emit = (name: string, fields: () => DebugFields): void => {
+		try {
+			if (level() !== "off") log.event(name, fields());
+		} catch {
+			// Nowhere left to report a failure to log (an unwritable EXO_DEBUG_FILE).
+		}
+	};
+	const onError = (where: string, error: unknown): void => emit("exo.error", () => ({ where, error: String(error) }));
 
 	const runtime = createRuntime({ env, onError });
+	// First of all at shutdown: modules are disposed while the pool and the trace session they
+	// may still write to are open.
+	pi.on("session_shutdown", async () => {
+		try {
+			await runtime.disposeModules();
+		} catch (error) {
+			onError("modules.dispose", error);
+		}
+	});
 	// Sidecars before the recorder: at shutdown the pool closes (recording in-flight calls)
 	// before the trace session ends.
 	registerSidecars(pi, { runtime, env, onError });
@@ -47,9 +74,7 @@ export default function exocortex(pi: ExtensionAPI): void {
 	registerModuleHost(pi, {
 		runtime,
 		onError,
-		log: (message) => {
-			if (level() !== "off") log.event("exo.log", { message });
-		},
+		log: (message) => emit("exo.log", () => ({ message })),
 	});
 	registerExoCommand(pi, runtime);
 
@@ -57,7 +82,13 @@ export default function exocortex(pi: ExtensionAPI): void {
 	// single erased signature. Handlers return `undefined` so they never alter pi's behavior.
 	const on = pi.on.bind(pi) as unknown as (event: PiEventName, handler: (event: unknown) => undefined) => void;
 	for (const name of PI_EVENT_NAMES) {
-		on(name, (event) => trace(log, level(), name, event));
+		on(name, (event) => {
+			try {
+				return trace(log, level(), name, event);
+			} catch {
+				return undefined;
+			}
+		});
 	}
 }
 

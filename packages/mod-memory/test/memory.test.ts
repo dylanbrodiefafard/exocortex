@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { errorSignature, runShellCommand, type ToolOutcome } from "@exocortex/core";
+import { errorSignature, runShellCommand, type ToolOutcome, type UserTurnContext } from "@exocortex/core";
 import { createTestModuleContext, type SidecarReply } from "@exocortex/testkit";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { cardDetail, detailShare, FAILURE_DETAIL_LINES, failureDetail } from "../src/detail.ts";
@@ -23,6 +23,12 @@ beforeEach(async () => {
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
 const signal = new AbortController().signal;
+/** The note the module adds to a prompt, taken as shown: the host commits what it hands to the harness (D-078). */
+const shown = async (context: Promise<UserTurnContext | undefined> | undefined): Promise<string | undefined> => {
+	const added = await context;
+	added?.commit?.();
+	return added?.text;
+};
 const ERROR = "   Compiling forth\nerror[E0502]: cannot borrow `self.stack` as mutable\n  --> lib.rs:4:9";
 const fail = (command = "cargo build", output = ERROR): ToolOutcome => ({
 	toolName: "bash",
@@ -448,7 +454,7 @@ describe("preferences (D-060)", () => {
 		return s;
 	}
 	const ask = (memory: ReturnType<typeof createMemory>, text: string, origin: "user" | "suggestion" = "user") =>
-		memory.contextForUserTurn?.({ text, origin }, signal);
+		shown(memory.contextForUserTurn?.({ text, origin }, signal));
 
 	it("learns a standing rule from the user's words and adds it to a later prompt that leaves it unsaid", async () => {
 		const first = await session(
@@ -593,7 +599,7 @@ describe("expectations from corrections (D-064)", () => {
 		return s;
 	}
 	const ask = (memory: ReturnType<typeof createMemory>, text: string) =>
-		memory.contextForUserTurn?.({ text, origin: "user" }, signal);
+		shown(memory.contextForUserTurn?.({ text, origin: "user" }, signal));
 
 	it("learns what the user expects of one kind of task from a correction, and says so on later prompts", async () => {
 		const first = await corrected();
@@ -728,6 +734,28 @@ describe("preference selection and standing rules by sidecar (D-062)", () => {
 		}
 	}
 
+	it("counts a preference as shown only when the host says the note reached the prompt (D-078, B4)", async () => {
+		seed();
+		const { memory, t } = setup({ preferences: true, preferenceSelect: false });
+		const injected = () =>
+			openMemoryStore(dbPath)
+				.preferences()
+				.map((p) => p.injected);
+		const turn = { text: "Add a parser for durations", origin: "user" as const };
+		// The note lost its time budget: the host never calls commit.
+		const dropped = await memory.contextForUserTurn?.(turn, signal);
+		expect(dropped?.text).toContain(`- ${RULES[0]}`);
+		expect(injected()).toEqual([0, 0]);
+		expect(t.records).toEqual([]);
+		// So the same preferences are offered again, and counted once they are shown.
+		const again = await memory.contextForUserTurn?.(turn, signal);
+		expect(again?.text).toBe(dropped?.text);
+		again?.commit?.();
+		expect(injected()).toEqual([1, 1]);
+		expect(t.records.map((r) => (r.data as { action: string }).action)).toEqual(["preferences_added"]);
+		expect(await memory.contextForUserTurn?.(turn, signal)).toBeUndefined();
+	});
+
 	it("asks a sidecar which preferences fit the prompt, and keeps the rest for a later prompt", async () => {
 		seed();
 		const prompts: string[] = [];
@@ -739,7 +767,7 @@ describe("preference selection and standing rules by sidecar (D-062)", () => {
 			const rule = picks[prompts.length - 1];
 			return { apply: rule === undefined ? [] : [numberOf(prompt, rule), 9] };
 		});
-		const ask = (text: string) => memory.contextForUserTurn?.({ text, origin: "user" }, signal);
+		const ask = (text: string) => shown(memory.contextForUserTurn?.({ text, origin: "user" }, signal));
 		const first = await ask("Commit the config change you just made");
 		expect(first).toContain(`- ${RULES[1]}`);
 		expect(first).not.toContain(RULES[0]);
@@ -758,13 +786,13 @@ describe("preference selection and standing rules by sidecar (D-062)", () => {
 		seed();
 		const failing = setup({ preferences: true }, () => new Error("down"));
 		const text = "Add durations, keeping each commit to one change";
-		const added = await failing.memory.contextForUserTurn?.({ text, origin: "user" }, signal);
+		const added = await shown(failing.memory.contextForUserTurn?.({ text, origin: "user" }, signal));
 		expect(added).toContain(`- ${RULES[0]}`);
 		expect(added).not.toContain(RULES[1]);
 		expect(failing.t.logs.some((l) => l.startsWith("preference selection "))).toBe(true);
 
 		const off = setup({ preferences: true, preferenceSelect: false }, () => ({ apply: [] }));
-		expect(await off.memory.contextForUserTurn?.({ text, origin: "user" }, signal)).toContain(`- ${RULES[0]}`);
+		expect(await shown(off.memory.contextForUserTurn?.({ text, origin: "user" }, signal))).toContain(`- ${RULES[0]}`);
 		expect(off.t.requests).toEqual([]);
 	});
 
@@ -792,9 +820,8 @@ describe("preference selection and standing rules by sidecar (D-062)", () => {
 			await s.memory.onSettle?.(DONE, signal);
 			await until(() => s.t.records.length > 0);
 			const next = setup({ preferences: true, preferenceSelect: false });
-			const added = await next.memory.contextForUserTurn?.(
-				{ text: "Add a parser for durations", origin: "user" },
-				signal,
+			const added = await shown(
+				next.memory.contextForUserTurn?.({ text: "Add a parser for durations", origin: "user" }, signal),
 			);
 			expect(added !== undefined).toBe(applies);
 		}
