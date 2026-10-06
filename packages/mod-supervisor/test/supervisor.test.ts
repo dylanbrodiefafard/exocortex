@@ -87,7 +87,7 @@ const LEDGER = {
 	is_task: true,
 	follows_previous: false,
 	criteria: ["Print v2 from app.py", "Add a README"],
-	check_commands: ["python3 app.py", "rm -rf /"],
+	check_commands: ["sh ./check.sh", "rm -rf /"],
 };
 const INCOMPLETE = { verdict: "incomplete", missing: ["Add a README"], asked_user: false, reason: "no README" };
 const COMPLETE = { verdict: "complete", missing: [], asked_user: false, reason: "all done" };
@@ -124,8 +124,9 @@ describe("supervisor", () => {
 
 	it("suggests a follow-up listing what is missing, then counts the accepted suggestion as a continuation", async () => {
 		const sup = createSupervisor({}, context({ ledger: LEDGER, verdicts: [INCOMPLETE] }));
-		sup.onUserTurn?.({ text: "Make app.py print v2 and add a README. Check with `python3 app.py`.", origin: "user" });
+		sup.onUserTurn?.({ text: "Make app.py print v2 and add a README. Check with `sh ./check.sh`.", origin: "user" });
 		writeFileSync(join(repo, "app.py"), "print('v2')\n");
+		writeFileSync(join(repo, "check.sh"), "python3 app.py\n");
 		sup.onToolResult?.({ toolName: "edit", input: { path: "app.py" }, isError: false, exitCode: null, output: "ok" });
 		sup.onToolResult?.({
 			toolName: "bash",
@@ -144,14 +145,17 @@ describe("supervisor", () => {
 		expect(kinds()).toEqual(["exo.ledger:", "exo.verdict:", "exo.action:suggested"]);
 
 		// The verdict prompt saw the ledger, the diff, the agent's commands and the check output;
-		// only the command quoted verbatim in the request was run ("rm -rf /" was not).
+		// only the test command the request names in a code span was run ("rm -rf /" was not).
 		const verdictPrompt = String(requests.at(-1)?.messages[0]?.["content"]);
 		expect(verdictPrompt).toContain("1. Print v2 from app.py");
-		expect(verdictPrompt).toContain("$ python3 app.py\nexit code: 0\nv2");
+		expect(verdictPrompt).toContain("$ sh ./check.sh\nexit code: 0\nv2");
 		expect(verdictPrompt).toContain("app.py | 2 +-");
 		expect(verdictPrompt).toContain("Files the agent edited or wrote: app.py");
 		expect(verdictPrompt).not.toContain("rm -rf");
-		expect(records[0]?.data).toMatchObject({ checks: ["python3 app.py"] });
+		expect(records[0]?.data).toMatchObject({
+			checks: ["sh ./check.sh"],
+			refused: [{ command: "rm -rf /", reason: "it is not a whole code span of the request" }],
+		});
 
 		sup.onUserTurn?.({ text: action?.kind === "suggest" ? action.text : "", origin: "user" });
 		expect(kinds().at(-1)).toBe("exo.action:accepted");
@@ -311,7 +315,7 @@ describe("what the judge is given (D-071)", () => {
 		expect(verdictPrompt()).toContain(
 			`Note: files changed after the agent's last full test run (\`${command}\`), so that result does not cover the finished work.`,
 		);
-		expect(verdictPrompt()).toContain("is the last command of the pipe's, not the test run's");
+		expect(verdictPrompt()).toContain("is another command's (a pipe, `;` or `||`), not the test run's");
 		expect(verdictPrompt()).not.toContain("## Check commands");
 		expect(records.find((r) => r.kind === "exo.verdict")?.data).toMatchObject({ checks: [] });
 	});

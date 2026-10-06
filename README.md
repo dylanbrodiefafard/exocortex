@@ -61,7 +61,7 @@ A small local model running a coding agent is already at its limit on the task i
 
 ### Supervisor
 
-When the agent stops, the supervisor compares what you asked for (your message, and a checklist extracted from it) with evidence from the workspace: the diff, the commands the agent ran and their exit codes, and any check commands from your config or quoted in your message. It notes when the agent's last test run came before its last edit, or was piped so that its exit code proves nothing.
+When the agent stops, the supervisor compares what you asked for (your message, and a checklist extracted from it) with evidence from the workspace: the diff, the commands the agent ran and their exit codes, and check commands: the ones in your config, and a test or build command your message names in backticks ("make sure `cargo test` passes"). It notes when the agent's last test run came before its last edit, or was piped so that its exit code proves nothing.
 
 If something is missing, it puts a follow-up listing it in your editor. Press Enter to send it, or edit it first. `/exo supervisor auto` lets it send the follow-up itself, at most 3 times per task.
 

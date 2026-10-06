@@ -9,7 +9,7 @@ export const SettingsSchema = Type.Object(
 		maxContinuations: Type.Integer({ minimum: 0, default: 3 }),
 		/** Check commands to run as evidence at settle, e.g. ["npm test"] (D-011). */
 		checks: Type.Array(Type.String({ minLength: 1 }), { default: [] }),
-		/** Also run check commands quoted verbatim in the user's request (D-011). */
+		/** Also run the test and build commands the user's request names in a code span (D-011; the rule is in `checks.ts`, D-084). */
 		runPromptChecks: Type.Boolean({ default: true }),
 		checkTimeoutMs: Type.Integer({ minimum: 1000, default: 120_000 }),
 		ledgerTimeoutMs: Type.Integer({ minimum: 1000, default: 30_000 }),

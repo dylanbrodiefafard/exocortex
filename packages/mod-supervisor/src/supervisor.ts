@@ -2,6 +2,7 @@ import {
 	type ExoModule,
 	loadPrompt,
 	type ModuleContext,
+	type RunOptions,
 	type SettleAction,
 	type SettleInfo,
 	SIDECAR_MAX_TOKENS,
@@ -9,7 +10,9 @@ import {
 	type UserTurn,
 } from "@exocortex/core";
 import { type Static, Type } from "typebox";
-import { asksUserQuestion, type CheckResult, diffFingerprint, formatEvidence } from "./evidence.ts";
+import { Value } from "typebox/value";
+import { acceptRequestCheck, checkOutcome, namedInRequest, plainTestOrBuild } from "./checks.ts";
+import { asksUserQuestion, buildEvidence, type CheckResult, diffFingerprint, touchedFiles } from "./evidence.ts";
 import { parseSettings, type SupervisorSettings } from "./settings.ts";
 import {
 	extractClaims,
@@ -17,16 +20,18 @@ import {
 	madeNoChanges,
 	narrowTestSignal,
 	parseDiff,
+	runnerConfigSignals,
 	stubSignals,
 	tamperSignals,
 	unsupportedClaims,
 } from "./signals.ts";
+import { isCommitId, newFileDiffs, untrackedFiles, workspaceFingerprint } from "./workspace.ts";
 
 export const SUPERVISOR_ID = "supervisor";
 
-const LEDGER_PROMPT = loadPrompt(new URL("../prompts/ledger.v2.md", import.meta.url));
-const VERDICT_PROMPT = loadPrompt(new URL("../prompts/verdict.v5.md", import.meta.url));
-const ITEM_VERDICT_PROMPT = loadPrompt(new URL("../prompts/verdict-items.v5.md", import.meta.url));
+const LEDGER_PROMPT = loadPrompt(new URL("../prompts/ledger.v3.md", import.meta.url));
+const VERDICT_PROMPT = loadPrompt(new URL("../prompts/verdict.v6.md", import.meta.url));
+const ITEM_VERDICT_PROMPT = loadPrompt(new URL("../prompts/verdict-items.v6.md", import.meta.url));
 
 const LedgerSchema = Type.Object({
 	is_task: Type.Boolean(),
@@ -71,6 +76,7 @@ export type ItemVerdict = Static<typeof ItemVerdictSchema>;
 /** A verdict plus how it was reached, as recorded in the trace. */
 export interface Judgement extends Verdict {
 	readonly source: "deterministic" | "llm";
+	/** Verdicts that were asked for and came back (unanswered ones are not counted). */
 	readonly votes?: number;
 }
 
@@ -82,15 +88,25 @@ export interface Ledger {
 	 */
 	readonly requests: readonly string[];
 	readonly criteria: readonly string[];
-	/** Check commands quoted verbatim in the request (only these, plus configured ones, are ever run). */
+	/**
+	 * Check commands the request names, each accepted by the rule in `checks.ts`. Only these, and
+	 * the configured ones, are ever run. A message that continues the task keeps them (D-084).
+	 */
 	readonly checkCommands: readonly string[];
 }
 
 interface Task {
-	readonly prompt: string;
-	readonly ledger: Promise<Ledger | undefined>;
-	/** Commit the task started from (`git rev-parse HEAD`), so diffs cover commits made during the task. */
-	readonly startRef: Promise<string | undefined>;
+	ledger: Promise<Ledger | undefined>;
+	/**
+	 * The commit the task started from (`git rev-parse HEAD`), so diffs cover commits made during
+	 * the task. A message that continues a task takes the earlier one's, once its ledger says so.
+	 */
+	startRef: Promise<string | undefined>;
+	/**
+	 * `HEAD` when this message arrived. Workspace fingerprints for "did the files change since the
+	 * tests ran" are all taken against it: `startRef` may change under a fingerprint already taken.
+	 */
+	readonly ownRef: Promise<string | undefined>;
 	readonly tools: ToolOutcome[];
 	continuations: number;
 	pending: { readonly text: string; readonly diffHash: string } | undefined;
@@ -106,6 +122,22 @@ interface Task {
 	verifyAsked: boolean;
 }
 
+/** What is kept with the session so a rebuilt module carries on with the same task (D-078, D-084). */
+const SavedSchema = Type.Object({
+	v: Type.Literal(1),
+	ledger: Type.Object({
+		requests: Type.Array(Type.String(), { maxItems: 64 }),
+		criteria: Type.Array(Type.String(), { minItems: 1, maxItems: 16 }),
+		checkCommands: Type.Array(Type.String(), { maxItems: 10 }),
+	}),
+	startRef: Type.Union([Type.String(), Type.Null()]),
+	continuations: Type.Integer({ minimum: 0 }),
+	pending: Type.Union([Type.Object({ text: Type.String(), diffHash: Type.String() }), Type.Null()]),
+	lastContinuationDiff: Type.Union([Type.String(), Type.Null()]),
+	noProgressStreak: Type.Integer({ minimum: 0 }),
+	verifyAsked: Type.Boolean(),
+});
+
 /** Enough for one criterion per requirement of a long specification (D-071; the brief had 7). */
 const MAX_CRITERIA = 12;
 /** How much of the user's request the verdict reads; longer ones keep their start and end. */
@@ -115,11 +147,15 @@ const FINAL_MESSAGE_CHARS = 1_500;
 const CLAIMS_TAIL_CHARS = 300;
 const VOTE_TEMPERATURE = 0.7;
 const GIT_TIMEOUT_MS = 10_000;
-/** Enough of a diff for the evidence budget and a stable change fingerprint. */
+/** Enough of a diff for the evidence budget; a longer one loses its start, and says so. */
 const GIT_OUTPUT_CHARS = 256 * 1024;
-/** New files whose content is shown, and how much of each. */
-const MAX_NEW_FILES = 12;
-const NEW_FILE_CHARS = 6_000;
+/** New files whose content is offered to the evidence; each is read up to the evidence budget. */
+const MAX_NEW_FILES = 50;
+/**
+ * The fewest characters, spaces aside, a quoted evidence line must have. `}` and `return x` are in
+ * every diff; a line that long is rarely there by chance.
+ */
+const MIN_QUOTE_CHARS = 12;
 
 /**
  * The supervisor module (brief §6.1, D-010, D-011): extracts a goal ledger from each request,
@@ -130,31 +166,81 @@ const NEW_FILE_CHARS = 6_000;
 export function createSupervisor(raw: Readonly<Record<string, unknown>>, ctx: ModuleContext): ExoModule {
 	const { settings, problems } = parseSettings(raw);
 	for (const problem of problems) ctx.log(problem);
-	let task: Task | undefined;
-	let lastLedger: Ledger | undefined;
+	// The task the next settle judges, and the last one that had a ledger: what a later message may continue.
+	let task: Task | undefined = restoreTask(ctx.savedState);
+	let anchor: Task | undefined = task;
 	let lastVerdict: string | undefined;
+
+	/**
+	 * Keeps the task with the session. Resolves once it is saved, and never rejects. A message that
+	 * turned out not to be a task leaves the earlier task's state in place: it is still the one a
+	 * later message may continue.
+	 */
+	const persist = async (current: Task): Promise<void> => {
+		try {
+			const [ledger, startRef] = await Promise.all([current.ledger, current.startRef]);
+			if (task !== current || !ledger || ledger.criteria.length === 0) return;
+			ctx.saveState({
+				v: 1,
+				ledger: {
+					requests: ledger.requests.slice(-64).map((request) => request.slice(0, REQUEST_CHARS)),
+					criteria: [...ledger.criteria],
+					checkCommands: [...ledger.checkCommands],
+				},
+				startRef: startRef ?? null,
+				continuations: current.continuations,
+				pending: current.pending ?? null,
+				lastContinuationDiff: current.lastContinuationDiff ?? null,
+				noProgressStreak: current.noProgressStreak,
+				verifyAsked: current.verifyAsked,
+			});
+		} catch (error) {
+			ctx.log(`supervisor state not saved: ${String(error)}`);
+		}
+	};
 
 	return {
 		id: SUPERVISOR_ID,
 
 		onUserTurn(turn: UserTurn) {
-			if (task?.pending && sameText(turn.text, task.pending.text)) {
-				// The user (or eval harness) accepted our suggestion: same task, one more continuation.
-				task.continuations += 1;
-				task.lastContinuationDiff = task.pending.diffHash;
-				task.pending = undefined;
-				ctx.record({ kind: "exo.action", data: { action: "accepted", continuation: task.continuations } });
+			// Whatever the last verdict was, it was about the work before this message.
+			lastVerdict = undefined;
+			const current = task;
+			const accepted = current?.pending && acceptance(turn.text, current.pending.text);
+			if (current?.pending && accepted) {
+				// The user (or eval harness) sent our suggestion, as it was or edited: same task, one more continuation.
+				current.continuations += 1;
+				current.lastContinuationDiff = current.pending.diffHash;
+				current.pending = undefined;
+				const { added } = accepted;
+				if (added !== "") {
+					// What the user wrote into the suggestion is theirs, and part of the request.
+					current.ledger = current.ledger.then(
+						(ledger) =>
+							ledger && {
+								...ledger,
+								requests: [...ledger.requests, added],
+								checkCommands: stillWanted(ledger.checkCommands, added),
+							},
+					);
+				}
+				ctx.record({
+					kind: "exo.action",
+					data: {
+						action: "accepted",
+						continuation: current.continuations,
+						...(accepted.edited ? { edited: true } : {}),
+					},
+				});
+				void persist(current);
 				return;
 			}
-			const previous = lastLedger;
-			const ledger = extractLedger(ctx, settings, turn.text, previous).then((result) => {
-				if (result) lastLedger = result;
-				return result;
-			});
-			task = {
-				prompt: turn.text,
-				ledger,
-				startRef: gitHead(ctx),
+			const earlier = anchor;
+			const head = gitHead(ctx);
+			const next: Task = {
+				ledger: Promise.resolve(undefined),
+				startRef: head,
+				ownRef: head,
 				tools: [],
 				continuations: 0,
 				pending: undefined,
@@ -163,29 +249,61 @@ export function createSupervisor(raw: Readonly<Record<string, unknown>>, ctx: Mo
 				verifyAsked: false,
 				snapshots: new Map(),
 			};
+			next.ledger = Promise.resolve(earlier?.ledger)
+				.then((previous) => extractLedger(ctx, settings, turn, previous))
+				.then((result) => {
+					if (!result) return undefined;
+					// The same task goes on: its starting commit, and what the supervisor already spent on it.
+					if (result.follows && earlier) {
+						next.startRef = earlier.startRef;
+						next.continuations += earlier.continuations;
+						next.lastContinuationDiff ??= earlier.lastContinuationDiff;
+						next.noProgressStreak = earlier.noProgressStreak;
+						next.verifyAsked ||= earlier.verifyAsked;
+					}
+					anchor = next;
+					void persist(next);
+					return result.ledger;
+				})
+				.catch((error) => {
+					ctx.log(`ledger failed: ${String(error)}`);
+					return undefined;
+				});
+			task = next;
 		},
 
 		onToolResult(tool: ToolOutcome) {
 			if (!task) return;
-			task.tools.push(tool);
-			if (lastFullRun([tool])) task.snapshots.set(task.tools.length - 1, workspaceState(ctx));
+			const current = task;
+			current.tools.push(tool);
+			if (lastFullRun([tool], runOptions(settings))) {
+				current.snapshots.set(
+					current.tools.length - 1,
+					current.ownRef.then((ref) => workspaceFingerprint(ctx, ref)).catch(() => undefined),
+				);
+			}
 		},
 
 		async onSettle(info: SettleInfo, signal: AbortSignal): Promise<SettleAction | undefined> {
 			const current = task;
-			if (!current || info.outcome !== "completed") return undefined;
-			current.pending = undefined;
+			if (info.outcome !== "completed") return undefined;
 			const skip = (reason: string): undefined => {
 				ctx.record({ kind: "exo.action", data: { action: "skipped", reason } });
 				return undefined;
 			};
+			// The agent ran without a message this module saw (it was switched on mid-run, say).
+			if (!current) return skip("no_task");
+			current.pending = undefined;
 
 			const ledger = await withTimeout(current.ledger, settings.ledgerTimeoutMs);
 			if (!ledger || ledger.criteria.length === 0) return skip("no_ledger");
 			if (current.continuations >= settings.maxContinuations) return skip("max_continuations");
 
 			const evidence = await gatherEvidence(ctx, settings, current, ledger, info.lastAssistantText, signal);
-			if (stalled(current, evidence.diffHash)) return skip("no_progress");
+			if (stalled(current, evidence.diffHash)) {
+				await persist(current);
+				return skip("no_progress");
+			}
 
 			const verdict = await decide(ctx, settings, ledger, evidence, info.lastAssistantText, signal);
 			if (!verdict) return skip("verdict_unavailable");
@@ -201,10 +319,13 @@ export function createSupervisor(raw: Readonly<Record<string, unknown>>, ctx: Mo
 						source: c.source,
 						exitCode: c.output.exitCode,
 						timedOut: c.output.timedOut,
+						outcome: checkOutcome(c.output),
 					})),
 				},
 			});
-			return act(ctx, settings, current, verdict, evidence);
+			const action = act(ctx, settings, current, verdict, evidence);
+			await persist(current);
+			return action;
 		},
 
 		status() {
@@ -214,6 +335,71 @@ export function createSupervisor(raw: Readonly<Record<string, unknown>>, ctx: Mo
 	};
 }
 
+/** The user's configured checks are their definition of "the tests" (D-084): core's reading takes them as test runs. */
+function runOptions(settings: SupervisorSettings): RunOptions {
+	return { tests: settings.checks };
+}
+
+/**
+ * The task a previous instance saved, or undefined. Saved state is untrusted (it may be an older
+ * version's, or edited): its shape is checked, a starting commit that is not a commit id is
+ * dropped, and each check command must pass the same rule as when it was first accepted, against
+ * the saved requests.
+ */
+function restoreTask(saved: unknown): Task | undefined {
+	if (!Value.Check(SavedSchema, saved)) return undefined;
+	const requests = saved.ledger.requests.map((request) => request.slice(0, REQUEST_CHARS));
+	const ledger: Ledger = {
+		requests,
+		criteria: saved.ledger.criteria.slice(0, MAX_CRITERIA),
+		checkCommands: saved.ledger.checkCommands.filter((command) =>
+			requests.some((request) => acceptRequestCheck(command, request).ok),
+		),
+	};
+	const startRef = Promise.resolve(isCommitId(saved.startRef) ? saved.startRef : undefined);
+	return {
+		ledger: Promise.resolve(ledger),
+		startRef,
+		ownRef: startRef,
+		tools: [],
+		continuations: saved.continuations,
+		pending: saved.pending ?? undefined,
+		lastContinuationDiff: saved.lastContinuationDiff ?? undefined,
+		noProgressStreak: saved.noProgressStreak,
+		verifyAsked: saved.verifyAsked,
+		snapshots: new Map(),
+	};
+}
+
+const textLines = (text: string) =>
+	text
+		.split("\n")
+		.map((line) => line.replace(/\s+/g, " ").trim())
+		.filter(Boolean);
+
+/**
+ * Whether the user's message is our suggestion sent back: unchanged, or edited (D-010 logs
+ * accept, edit and reject). Edited means at least half of the suggestion's lines are still there;
+ * `added` is what the user wrote into it. Anything further from it is a new message, and the
+ * ledger sidecar decides whether it continues the task.
+ */
+function acceptance(
+	text: string,
+	suggestion: string,
+): { readonly edited: boolean; readonly added: string } | undefined {
+	const ours = textLines(suggestion);
+	const theirs = textLines(text);
+	if (ours.join("\n") === theirs.join("\n")) return { edited: false, added: "" };
+	const kept = ours.filter((line) => theirs.includes(line)).length;
+	if (kept * 2 < ours.length) return undefined;
+	return { edited: true, added: theirs.filter((line) => !ours.includes(line)).join("\n") };
+}
+
+/** The check commands a later message leaves standing: all but those it says not to run. */
+function stillWanted(commands: readonly string[], message: string): string[] {
+	return commands.filter((command) => namedInRequest(command, message) !== "negated");
+}
+
 /** Brief §6.1 guard: two continuations in a row that leave the diff unchanged stop the supervisor. */
 function stalled(task: Task, diffHash: string): boolean {
 	if (task.lastContinuationDiff === undefined) return false;
@@ -221,19 +407,32 @@ function stalled(task: Task, diffHash: string): boolean {
 	return task.noProgressStreak >= 2;
 }
 
+interface Gathered {
+	readonly text: string;
+	readonly quotable: readonly string[];
+	readonly diffHash: string;
+	readonly checks: readonly CheckResult[];
+	readonly noChanges: boolean;
+}
+
 /** The deterministic pre-verdict when enabled and decisive, else the (voted) LLM verdict. */
 async function decide(
 	ctx: ModuleContext,
 	settings: SupervisorSettings,
 	ledger: Ledger,
-	evidence: { readonly text: string; readonly checks: readonly CheckResult[]; readonly noChanges: boolean },
+	evidence: Gathered,
 	finalMessage: string,
 	signal: AbortSignal,
 ): Promise<Judgement | undefined> {
 	// Without an LLM verdict to read the final message, the question heuristic stands in for it.
 	const pre = settings.preVerdict ? preVerdict(evidence.checks, evidence.noChanges) : undefined;
 	const deterministic = pre && { ...pre, asked_user: asksUserQuestion(finalMessage) };
-	return deterministic ?? (await judgeWithVotes(ctx, settings, ledger, evidence.text, finalMessage, signal));
+	return deterministic ?? (await judgeWithVotes(ctx, settings, ledger, evidence, finalMessage, signal));
+}
+
+/** A verdict's list as it is used: trimmed, without empty or repeated items, at most one per criterion. */
+function items(list: readonly string[] | undefined): string[] {
+	return [...new Set((list ?? []).map((m) => m.trim()).filter(Boolean))].slice(0, MAX_CRITERIA);
 }
 
 function act(
@@ -244,11 +443,6 @@ function act(
 	evidence: { readonly diffHash: string; readonly noChanges: boolean },
 ): SettleAction | undefined {
 	const { diffHash } = evidence;
-	const items = (list: readonly string[] | undefined) =>
-		(list ?? [])
-			.map((m) => m.trim())
-			.filter(Boolean)
-			.slice(0, MAX_CRITERIA);
 	const missing = items(verdict.missing);
 	const unverified = items(verdict.unverified);
 	const follow = (text: string, summary: string, data: { readonly [key: string]: string[] }): SettleAction => {
@@ -307,14 +501,19 @@ export function verificationMessage(unverified: readonly string[]): string {
 	].join("\n");
 }
 
+/**
+ * The ledger for a message, and whether the message continues the earlier task (`previous`).
+ * Undefined when the sidecar is unavailable or the message is neither a task nor a continuation.
+ */
 async function extractLedger(
 	ctx: ModuleContext,
 	settings: SupervisorSettings,
-	prompt: string,
+	turn: UserTurn,
 	previous: Ledger | undefined,
-): Promise<Ledger | undefined> {
+): Promise<{ readonly ledger: Ledger; readonly follows: boolean } | undefined> {
 	const pool = ctx.pool();
 	if (!pool) return undefined;
+	const prompt = turn.text;
 	const result = await pool.run({
 		module: SUPERVISOR_ID,
 		priority: "interactive",
@@ -341,29 +540,43 @@ async function extractLedger(
 		return undefined;
 	}
 	const value = result.value;
+	const continued = value.follows_previous ? previous : undefined;
+	// A message that goes on with the task keeps its check commands, unless it says to stop running one.
+	const carried = continued ? stillWanted(continued.checkCommands, prompt) : [];
 	if (!value.is_task) {
 		ctx.record({ kind: "exo.ledger", data: { is_task: false } });
-		return value.follows_previous ? previous : undefined;
+		return continued && { ledger: { ...continued, checkCommands: carried }, follows: true };
 	}
+	// Safety (D-011, D-084): the sidecar proposes commands, `checks.ts` decides which may be run.
+	const proposed = [...new Set(value.check_commands.map((c) => c.trim()).filter(Boolean))];
+	const refused: { command: string; reason: string }[] = [];
+	const accepted = proposed.filter((command) => {
+		const verdict =
+			turn.origin === "user"
+				? acceptRequestCheck(command, prompt)
+				: { ok: false as const, reason: "the message was not typed by the user" };
+		if (!verdict.ok) refused.push({ command, reason: verdict.reason });
+		return verdict.ok;
+	});
 	const ledger: Ledger = {
-		requests: value.follows_previous && previous ? [...previous.requests, prompt] : [prompt],
+		requests: continued ? [...continued.requests, prompt] : [prompt],
 		criteria: value.criteria
 			.map((c) => c.trim())
 			.filter(Boolean)
 			.slice(0, MAX_CRITERIA),
-		// Safety (D-011): only commands that literally appear in the user's request are ever run.
-		checkCommands: value.check_commands.map((c) => c.trim()).filter((c) => c !== "" && prompt.includes(c)),
+		checkCommands: [...new Set([...carried, ...accepted])],
 	};
 	ctx.record({
 		kind: "exo.ledger",
 		data: {
 			is_task: true,
-			follows_previous: value.follows_previous,
+			follows_previous: continued !== undefined,
 			criteria: [...ledger.criteria],
 			checks: [...ledger.checkCommands],
+			refused,
 		},
 	});
-	return ledger;
+	return { ledger, follows: continued !== undefined };
 }
 
 async function gatherEvidence(
@@ -373,46 +586,58 @@ async function gatherEvidence(
 	ledger: Ledger,
 	finalMessage: string,
 	signal: AbortSignal,
-): Promise<{
-	readonly text: string;
-	readonly diffHash: string;
-	readonly checks: readonly CheckResult[];
-	readonly noChanges: boolean;
-}> {
-	const startRef = (await task.startRef) ?? "HEAD";
-	const [stat, diff, untracked] = await Promise.all([
-		git(ctx, `diff --stat ${startRef}`),
-		git(ctx, `diff ${startRef}`),
-		git(ctx, "ls-files --others --exclude-standard"),
+): Promise<Gathered> {
+	const [startRef, ownRef] = await Promise.all([task.startRef, task.ownRef]);
+	const base = isCommitId(startRef) ? startRef : "HEAD";
+	const [stat, tracked, untracked] = await Promise.all([
+		git(ctx, `diff --stat ${base}`),
+		gitDiff(ctx, base),
+		untrackedFiles(ctx),
 	]);
-	const untrackedFiles = (untracked ?? "").split("\n").filter(Boolean).slice(0, 30);
+	const newFiles = untracked ?? [];
 	// `git diff` leaves out files git does not track yet, which is where new work usually is.
-	const tracked = diff;
+	const shown = await newFileDiffs(ctx.cwd, newFiles, {
+		touched: touchedFiles(task.tools),
+		maxFiles: MAX_NEW_FILES,
+		maxBytes: settings.maxEvidenceChars,
+	});
 	const diffWithNew =
-		tracked === undefined ? undefined : [tracked, ...(await newFileDiffs(ctx, untrackedFiles))].join("\n");
+		tracked === undefined ? undefined : [tracked.trimEnd(), ...shown.diffs].filter(Boolean).join("\n");
 
 	const checks = await runChecks(ctx, settings, ledger, signal);
-	const tested = lastFullRun(task.tools);
-	const [before, now] = tested ? await Promise.all([task.snapshots.get(tested.index), workspaceState(ctx)]) : [];
+	const runs = runOptions(settings);
+	const tested = lastFullRun(task.tools, runs);
+	const [before, now] = tested
+		? await Promise.all([task.snapshots.get(tested.index), workspaceFingerprint(ctx, ownRef)])
+		: [];
 	const changedSinceTests = before !== undefined && now !== undefined ? before !== now : undefined;
-	return {
-		text: formatEvidence({
-			diffStat: stat,
-			diff: diffWithNew,
-			untracked: untrackedFiles,
-			tools: task.tools,
-			...(changedSinceTests === undefined ? {} : { changedSinceTests }),
-			checks,
-			...(settings.warningSignals ? { warnings: warningsFor(diffWithNew, task.tools, finalMessage) } : {}),
-			maxChars: settings.maxEvidenceChars,
-		}),
-		diffHash: diffFingerprint(diffWithNew, untrackedFiles),
+	// Progress is measured on the files themselves, shown to the judge or not: the text of the
+	// evidence leaves out what does not fit.
+	const state = now !== undefined && startRef === ownRef ? now : await workspaceFingerprint(ctx, startRef);
+	const evidence = buildEvidence({
+		diffStat: stat,
+		diff: diffWithNew,
+		untracked: newFiles,
+		newFilesNotShown: shown.notShown,
+		tools: task.tools,
+		...(changedSinceTests === undefined ? {} : { changedSinceTests }),
 		checks,
-		noChanges: madeNoChanges(tracked, untrackedFiles, task.tools),
+		...(settings.warningSignals ? { warnings: warningsFor(diffWithNew, task.tools, finalMessage, runs) } : {}),
+		runs,
+		maxChars: settings.maxEvidenceChars,
+	});
+	return {
+		...evidence,
+		diffHash: state ?? diffFingerprint(diffWithNew, newFiles),
+		checks,
+		noChanges: madeNoChanges(tracked, newFiles, task.tools),
 	};
 }
 
-/** The user's check commands (config, and those quoted in the request), run now that the agent has stopped. */
+/**
+ * The user's check commands (config, and those their request named), run now that the agent has
+ * stopped. Each is shown while it runs (D-011): these are shell commands in the user's tree.
+ */
 async function runChecks(
 	ctx: ModuleContext,
 	settings: SupervisorSettings,
@@ -420,11 +645,15 @@ async function runChecks(
 	signal: AbortSignal,
 ): Promise<CheckResult[]> {
 	const named = new Map<string, CheckResult["source"]>();
-	for (const command of settings.runPromptChecks ? ledger.checkCommands : []) named.set(command, "request");
+	for (const command of settings.runPromptChecks ? ledger.checkCommands : []) {
+		// Checked where it is run as well as where it was accepted: nothing else may put a command here.
+		if (plainTestOrBuild(command).ok) named.set(command, "request");
+	}
 	for (const command of settings.checks) named.set(command, "config");
 	const checks: CheckResult[] = [];
 	for (const [command, source] of named) {
 		if (signal.aborted) break;
+		ctx.progress(`running: ${command}`);
 		checks.push({
 			command,
 			output: await ctx.runCommand(command, { timeoutMs: settings.checkTimeoutMs, signal }),
@@ -434,50 +663,38 @@ async function runChecks(
 	return checks;
 }
 
-/**
- * Untracked files as "new file" diffs, so the verdict and the warning signals see their content
- * and a continuation that only edits new files still counts as progress. Each file gives its
- * first few thousand characters, smallest file first, so one large file cannot crowd out the rest.
- */
-async function newFileDiffs(ctx: ModuleContext, files: readonly string[]): Promise<string[]> {
-	const diffs: string[] = [];
-	for (const file of files.slice(0, MAX_NEW_FILES)) {
-		const quoted = `'${file.replace(/'/g, "'\\''")}'`;
-		const out = await ctx
-			.runCommand(`git diff --no-index -- /dev/null ${quoted} | head -c ${NEW_FILE_CHARS}`, {
-				timeoutMs: GIT_TIMEOUT_MS,
-				tailChars: NEW_FILE_CHARS,
-			})
-			.catch(() => undefined);
-		const text = out?.outputTail.trimEnd() ?? "";
-		if (text.startsWith("diff --git")) diffs.push(text);
-	}
-	return diffs.sort((x, y) => x.length - y.length);
-}
-
 /** Research R1.2 #4–#7: tampered tests, stubs, unsupported success claims, narrow test runs. */
-export function warningsFor(diff: string | undefined, tools: readonly ToolOutcome[], finalMessage: string): string[] {
+export function warningsFor(
+	diff: string | undefined,
+	tools: readonly ToolOutcome[],
+	finalMessage: string,
+	runs: RunOptions = {},
+): string[] {
 	const files = parseDiff(diff ?? "");
-	const narrow = narrowTestSignal(tools);
-	const claims = unsupportedClaims(extractClaims(finalMessage), tools).map(
-		(c) => `the agent claims "${c.sentence}" but ran no successful matching command after its last edit`,
+	const narrow = narrowTestSignal(tools, runs);
+	const claims = unsupportedClaims(extractClaims(finalMessage), tools, runs).map(
+		(c) => `the agent claims "${c.sentence}" but ran no matching command that passed after its last edit`,
 	);
-	return [...tamperSignals(files), ...stubSignals(files), ...claims, ...(narrow ? [narrow] : [])];
+	return [
+		...tamperSignals(files),
+		...runnerConfigSignals(files),
+		...stubSignals(files),
+		...claims,
+		...(narrow ? [narrow] : []),
+	];
 }
 
 /**
  * Research R1.1: verdicts that need no LLM. A check command that fails (run just now, so after
- * every edit) means `incomplete`; a "finished" task that changed nothing is `uncertain`.
+ * every edit) means `incomplete`; a "finished" task that changed nothing is `uncertain`. A check
+ * that did not finish (it timed out or was killed) is neither: it never yields `incomplete`.
  */
 export function preVerdict(checks: readonly CheckResult[], noChanges: boolean): Judgement | undefined {
-	const failing = checks.filter((c) => c.output.timedOut || c.output.exitCode !== 0);
+	const failing = checks.filter((c) => checkOutcome(c.output) === "failed");
 	if (failing.length > 0) {
 		return {
 			verdict: "incomplete",
-			missing: failing.map((c) => {
-				const how = c.output.timedOut ? "it timed out" : `it exits with code ${c.output.exitCode}`;
-				return `Make \`${c.command}\` pass (${how})`;
-			}),
+			missing: failing.map((c) => `Make \`${c.command}\` pass (it exits with code ${c.output.exitCode})`),
 			asked_user: false,
 			reason: "a check command failed",
 			source: "deterministic",
@@ -495,32 +712,67 @@ export function preVerdict(checks: readonly CheckResult[], noChanges: boolean): 
 	return undefined;
 }
 
-/** Research R1.5: a `complete` verdict must survive re-asking; any dissent downgrades to `uncertain`. */
+/**
+ * A verdict that agrees with its own lists (D-084): `complete` means nothing is missing and
+ * nothing is unverified, whatever word the judge chose.
+ */
+function consistent(verdict: Verdict): Verdict {
+	const missing = items(verdict.missing);
+	const unverified = items(verdict.unverified);
+	const lists = { missing, ...(verdict.unverified === undefined ? {} : { unverified }) };
+	if (verdict.verdict !== "complete") return { ...verdict, ...lists };
+	if (missing.length > 0) {
+		return {
+			...verdict,
+			...lists,
+			verdict: "incomplete",
+			reason: `called complete with items missing: ${verdict.reason}`,
+		};
+	}
+	if (unverified.length > 0) {
+		return {
+			...verdict,
+			...lists,
+			verdict: "uncertain",
+			reason: `called complete with items unverified: ${verdict.reason}`,
+		};
+	}
+	return { ...verdict, ...lists };
+}
+
+/**
+ * Research R1.5: a `complete` verdict must survive re-asking; any dissent downgrades to
+ * `uncertain`, and what the dissenters found goes on as items to verify. A vote that never came
+ * back (a timeout, an engine error) is no vote: it is not counted for or against.
+ */
 async function judgeWithVotes(
 	ctx: ModuleContext,
 	settings: SupervisorSettings,
 	ledger: Ledger,
-	evidence: string,
+	evidence: Gathered,
 	finalMessage: string,
 	signal: AbortSignal,
 ): Promise<Judgement | undefined> {
 	const first = await judge(ctx, settings, ledger, evidence, finalMessage, signal, 0.2);
 	if (!first) return undefined;
 	if (first.verdict !== "complete" || settings.completeVotes <= 1) return { ...first, source: "llm" };
-	const others = await Promise.all(
+	const asked = await Promise.all(
 		Array.from({ length: settings.completeVotes - 1 }, () =>
 			judge(ctx, settings, ledger, evidence, finalMessage, signal, VOTE_TEMPERATURE),
 		),
 	);
-	const dissent = others.find((v) => v?.verdict !== "complete");
-	if (!others.some((v) => v?.verdict !== "complete")) return { ...first, source: "llm", votes: settings.completeVotes };
+	const others = asked.filter((v) => v !== undefined);
+	const votes = others.length + 1;
+	const dissenters = others.filter((v) => v.verdict !== "complete");
+	if (dissenters.length === 0) return { ...first, source: "llm", votes };
 	return {
 		verdict: "uncertain",
 		missing: [],
+		unverified: items(dissenters.flatMap((v) => [...v.missing, ...(v.unverified ?? [])])),
 		asked_user: first.asked_user,
-		reason: `verdicts disagreed (${dissent?.verdict ?? "unavailable"})`,
+		reason: `verdicts disagreed (${dissenters[0]?.verdict})`,
 		source: "llm",
-		votes: settings.completeVotes,
+		votes,
 	};
 }
 
@@ -528,7 +780,7 @@ async function judge(
 	ctx: ModuleContext,
 	settings: SupervisorSettings,
 	ledger: Ledger,
-	evidence: string,
+	evidence: Gathered,
 	finalMessage: string,
 	signal: AbortSignal,
 	temperature: number,
@@ -554,7 +806,7 @@ async function judge(
 				ITEM_VERDICT_PROMPT.render({
 					request: userRequest,
 					criteria,
-					evidence,
+					evidence: evidence.text,
 					final_label: final.label,
 					final_message: final.text,
 				}),
@@ -564,19 +816,21 @@ async function judge(
 			ctx.log(`verdict ${result.outcome}: ${result.error}`);
 			return undefined;
 		}
-		return aggregateItems(result.value, ledger.criteria, evidence);
+		return aggregateItems(result.value, ledger.criteria, evidence.quotable);
 	}
 	const result = await pool.run({
 		...common,
 		schema: VerdictSchema,
 		schemaName: "verdict",
-		request: request(VERDICT_PROMPT.render({ request: userRequest, criteria, evidence, final_message: final.text })),
+		request: request(
+			VERDICT_PROMPT.render({ request: userRequest, criteria, evidence: evidence.text, final_message: final.text }),
+		),
 	});
 	if (!result.ok) {
 		ctx.log(`verdict ${result.outcome}: ${result.error}`);
 		return undefined;
 	}
-	return result.value;
+	return consistent(result.value);
 }
 
 /** The user's messages for this task as the verdict reads them: verbatim, later ones marked as additions. */
@@ -600,16 +854,27 @@ function finalMessageView(finalMessage: string, mode: SupervisorSettings["finalM
 }
 
 /**
- * Research R1.4: the verdict follows from the items in code. A `met` item must quote a line
- * that really is in the evidence, otherwise it counts as unknown; any unmet item → `incomplete`.
+ * Whether `quote` is, or is part of, one of the evidence's quotable lines, and long enough to
+ * show something. A quote spanning lines is in none of them. The marker a line starts with
+ * (`+`, `-`, `$`) may be left off.
  */
-export function aggregateItems(value: ItemVerdict, criteria: readonly string[], evidence: string): Verdict {
-	const haystack = normalize(evidence);
+function isQuoted(quote: string, quotable: readonly string[]): boolean {
+	if (quote.trim().includes("\n")) return false;
+	const wanted = normalize(quote);
+	if (wanted.replace(/^[+\-$]/, "").replace(/\s/g, "").length < MIN_QUOTE_CHARS) return false;
+	return quotable.some((line) => normalize(line).includes(wanted));
+}
+
+/**
+ * Research R1.4: the verdict follows from the items in code. A `met` item must quote a line that
+ * really is in the evidence and can show something (`quotable`: see `Evidence`), otherwise it
+ * counts as unknown; any unmet item → `incomplete`.
+ */
+export function aggregateItems(value: ItemVerdict, criteria: readonly string[], quotable: readonly string[]): Verdict {
 	const statuses = criteria.map((criterion, index) => {
 		const item = value.items.find((i) => i.criterion === index + 1);
 		if (!item) return { status: "unknown", fix: criterion };
-		const quoted = item.evidence.trim() !== "" && haystack.includes(normalize(item.evidence));
-		if (item.status === "met" && !quoted) return { status: "unknown", fix: criterion };
+		if (item.status === "met" && !isQuoted(item.evidence, quotable)) return { status: "unknown", fix: criterion };
 		return { status: item.status, fix: item.status === "unmet" ? item.fix.trim() || criterion : criterion };
 	});
 	const base = { asked_user: value.asked_user, reason: value.reason };
@@ -625,30 +890,30 @@ function normalize(text: string): string {
 	return text.replace(/\s+/g, " ").trim().toLowerCase();
 }
 
-/**
- * A fingerprint of the workspace's content: tracked changes plus the content of files git does
- * not track or ignore. Undefined outside a git repository or when git is slow. Never rejects.
- */
-async function workspaceState(ctx: ModuleContext): Promise<string | undefined> {
-	const command =
-		"git rev-parse --is-inside-work-tree >/dev/null 2>&1 && " +
-		"{ git diff HEAD; git ls-files --others --exclude-standard -z | xargs -0 -r cat; } 2>/dev/null | git hash-object --stdin";
-	const out = await ctx.runCommand(command, { timeoutMs: GIT_TIMEOUT_MS }).catch(() => undefined);
-	return out && out.exitCode === 0 && !out.timedOut ? out.outputTail.trim() || undefined : undefined;
-}
-
-/** stdout of a git command, or undefined when it fails (e.g. not a repository). */
+/** stdout of a git command, or undefined when it fails (e.g. not a repository). Names are printed as they are. */
 async function git(ctx: ModuleContext, args: string): Promise<string | undefined> {
-	const out = await ctx.runCommand(`git ${args}`, { timeoutMs: GIT_TIMEOUT_MS, tailChars: GIT_OUTPUT_CHARS });
+	const out = await ctx.runCommand(`git -c core.quotePath=false ${args}`, {
+		timeoutMs: GIT_TIMEOUT_MS,
+		tailChars: GIT_OUTPUT_CHARS,
+	});
 	return out.exitCode === 0 ? out.outputTail : undefined;
 }
 
-async function gitHead(ctx: ModuleContext): Promise<string | undefined> {
-	return (await git(ctx, "rev-parse --verify HEAD"))?.trim() || undefined;
+/** `git diff <base>`. Only the end of a very long one is kept: it then starts at a file, and says what is gone. */
+async function gitDiff(ctx: ModuleContext, base: string): Promise<string | undefined> {
+	const diff = await git(ctx, `diff ${base}`);
+	if (diff === undefined || diff.length < GIT_OUTPUT_CHARS) return diff;
+	const firstWhole = diff.indexOf("\ndiff --git ");
+	return `(the diff is very long: the files at its start are not shown)\n${firstWhole === -1 ? "" : diff.slice(firstWhole + 1)}`;
 }
 
-function sameText(a: string, b: string): boolean {
-	return a.replace(/\s+/g, " ").trim() === b.replace(/\s+/g, " ").trim();
+async function gitHead(ctx: ModuleContext): Promise<string | undefined> {
+	try {
+		const head = (await git(ctx, "rev-parse --verify HEAD"))?.trim();
+		return isCommitId(head) ? head : undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | undefined> {

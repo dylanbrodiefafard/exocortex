@@ -10,11 +10,12 @@ For each checklist item, decide whether the evidence shows it is done as the req
 
 How to read the evidence:
 - A check command that was run just now and exits non-zero means the work is not done, whatever the agent says.
-- A test run from before the agent's last edit, or one whose exit code was a pipe's, does not show the finished work passes. When a note says so and nothing later shows it, treat the items that rest on it as not shown, and put "run the tests again" in `unverified`.
+- A check command that did not finish (it timed out or was interrupted) shows nothing either way. It is not a failure: never call the work incomplete because of it. Treat the items that rest on it as not shown.
+- A test run from before the agent's last edit, or one whose exit code was another command's (a pipe, `;` or `||`), does not show the finished work passes. When a note says so and nothing later shows it, treat the items that rest on it as not shown, and put "run the tests again" in `unverified`.
 - A passing test run shows only what those tests cover. An item no test or diff line shows is not shown.
 - If the agent's final message says what it will do next and then stops, the items that step covers are not done.
 
-In `unverified`, list the items the evidence does not show either way, each as a short instruction to the agent to check it (empty when there are none).
+In `unverified`, list the items the evidence does not show either way, each as a short instruction to the agent to check it (empty when there are none). "complete" means both lists are empty: with anything in `missing` the verdict is "incomplete", and with anything in `unverified` it is "uncertain".
 
 Also set `asked_user` to true only if the agent stopped because it needs an answer or a decision from the developer before it can go on. An offer of more work after it finished ("Want me to add tests too?") is not that.
 

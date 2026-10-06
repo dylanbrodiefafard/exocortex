@@ -27,7 +27,7 @@ A read-only audit of every package (2026-10-06) found the weak spots listed here
 | M. Memory | `fix/memory-admission` | D-081 | 2 | in progress |
 | T. Triage | `fix/triage-identity` | D-082 | 2 | merged |
 | R. Trimmer | `fix/trimmer-selection` | D-083 | 2 | merged |
-| S. Supervisor | `fix/supervisor-evidence` | D-084 | 2 | in progress |
+| S. Supervisor | `fix/supervisor-evidence` | D-084 | 2 | merged |
 | K. Compaction | `fix/compaction-facts` | D-085 | 2 | merged |
 | E. Eval follow-up | `fix/eval-followup` | D-086 | 2 | in progress |
 
@@ -152,16 +152,16 @@ Files owned: `packages/mod-trimmer/`.
 
 Files owned: `packages/mod-supervisor/`.
 
-- [ ] **S1. New files reach the judge cut and unmarked.** `supervisor.ts:386-392, 409, 442-456`. `head -c 6000` with no marker; only the first 12 by `ls-files` order; names C-quoted without `-z`; the progress fingerprint hashes the same cut text. *Fix:* `git -c core.quotePath=false ls-files -z`; fetch each file with a generous cap and let `fitDiff` share and mark the cut; choose by size or by what the agent touched; "N more new files not shown"; fingerprint the full content.
-- [ ] **S2. The "changed since tests" hash flips on `git commit`.** `supervisor.ts:632-638`. *Fix:* a commit-invariant hash (per-file content of everything changed since the task's `startRef`, plus untracked files).
-- [ ] **S3. Check commands: lost on follow-up, any substring accepted.** `supervisor.ts:349-355, 416-435`. *Fix:* carry `checkCommands` forward with `follows_previous`; require a whole backtick or code-fence span of the message; refuse request-sourced commands containing `;`, `&&`, `|`, `>` or `$(` unless also in `settings.checks`.
-- [ ] **S4. Checks run with nothing shown.** *Fix:* `ctx.progress("running: <cmd>")` (B15 carries it to the status line).
-- [ ] **S5. A check that did not finish is reported as failing.** `supervisor.ts:473-479`, `evidence.ts:51`. *Fix:* split failed (a number other than 0) from inconclusive (timed out or null); inconclusive never yields `incomplete`.
-- [ ] **S6. Two grammars for "is this a test run".** `signals.ts:15-19, 113-123, 151-161`. `git commit -m 'make pytest pass'` supports "all tests pass"; `pytest tests/test_one.py` counts as the full run. *Fix:* use core's `verifyingRun` and `outcomeOf` (A1–A3) everywhere; treat a positional test file, `-R` and a single package path as narrow.
-- [ ] **S7. The user's `checks` are not known as test commands.** *Fix:* pass `settings.checks` to A2's extra-commands hook.
-- [ ] **S8. Verdict acceptance is loose.** `supervisor.ts:606-622, 267-286, 510-524`. A quote of `}` makes an item met; `complete` with a non-empty `missing` is taken at face value; a dissenting vote's `missing` is discarded; a timed-out vote counts as dissent; `lastVerdict` is never cleared. *Fix:* a quote of at least about 12 non-space characters within one added line, check-output line or command line; coerce `complete` with `missing` to `incomplete`; pass dissenters' items through as `unverified`; ignore unavailable votes; reset `lastVerdict`.
-- [ ] **S9. Warning signals misfire both ways.** `signals.ts:13-14, 48-62`. `todos.append(todo)` is a stub marker; a changed expected value is not tampering. *Fix:* `TODO|FIXME|XXX` case-sensitive after a comment leader; report changed assertion lines in existing test files; skip commented-out added lines; a signal for modified runner config.
-- [ ] **S10. A follow-up resets `startRef` and the continuation count; state is lost on reload.** `supervisor.ts:154-165, 382-385`. *Fix:* inherit `startRef` and `continuations` with `follows_previous`; treat an edited suggestion as an acceptance; persist the ledger, `startRef` and count through B11; record a skip when settle finds no task.
+- [x] **S1. New files reach the judge cut and unmarked.** `supervisor.ts:386-392, 409, 442-456`. `head -c 6000` with no marker; only the first 12 by `ls-files` order; names C-quoted without `-z`; the progress fingerprint hashes the same cut text. *Fix:* `git -c core.quotePath=false ls-files -z`; fetch each file with a generous cap and let `fitDiff` share and mark the cut; choose by size or by what the agent touched; "N more new files not shown"; fingerprint the full content. *Done; one part did not reproduce:* a large new file among the first twelve did change the fingerprint when edited past the cut (the `index` line of `git diff --no-index` carries the blob id). Files past the twelfth did not.
+- [x] **S2. The "changed since tests" hash flips on `git commit`.** `supervisor.ts:632-638`. *Fix:* a commit-invariant hash (per-file content of everything changed since the task's `startRef`, plus untracked files).
+- [x] **S3. Check commands: lost on follow-up, any substring accepted.** `supervisor.ts:349-355, 416-435`. *Fix:* carry `checkCommands` forward with `follows_previous`; require a whole backtick or code-fence span of the message; refuse request-sourced commands containing `;`, `&&`, `|`, `>` or `$(` unless also in `settings.checks`.
+- [x] **S4. Checks run with nothing shown.** *Fix:* `ctx.progress("running: <cmd>")` (B15 carries it to the status line).
+- [x] **S5. A check that did not finish is reported as failing.** `supervisor.ts:473-479`, `evidence.ts:51`. *Fix:* split failed (a number other than 0) from inconclusive (timed out or null); inconclusive never yields `incomplete`.
+- [x] **S6. Two grammars for "is this a test run".** `signals.ts:15-19, 113-123, 151-161`. `git commit -m 'make pytest pass'` supports "all tests pass"; `pytest tests/test_one.py` counts as the full run. *Fix:* use core's `verifyingRun` and `outcomeOf` (A1–A3) everywhere; treat a positional test file, `-R` and a single package path as narrow.
+- [x] **S7. The user's `checks` are not known as test commands.** *Fix:* pass `settings.checks` to A2's extra-commands hook.
+- [x] **S8. Verdict acceptance is loose.** `supervisor.ts:606-622, 267-286, 510-524`. A quote of `}` makes an item met; `complete` with a non-empty `missing` is taken at face value; a dissenting vote's `missing` is discarded; a timed-out vote counts as dissent; `lastVerdict` is never cleared. *Fix:* a quote of at least about 12 non-space characters within one added line, check-output line or command line; coerce `complete` with `missing` to `incomplete`; pass dissenters' items through as `unverified`; ignore unavailable votes; reset `lastVerdict`.
+- [x] **S9. Warning signals misfire both ways.** `signals.ts:13-14, 48-62`. `todos.append(todo)` is a stub marker; a changed expected value is not tampering. *Fix:* `TODO|FIXME|XXX` case-sensitive after a comment leader; report changed assertion lines in existing test files; skip commented-out added lines; a signal for modified runner config.
+- [x] **S10. A follow-up resets `startRef` and the continuation count; state is lost on reload.** `supervisor.ts:154-165, 382-385`. *Fix:* inherit `startRef` and `continuations` with `follows_previous`; treat an edited suggestion as an acceptance; persist the ledger, `startRef` and count through B11; record a skip when settle finds no task.
 
 ## K. Compaction (wave 2)
 
