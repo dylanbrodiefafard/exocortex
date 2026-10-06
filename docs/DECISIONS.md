@@ -1404,6 +1404,55 @@ Open check: Exocortex's injected `custom_message` reaches ninfer as a second con
 
 ---
 
+### D-082 — Triage says only what it can know: a fixed failure is forgotten, a returned one is called that, and the notice no longer waits on the sidecar · accepted (2026-10-06; hardening stream T of D-076; amends D-043's counting, D-061, D-069 and D-073 items 2–4)
+- **Context:** the audit's items T1–T6 (`docs/HARDENING_PLAN.md`). Triage speaks to the main model as the runtime ("the edits made since did not change it"), so a repeat it is wrong about costs more than one it misses. All six reproduced. Tests are in `packages/mod-triage/test/hardening.test.ts`; 18 of its 22 failed against the old code, and the other four guard behaviour that was already right (named under "Not seen failing first").
+- **Decision.**
+  1. **A pass forgets the failure (T1; reverses D-061's and D-073's "a pass in between does not reset").** When a command passes, every failure it had reported is dropped with its count, hints and hint allowance, so the same errors 40 calls later are a first failure. This is Roo Code's rule (D-073's survey).
+     - **Which command:** a test or build run is known by the run itself (core's `verifyingRun().bare`), so `cargo test 2>&1 | tail -5` passing clears what `cargo test` reported. Another shell command is known by its text, a file tool by tool and path (a successful `edit` of a file clears the failed edits to it), any other tool by its name.
+     - **What a pass is:** core's `outcomeOf` answering `passed`. `unknown` (a pipe hid the exit code and the output does not say) and a benign exit 1 change nothing.
+  2. **A failure that went away and came back is said to have done so (beyond the audit).** A failure *stands* while it is the last thing one of its commands reported. If the command reported other errors in between (A, B, A), the notice reads "this failed with the same errors as an earlier run (first: …), after other results in between", makes no claim about edits, and the sidecar is told the errors are back and shown the edits since they were last seen. "The edits made since (…) did not change it" is said only of a failure that stood, and only of the edits made since its unbroken run began. The count still rises (D-073: an edit undone is a repeat), so going back and forth still reaches the warning.
+  3. **A failed `edit` is known by the text it looked for (T2).** `failureKey` plus the call's `oldText` values. The tool's message names only the file, so three attempts with three different texts were "the same errors as before". The same text with another replacement is still a repeat.
+  4. **A message from the user ends nothing (T3; amends D-043's "counts reset on a new user request").**
+     - Counts, hints and edits carry on.
+     - The goal the sidecar reads is the user's last messages (up to 6, the newest given two thirds of what is left of the 6,000 characters), numbered oldest first, so "try again" no longer replaces the request.
+     - **The hand-over waits until the user's answer has been tried:** it is asked for at twice the threshold only when at least `loopThreshold` of those failures came since the user last spoke. Otherwise an agent told "try the other approach" would be told to stop and report at its next failure.
+     - **Loop history still starts over on a user message** (D-069), so the eval's `stuckLoops` keeps the same definition. Running the tests three times because the user asked three times is not the agent going round in circles.
+  5. **After a compaction (T4)** hints, the hint allowance, the hypotheses flag and the loop-notice level are cleared: what they refer to is no longer in the context. Counts stay, since the failures are still failing.
+  6. **The notice does not wait on the sidecar (T5).**
+     - **Counting moved to `onToolResult`.** A failure happened whether or not the host had time to ask for a rewrite. Before, a result whose rewrite was never asked for was not counted, and one whose rewrite was dropped was counted but its notice lost. The rewrite speaks only for the result just counted.
+     - **One wall-clock deadline per result** for all sidecar work: the longer of `hintTimeoutMs` and `hypothesisTimeoutMs`, not their sum. The hint is skipped when the hypotheses left less than 400 ms. At the deadline, or when the host's signal aborts, the notice is returned without advice and the calls are cancelled. The pool's own timeout is not enough: its clock stops while a call waits for a slot (D-080).
+     - **Both timeouts are capped at 6,000 ms in the schema** (defaults 6,000; they were 8,000 and 10,000). The host gives a rewrite 20 s shared among the rewriting modules (D-078), three today, so a module's share is never under 6.6 s if the ones before it keep to theirs.
+     - **What rests on the model having read something is changed in `commit()`** (D-078 item 4): a hint is remembered (for deduplication and the "advice already given" list) and counted in the status line, and a loop notice's level is raised, only when the rewrite was used. Calls made are counted when they are made, shown or not, as before: that cap bounds cost.
+  7. **Counts are saved with the session (T6)** through `saveState`: per failure its count, edit marks, hint calls, hints shown, hypotheses flag and commands; each command's latest failure; the edit counter. Read back through a schema, so state from another version is ignored. Saved only when one of these changes. At most 64 failures and 64 commands are kept, the ones not seen for longest dropped first, since nothing else bounds them now.
+  8. **Prompts:** `diagnose.v4.md` and `hypothesis.v3.md`. The opening sentence and the edits heading are filled in by the module to say whether the failure stood or came back; the request section is headed as the user's latest messages; the rule about the listed edits says they "were in place when the command failed this way again", which holds in both cases.
+  9. **Wording:** "it is the 2nd time this task" became "it has now failed this way 2 times": there is no task boundary to count within any more.
+- **Different from the plan's proposed fix.**
+  - **T5 "race the sidecar work against `signal`"** is not enough on its own: the adapter's `withBudget` resolves `undefined` in the same step that aborts the signal (checked against the real function), so a notice returned on abort is already too late. Hence the module's own deadline and the cap.
+  - **T5 "commit counts through B4":** counts are facts about results and are taken in `onToolResult`; `commit` carries only what depends on delivery.
+  - **T1** clears every failure the command reported since its last pass, not only the last one, and clears the hints too.
+  - **T4** also clears the loop-notice level.
+- **Recorded trace actions are unchanged:** the rewrite notes are still `surfaced the first error`, `repeat N`, `repeat N + hint`, `repeat N + K hypotheses` and `no progress ×N` (D-057 reads `+ hint`).
+- **How this sits with the eval (not changed here; stream E owns it).**
+  - `repeatedToolErrors` and the "Repeated errors" section follow core's `failureKey` over the whole run. Triage now differs in two ways: a failed edit with other text is not a repeat for triage, and a failure seen again after its command passed is a repeat for the eval but a first failure for triage (no notice, no hint). So D-069's "the same definition in the eval" no longer holds exactly for failures. Folding `oldText` into core's `failureKey` would not close the first by itself: the eval calls it with the command only.
+  - `stuckLoops` still matches.
+- **Changed outside `packages/mod-triage/`:** `exocortex.config.example.jsonc` (`hintTimeoutMs` 8000 → 6000, or the example would fail its own schema) and the README's triage section.
+- **Not seen failing first:** "the same text is still a repeat" (T2's other half), "ignores saved state it cannot read", "returns the notice at once when the host aborts" and "gives the notice at its own deadline". The last two pass on the old code because the test pool's timeout fires on time; the case they stand for (a call held in the pool's queue past the host's deadline) needs a saturated pool.
+- **Not done, and why.**
+  - **The module is not told its share of the rewrite budget.** That would make the deadline exact instead of resting on "20 s among three rewriters". It is a change to core's `ToolResultDraft` and the adapter, outside this stream.
+  - **The goal is not saved.** After a reload the sidecar reads "(unknown)" until the user speaks. Saving it would write up to 6 KB to the session file at every count change.
+  - **Edits' text and loop history are not saved.** After a reload the notice names only files edited since, and a loop has to form again. Both say less, never something false.
+  - **Edits made from the shell** are still not seen (D-073).
+- **Open risks.**
+  - **A config with `hintTimeoutMs` or `hypothesisTimeoutMs` above 6000 (the old example had 8000) is now a config problem,** which disables Exocortex with a warning until it is fixed (D-080).
+  - **A fourth rewriting module, or a smaller host budget, breaks the 6 s assumption silently:** the notice is then lost on the results where the sidecar is slow. The counts stay right.
+  - **A pass under another spelling is not seen.** `make test` passing does not clear what `cargo test` reported, and a test run with other arguments is another command. The failure then counts as standing, and "did not change it" can be said of a failure that was fixed in between. The reverse also exists: two crates' `cargo test` runs under different `cd`s share a name, so a pass in one forgets the other's failure (a missed repeat, the cheaper error).
+  - **A flaky test** reads as "went away and came back".
+  - **The user's short answers count as the goal.** Six messages of "continue" push the request out.
+  - **State follows the branch only at `session_start`** (D-078): after `/tree` the counts are ahead of the conversation until the next reload.
+  - Untested with a real model.
+
+---
+
 ## Open questions (carried from brief §10, updated)
 
 1. ~~Resolved by D-029.~~ Exact pi mechanism for injecting into the current user turn without altering prior messages. *(Phase 0)*

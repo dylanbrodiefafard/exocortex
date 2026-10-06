@@ -80,6 +80,8 @@ On a first failure, triage only moves a buried first error to the top. It steps 
 
 - It says so, names the edited files that did not change it, and adds a two-sentence hint from a sidecar that has read the code the errors point at and those edits. A hint that names files or symbols found nowhere in its evidence or the repo is dropped.
 - Fewer failing tests or a different message counts as progress, not a repeat. A test run that failed behind `| tail` still counts as a failure.
+- Once the command passes, the failure is forgotten: if it breaks again later, that is a first failure. A failure that went away and came back without a pass is described as that, with no claim about the edits.
+- Counting carries on through your own messages ("try again") and through `/reload`.
 - At three sightings of the same errors, it warns that the approach isn't working.
 - It also notices loops with no error at all: the same call returning the same result, or a short cycle of calls ending the same way, three times running.
 - If either kind of loop reaches six rounds, it tells the agent to stop and report to you what is blocking it.

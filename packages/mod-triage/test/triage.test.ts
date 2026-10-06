@@ -41,9 +41,12 @@ function setup(settings: Record<string, unknown> = {}, reply?: (prompt: string) 
 	return { t, triage: createTriage(settings, t.context) };
 }
 
+/** One tool result as the host delivers it, its rewrite used. */
 async function fail(triage: ReturnType<typeof createTriage>, d: ToolResultDraft) {
 	triage.onToolResult?.(d);
-	return triage.rewriteToolResult?.(d, signal);
+	const rewrite = await triage.rewriteToolResult?.(d, signal);
+	rewrite?.commit?.();
+	return rewrite;
 }
 
 describe("triage", () => {
@@ -85,7 +88,7 @@ describe("triage", () => {
 		const rewrite = await fail(triage, second);
 		expect(rewrite?.text.startsWith(RUST_ERROR.replace("42:9", "57:3"))).toBe(true);
 		expect(rewrite?.text).toContain(
-			"[exo triage: this failed again with the same errors as before (first: error[E0502]: cannot borrow `self.stack` as mutable); it is the 2nd time this task.",
+			"[exo triage: this failed again with the same errors as before (first: error[E0502]: cannot borrow `self.stack` as mutable); it has now failed this way 2 times.",
 		);
 		expect(rewrite?.text).toContain(
 			"[exo triage hint: The borrow of `self.stack` outlives the push in lib.rs. Clone the value before mutating.]",
@@ -199,13 +202,13 @@ describe("triage", () => {
 		expect((await fail(triage, draft(RUST_ERROR)))?.note).toBe("repeat 2");
 	});
 
-	it("counts per task: a new user request resets, an extension continuation does not", async () => {
+	it("goes on counting through a continuation and through a message from the user (D-082)", async () => {
 		const { triage } = setup({ sidecar: false });
 		await fail(triage, draft(RUST_ERROR));
 		triage.onUserTurn?.({ text: "keep going", origin: "extension" });
 		expect((await fail(triage, draft(RUST_ERROR)))?.note).toBe("repeat 2");
 		triage.onUserTurn?.({ text: "something else", origin: "user" });
-		expect(await fail(triage, draft(RUST_ERROR))).toBeUndefined();
+		expect((await fail(triage, draft(RUST_ERROR)))?.note).toBe("repeat 3");
 	});
 
 	it("treats a different error as a new failure", async () => {
@@ -231,9 +234,9 @@ describe("triage", () => {
 		expect(await fail(triage, run(["a"]))).toBeUndefined();
 		expect(t.requests).toEqual([]);
 		expect(triage.status?.()).toBe("triage");
-		// Back to a failure seen before (an edit was undone): that is a repeat.
+		// Back to a failure seen before (an edit was undone): that is a repeat, and said to be a return.
 		const back = await fail(triage, run(["a", "b"]));
-		expect(back?.text).toContain("this failed again with the same errors as before");
+		expect(back?.text).toContain("this failed with the same errors as an earlier run");
 	});
 
 	it("ignores line numbers, run times and thread ids when comparing failures", async () => {
@@ -329,7 +332,7 @@ describe("triage", () => {
 		expect(third?.text).toContain("2. Cargo builds a stale target");
 		expect(third?.text).not.toContain("ghost");
 		expect(third?.note).toBe("repeat 3 + 2 hypotheses");
-		// Once per signature per task.
+		// Asked once per failure.
 		expect((await fail(triage, draft(RUST_ERROR)))?.note).toBe("repeat 4");
 	});
 

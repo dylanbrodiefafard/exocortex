@@ -1,6 +1,9 @@
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 
+/** The longest triage may hold one tool result for its sidecar calls. */
+const MAX_HOLD_MS = 6_000;
+
 export const SettingsSchema = Type.Object(
 	{
 		/** A first error further down than this many lines is surfaced at the top of the result. */
@@ -23,15 +26,19 @@ export const SettingsSchema = Type.Object(
 		/** Ask a sidecar for a short diagnosis on repeated failures (research R3.1: never on the first). */
 		sidecar: Type.Boolean({ default: true }),
 		maxHintsPerSignature: Type.Integer({ minimum: 0, default: 2 }),
-		/** The hint holds the agent loop: keep the deadline short. */
-		hintTimeoutMs: Type.Integer({ minimum: 500, default: 8_000 }),
+		/**
+		 * The hint holds the agent loop, and the notice it comes with must be back within this module's
+		 * share of the host's time for a rewrite: 20 s among up to three rewriting modules (D-082).
+		 */
+		hintTimeoutMs: Type.Integer({ minimum: 500, maximum: MAX_HOLD_MS, default: MAX_HOLD_MS }),
 		thinking: Type.Boolean({ default: false }),
 		/**
 		 * Phase 6 (D-015, research R6.1): at the loop threshold, this many isolated sidecars each propose
 		 * a cause from a different angle; distinct, grounded ones are listed. 0 = off.
 		 */
 		hypotheses: Type.Integer({ minimum: 0, maximum: 5, default: 0 }),
-		hypothesisTimeoutMs: Type.Integer({ minimum: 500, default: 10_000 }),
+		/** A result is held for the longer of the two timeouts, not their sum: the hint is skipped when the hypotheses used the time. */
+		hypothesisTimeoutMs: Type.Integer({ minimum: 500, maximum: MAX_HOLD_MS, default: MAX_HOLD_MS }),
 		/** Commands whose exit code 1 means "no match" or "differs", not failure. */
 		benignCommands: Type.Array(Type.String({ minLength: 1 }), {
 			default: ["grep", "egrep", "fgrep", "rg", "ag", "diff", "cmp", "test", "[", "which", "pgrep", "git diff"],

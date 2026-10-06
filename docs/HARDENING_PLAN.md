@@ -25,7 +25,7 @@ A read-only audit of every package (2026-10-06) found the weak spots listed here
 | C. Eval: statistics and harness | `fix/eval-rigor` | D-079 | 1 | merged (`e7316f3`) |
 | D. Core: trace, inference, config, processes | `fix/core-infra` | D-080 | 1 | merged (`e5a056c`) |
 | M. Memory | `fix/memory-admission` | D-081 | 2 | in progress |
-| T. Triage | `fix/triage-identity` | D-082 | 2 | in progress |
+| T. Triage | `fix/triage-identity` | D-082 | 2 | merged |
 | R. Trimmer | `fix/trimmer-selection` | D-083 | 2 | in progress |
 | S. Supervisor | `fix/supervisor-evidence` | D-084 | 2 | in progress |
 | K. Compaction | `fix/compaction-facts` | D-085 | 2 | in progress |
@@ -130,12 +130,12 @@ Files owned: `packages/mod-memory/`.
 
 Files owned: `packages/mod-triage/`.
 
-- [ ] **T1. Counts never reset when a failure is fixed.** `triage.ts:138-140`. A regression 40 calls later is told "the edits did not change it". *Fix:* on a passing run of a command, clear the counts, `editedAtFirst`, `hintCalls` and `hypothesized` of the signatures that command last produced.
-- [ ] **T2. Every failed `edit` on a file shares one key.** *Fix:* fold a hash of `oldText` into the key for `edit` failures.
-- [ ] **T3. Any user message wipes everything.** `triage.ts:108-112`. "try again" becomes the goal. *Fix:* do not reset on a user turn; keep the last few user messages within `GOAL_CHARS` as the goal.
-- [ ] **T4. No `onCompacted`.** Hints are gone from context but still deduplicated against. *Fix:* clear `hints`, `hintCalls` and `hypothesized`; keep counts.
-- [ ] **T5. The deterministic notice waits on the sidecar calls.** `triage.ts:157-170`. On overrun the whole rewrite is dropped though the count was incremented. *Fix:* race the sidecar work against `signal` and always return the notice; skip `diagnose` when `hypothesize` used its deadline; cap both timeouts in the schema; commit counts through B4.
-- [ ] **T6. State is lost on reload.** *Fix:* persist counts through B11.
+- [x] **T1. Counts never reset when a failure is fixed.** `triage.ts:138-140`. A regression 40 calls later is told "the edits did not change it". *Fix:* on a passing run of a command, clear the counts, `editedAtFirst`, `hintCalls` and `hypothesized` of the signatures that command last produced.
+- [x] **T2. Every failed `edit` on a file shares one key.** *Fix:* fold a hash of `oldText` into the key for `edit` failures.
+- [x] **T3. Any user message wipes everything.** `triage.ts:108-112`. "try again" becomes the goal. *Fix:* do not reset on a user turn; keep the last few user messages within `GOAL_CHARS` as the goal.
+- [x] **T4. No `onCompacted`.** Hints are gone from context but still deduplicated against. *Fix:* clear `hints`, `hintCalls` and `hypothesized`; keep counts.
+- [x] **T5. The deterministic notice waits on the sidecar calls.** `triage.ts:157-170`. On overrun the whole rewrite is dropped though the count was incremented. *Fix:* race the sidecar work against `signal` and always return the notice; skip `diagnose` when `hypothesize` used its deadline; cap both timeouts in the schema; commit counts through B4.
+- [x] **T6. State is lost on reload.** *Fix:* persist counts through B11.
 
 ## R. Trimmer (wave 2)
 

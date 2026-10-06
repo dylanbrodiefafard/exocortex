@@ -85,7 +85,7 @@
 			"maxHintsPerSignature": 2, // sidecar hints per repeated failure; the second must differ from the first
 			"loopThreshold": 3, // sightings before the stronger "this approach is not working" warning
 			"maskedFailures": true, // `cargo test 2>&1 | tail` exits 0: count it as failed when its output has an error line
-			"hintTimeoutMs": 8000,
+			"hintTimeoutMs": 6000, // at most 6000: the notice must be back within the time the host gives a rewrite
 			"hypotheses": 0, // at the loop threshold, this many parallel sidecars propose causes from different angles
 			"benignCommands": ["grep", "egrep", "fgrep", "rg", "ag", "diff", "cmp", "test", "[", "which", "pgrep", "git diff"] // exit 1 = an answer
 		},

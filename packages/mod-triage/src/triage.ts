@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
 	callKey,
 	cleanTerminalOutput,
@@ -7,23 +8,29 @@ import {
 	fileEdits,
 	firstErrorLine,
 	isBenignExit,
+	type JsonValue,
 	loadPrompt,
 	loopHistoryLength,
 	type ModuleContext,
 	maskedFailure,
+	outcomeOf,
 	SIDECAR_MAX_TOKENS,
+	type ToolOutcome,
 	type ToolResultDraft,
+	type ToolRewrite,
 	trailingLoop,
 	ungroundedReferences,
+	verifyingRun,
 } from "@exocortex/core";
-import { Type } from "typebox";
+import { type Static, Type } from "typebox";
+import { Value } from "typebox/value";
 import { parseSettings, type TriageSettings } from "./settings.ts";
 import { errorSites, renderSites } from "./sites.ts";
 
 export const TRIAGE_ID = "triage";
 
-const DIAGNOSE_PROMPT = loadPrompt(new URL("../prompts/diagnose.v3.md", import.meta.url));
-const HYPOTHESIS_PROMPT = loadPrompt(new URL("../prompts/hypothesis.v2.md", import.meta.url));
+const DIAGNOSE_PROMPT = loadPrompt(new URL("../prompts/diagnose.v4.md", import.meta.url));
+const HYPOTHESIS_PROMPT = loadPrompt(new URL("../prompts/hypothesis.v3.md", import.meta.url));
 /** Diagnostic angles for parallel hypotheses (PlanSearch-style diversity, research R6.1). */
 const FRAMES = loadPrompt(new URL("../prompts/frames.v1.md", import.meta.url))
 	.text.split("\n")
@@ -45,8 +52,12 @@ const DiagnosisSchema = Type.Object({
 
 /** The request is where the expected behaviour is written down: a diagnosis reads most of it. */
 const GOAL_CHARS = 6_000;
+/** The user's latest messages are the goal (D-082): the request, and what they said about it since. */
+const MAX_GOAL_MESSAGES = 6;
+/** An older message is left out when less than this is left for it. */
+const MIN_GOAL_PART = 200;
 const RECENT_COMMANDS = 6;
-/** Edits kept per task, and what the sidecar is shown of the ones a failure outlived. */
+/** Edits kept, and what the sidecar is shown of the ones a failure outlived. */
 const MAX_EDITS = 40;
 const SHOWN_EDITS = 6;
 const EDIT_TEXT_CHARS = 500;
@@ -55,26 +66,85 @@ const EXCERPT_CONTEXT_LINES = 12;
 const EXCERPT_TAIL_LINES = 8;
 const EXCERPT_CHARS = 4_000;
 const MAX_LINE_CHARS = 300;
+/**
+ * Failures and commands remembered at once. No user message ends the counting any more (D-082),
+ * and all of it is saved with the session, so the ones not seen for longest are dropped.
+ */
+const MAX_FAILURES = 64;
+const MAX_COMMANDS = 64;
+/** Commands remembered as having reported one failure. */
+const MAX_FAILURE_COMMANDS = 8;
+/** A sidecar call with less time than this left is not started. */
+const MIN_SIDECAR_MS = 400;
+/** Hints remembered per failure, whatever the cap on calls is set to. */
+const MAX_KEPT_HINTS = 16;
 
-interface TaskState {
-	/** Times each failure was seen, by what it reported ({@link failureKey}). */
-	readonly counts: Map<string, number>;
-	/** Sidecar calls made for hints, per failure (the cap counts calls, shown or not). */
-	readonly hintCalls: Map<string, number>;
-	/** Hints the agent was shown, per failure. */
-	readonly hints: Map<string, string[]>;
+/** What is kept of one failure, by what it reported ({@link failureIdentity}). Saved with the session. */
+const FailureSchema = Type.Object({
+	id: Type.String({ minLength: 1, maxLength: 64 }),
+	/** Times it was seen since it was first seen, or since a command that reported it last passed. */
+	count: Type.Integer({ minimum: 1 }),
+	/** Edits made when its current unbroken run of sightings began: it outlived every later one. */
+	since: Type.Integer({ minimum: 0 }),
+	/** Edits made when it was last seen. */
+	seen: Type.Integer({ minimum: 0 }),
+	/** Its count when the user last spoke: a hand-over is asked for again only after more failures. */
+	atUser: Type.Integer({ minimum: 0 }),
+	/** Sidecar calls made for hints (the cap counts calls, shown or not). */
+	hintCalls: Type.Integer({ minimum: 0 }),
+	/** Hints the agent was shown and that are still in its context. */
+	hints: Type.Array(Type.String({ maxLength: 700 }), { maxItems: MAX_KEPT_HINTS }),
+	/** Whether hypotheses were asked for. */
+	hypothesized: Type.Boolean(),
+	/** The commands that reported it ({@link commandIdentity}). */
+	by: Type.Array(Type.String({ minLength: 1, maxLength: 64 }), { maxItems: MAX_FAILURE_COMMANDS }),
+});
+type Failure = Static<typeof FailureSchema>;
+
+/** What `saveState` is given (T6): enough to go on counting after a reload. Edits' text and loops are not kept. */
+const SavedSchema = Type.Object({
+	v: Type.Literal(1),
+	edited: Type.Integer({ minimum: 0 }),
+	failures: Type.Array(FailureSchema, { maxItems: MAX_FAILURES }),
+	last: Type.Array(Type.Tuple([Type.String({ maxLength: 64 }), Type.String({ maxLength: 64 })]), {
+		maxItems: MAX_COMMANDS,
+	}),
+});
+
+interface State {
+	/** Every failure being counted, the one seen longest ago first. */
+	readonly failures: Map<string, Failure>;
+	/** The failure each command last reported. A failure stands while it is some command's latest. */
+	readonly last: Map<string, string>;
 	readonly recent: string[];
-	readonly hypothesized: Set<string>;
-	/** The task's latest file edits, each with its number in the task. */
+	/** The latest file edits, each with its number in the session. */
 	readonly edits: { readonly seq: number; readonly edit: FileEdit }[];
-	/** Edits made in the task so far. */
+	/** Edits made so far. */
 	edited: number;
-	/** How many edits had been made when each failure was first seen. */
-	readonly editedAtFirst: Map<string, number>;
-	/** Every tool call of the task with its result, oldest first, as far back as a loop can reach. */
-	readonly calls: { readonly key: string; readonly label: string }[];
+	/** Tool calls since the user last spoke, each with its result, as far back as a loop can reach. */
+	calls: { readonly key: string; readonly label: string }[];
 	/** Notices given for the loop the calls now end in: 0 none, 1 the warning, 2 the hand-over. */
 	loopLevel: number;
+}
+
+/** What `onToolResult` made of the latest result; the rewrite speaks only for that one. */
+interface Observation {
+	readonly key: string;
+	readonly sighting: Sighting | undefined;
+}
+
+/** One sighting of a failure. */
+interface Sighting {
+	readonly id: string;
+	readonly count: number;
+	/**
+	 * Whether the failure stood until now: it was the last thing one of its commands reported. If
+	 * not, the command reported other errors in between and these are back.
+	 */
+	readonly standing: boolean;
+	/** The edits numbered above this came between the sightings the notice compares. */
+	readonly editsFrom: number;
+	readonly masked: boolean;
 }
 
 /**
@@ -83,10 +153,19 @@ interface TaskState {
  * grounded two-sentence sidecar diagnosis; past the loop threshold the notice becomes a stronger,
  * still advisory, warning. Never blocks a tool call.
  *
- * A repeat is a failure that reports the same errors as one seen earlier in the task (D-073):
- * fewer failing tests or a different message is a new failure, however alike its first line. The
- * diagnosis reads what the main model is too close to weigh: the request, the code the errors
- * point at, and the edits the failure outlived.
+ * A repeat is a failure that reports the same errors as one seen earlier (D-073): fewer failing
+ * tests or a different message is a new failure, however alike its first line. The diagnosis
+ * reads what the main model is too close to weigh: the request, the code the errors point at, and
+ * the edits the failure outlived.
+ *
+ * What it says is what it can know (D-082):
+ * - A failure is forgotten when a command that reported it passes, so a regression is a first
+ *   failure again. A message from the user does not end anything.
+ * - "The edits made since did not change it" is said only of a failure that stood: one that was
+ *   the last thing its command reported. One that went away and came back is described as that.
+ * - Failures are counted when their results come in. What rests on the model having read
+ *   something (a hint, a loop notice) changes when the host says the rewrite was used.
+ * - Counts are saved with the session; hints are forgotten when a compaction removes them.
  *
  * It also notices going round in circles without an error (D-069): the same call returning the
  * same result, or a short cycle of calls ending the same way each round. One notice when the loop
@@ -95,21 +174,40 @@ interface TaskState {
 export function createTriage(raw: Readonly<Record<string, unknown>>, ctx: ModuleContext): ExoModule {
 	const { settings, problems } = parseSettings(raw);
 	for (const problem of problems) ctx.log(problem);
-	let goal = "";
-	let task: TaskState = newTask();
+	/** The user's latest messages, oldest first. */
+	const asked: string[] = [];
+	const state = restore(ctx.savedState) ?? newState();
+	let observed: Observation | undefined;
+	/** Whether what is saved with the session changed since it was last saved. */
+	let unsaved = false;
 	let repeats = 0;
 	let hintsGiven = 0;
 	let loops = 0;
 	/** Twice the threshold is where a notice becomes the hand-over. */
 	const handOverAt = settings.loopThreshold * 2;
+	/**
+	 * The longest one result is held for sidecar calls, on this module's own clock: the notice must
+	 * be back before the host's deadline, which the pool's timeouts do not promise (their clock
+	 * stops while a call waits for a slot).
+	 */
+	const holdMs = Math.max(settings.hintTimeoutMs, settings.hypothesisTimeoutMs);
 
 	return {
 		id: TRIAGE_ID,
 
 		onUserTurn(turn) {
 			if (turn.origin !== "user") return;
-			goal = startAndEnd(turn.text, GOAL_CHARS);
-			task = newTask();
+			if (turn.text.trim() !== "") asked.push(startAndEnd(turn.text.trim(), GOAL_CHARS));
+			if (asked.length > MAX_GOAL_MESSAGES) asked.shift();
+			// A loop is the agent's own doing: a call the user asked for again is not part of one.
+			state.calls = [];
+			state.loopLevel = 0;
+			for (const failure of state.failures.values()) {
+				if (failure.atUser === failure.count) continue;
+				failure.atUser = failure.count;
+				unsaved = true;
+			}
+			save();
 		},
 
 		onToolResult(tool) {
@@ -119,56 +217,77 @@ export function createTriage(raw: Readonly<Record<string, unknown>>, ctx: Module
 				: isMasked(tool)
 					? "errors in the output (exit code hidden by a pipe)"
 					: "ok";
-			task.recent.push(`${command} → ${outcome}`);
-			if (task.recent.length > RECENT_COMMANDS) task.recent.shift();
+			state.recent.push(`${command} → ${outcome}`);
+			if (state.recent.length > RECENT_COMMANDS) state.recent.shift();
 			for (const edit of fileEdits(tool, EDIT_TEXT_CHARS) ?? []) {
-				task.edited += 1;
-				task.edits.push({ seq: task.edited, edit });
-				if (task.edits.length > MAX_EDITS) task.edits.shift();
+				state.edited += 1;
+				state.edits.push({ seq: state.edited, edit });
+				if (state.edits.length > MAX_EDITS) state.edits.shift();
 			}
-			task.calls.push({ key: callKey(tool.toolName, tool.input, tool.output), label: command });
-			if (task.calls.length > loopHistoryLength(handOverAt)) task.calls.shift();
+			const key = callKey(tool.toolName, tool.input, tool.output);
+			state.calls.push({ key, label: command });
+			if (state.calls.length > loopHistoryLength(handOverAt)) state.calls.shift();
 			// The loop ended: a later one starts over with its first notice.
-			if (!currentLoop()) task.loopLevel = 0;
+			if (!currentLoop()) state.loopLevel = 0;
+			observed = { key, sighting: sightingOf(tool) };
+			save();
 		},
 
 		async rewriteToolResult(draft, signal) {
-			const masked = isMasked(draft);
-			if (!masked && (!isFailure(draft) || isBenign(draft, settings))) return noProgress(draft);
-			// Identity from the original output; position from what the model will see (maybe trimmed).
-			const signature = failureKey(draft);
-			const count = (task.counts.get(signature) ?? 0) + 1;
-			task.counts.set(signature, count);
-			const first = firstErrorLine(draft.output);
-			if (count === 1) {
-				task.editedAtFirst.set(signature, task.edited);
-				return surfaced(draft);
-			}
-			repeats += 1;
-			const outlived = editsSince(signature);
+			// Only the result just counted: its count is what the notice states.
+			if (observed?.key !== callKey(draft.toolName, draft.input, draft.output)) return undefined;
+			const { sighting } = observed;
+			if (!sighting) return noProgress(draft);
+			if (sighting.count === 1) return surfaced(draft);
+			const failure = state.failures.get(sighting.id);
+			const outlived = state.edits.filter((e) => e.seq > sighting.editsFrom).map((e) => e.edit);
 			const notice = repeatNotice({
-				count,
-				errorLine: first?.line,
+				count: sighting.count,
+				sinceUser: sighting.count - (failure?.atUser ?? 0),
+				errorLine: firstErrorLine(draft.output)?.line,
 				edited: [...new Set(outlived.map((e) => e.path))],
-				masked,
+				standing: sighting.standing,
+				masked: sighting.masked,
 				loopThreshold: settings.loopThreshold,
 				handOverAt,
 			});
-			const evidence = evidenceFor(count, draft, outlived, masked);
-			const hypotheses = count >= settings.loopThreshold ? await hypothesize(signature, evidence, signal) : undefined;
-			if (hypotheses) {
+			const text = `${draft.current}\n${notice}`;
+			const advice = failure && (await advise(failure, sighting, draft, outlived, signal));
+			save();
+			if (advice?.hypotheses) {
 				return {
-					text: `${draft.current}\n${notice}\n${renderHypotheses(hypotheses)}`,
-					note: `repeat ${count} + ${hypotheses.length} hypotheses`,
+					text: `${text}\n${renderHypotheses(advice.hypotheses)}`,
+					note: `repeat ${sighting.count} + ${advice.hypotheses.length} hypotheses`,
 				};
 			}
-			const hint = await diagnose(signature, evidence, signal);
-			if (hint) hintsGiven += 1;
+			const hint = advice?.hint;
+			if (!failure || !hint) return { text, note: `repeat ${sighting.count}` };
 			return {
-				text: `${draft.current}\n${notice}${hint ? `\n[exo triage hint: ${hint}]` : ""}`,
+				text: `${text}\n[exo triage hint: ${hint}]`,
 				// The eval report reads "+ hint" to follow each hint's outcome (D-057).
-				note: `repeat ${count}${hint ? " + hint" : ""}`,
+				note: `repeat ${sighting.count} + hint`,
+				// A hint counts as given, and is one not to repeat, once the model has it.
+				commit: () => {
+					hintsGiven += 1;
+					failure.hints = [...failure.hints, hint].slice(-MAX_KEPT_HINTS);
+					unsaved = true;
+					save();
+				},
 			};
+		},
+
+		onCompacted() {
+			// Hints, hypotheses and loop notices were in the span that is gone: there is nothing left
+			// to repeat. The failures are still failing, so the counts stay.
+			state.loopLevel = 0;
+			for (const failure of state.failures.values()) {
+				if (failure.hints.length === 0 && failure.hintCalls === 0 && !failure.hypothesized) continue;
+				failure.hints = [];
+				failure.hintCalls = 0;
+				failure.hypothesized = false;
+				unsaved = true;
+			}
+			save();
 		},
 
 		status() {
@@ -177,10 +296,65 @@ export function createTriage(raw: Readonly<Record<string, unknown>>, ctx: Module
 		},
 	};
 
+	/** Keeps the counts with the session (T6), when they changed. */
+	function save(): void {
+		if (!unsaved) return;
+		unsaved = false;
+		ctx.saveState({
+			v: 1,
+			edited: state.edited,
+			failures: [...state.failures.values()].map((f) => ({ ...f, hints: [...f.hints], by: [...f.by] })),
+			last: [...state.last],
+		});
+	}
+
+	/**
+	 * Counts a failing result, and forgets what a passing one shows to be fixed. Done here and not
+	 * in the rewrite: a failure happened whether or not the host had time to ask for a notice.
+	 */
+	function sightingOf(tool: ToolOutcome): Sighting | undefined {
+		const masked = isMasked(tool);
+		const command = commandIdentity(tool);
+		if (!masked && (!isFailure(tool) || isBenign(tool, settings))) {
+			// An exit code a pipe hid, and a benign exit 1, say nothing either way.
+			if (!isFailure(tool) && outcomeOf(tool) === "passed") forget(command);
+			return undefined;
+		}
+		const id = failureIdentity(tool);
+		const known = state.failures.get(id);
+		const standing = known?.by.some((c) => state.last.get(c) === id) ?? false;
+		const now = state.edited;
+		const failure: Failure = known
+			? { ...known, count: known.count + 1, since: standing ? known.since : now, seen: now }
+			: { id, count: 1, since: now, seen: now, atUser: 0, hintCalls: 0, hints: [], hypothesized: false, by: [] };
+		if (!failure.by.includes(command)) failure.by = [...failure.by, command].slice(-MAX_FAILURE_COMMANDS);
+		// Newest last, so the ones dropped are the ones not seen for longest.
+		state.failures.delete(id);
+		state.failures.set(id, failure);
+		state.last.delete(command);
+		state.last.set(command, id);
+		dropOldest(state.failures, MAX_FAILURES);
+		dropOldest(state.last, MAX_COMMANDS);
+		unsaved = true;
+		if (!known) return { id, count: 1, standing: true, editsFrom: now, masked };
+		repeats += 1;
+		return { id, count: failure.count, standing, editsFrom: standing ? known.since : known.seen, masked };
+	}
+
+	/** The command passed (T1): what it reported is fixed, and seeing it again is a new failure. */
+	function forget(command: string): void {
+		if (state.last.delete(command)) unsaved = true;
+		for (const [id, failure] of state.failures) {
+			if (!failure.by.includes(command)) continue;
+			state.failures.delete(id);
+			unsaved = true;
+		}
+	}
+
 	function currentLoop() {
 		return settings.loops
 			? trailingLoop(
-					task.calls.map((c) => c.key),
+					state.calls.map((c) => c.key),
 					settings.loopThreshold,
 				)
 			: undefined;
@@ -190,18 +364,20 @@ export function createTriage(raw: Readonly<Record<string, unknown>>, ctx: Module
 	 * A result that is not a failure, at the end of a loop: says so once, and once more at twice the
 	 * threshold. Failures in a loop get their own notice above, so the level only rises here.
 	 */
-	function noProgress(draft: ToolResultDraft) {
+	function noProgress(draft: ToolResultDraft): ToolRewrite | undefined {
 		const loop = currentLoop();
-		// Results can arrive out of order when calls ran in parallel: only speak for the latest.
-		if (!loop || task.calls.at(-1)?.key !== callKey(draft.toolName, draft.input, draft.output)) return undefined;
+		if (!loop) return undefined;
 		const level = loop.repeats >= handOverAt ? 2 : 1;
-		if (level <= task.loopLevel) return undefined;
-		task.loopLevel = level;
-		loops += 1;
-		const cycle = task.calls.slice(-loop.period).map((c) => c.label);
+		if (level <= state.loopLevel) return undefined;
+		const cycle = state.calls.slice(-loop.period).map((c) => c.label);
 		return {
 			text: `${draft.current}\n${loopNotice(loop.repeats, cycle, level === 2)}`,
 			note: `no progress ×${loop.repeats}${loop.period > 1 ? ` (cycle of ${loop.period})` : ""}`,
+			// Each level is said once, and it has been said when the model has it.
+			commit: () => {
+				state.loopLevel = Math.max(state.loopLevel, level);
+				loops += 1;
+			},
 		};
 	}
 
@@ -219,48 +395,107 @@ export function createTriage(raw: Readonly<Record<string, unknown>>, ctx: Module
 		return settings.maskedFailures && maskedFailure(tool);
 	}
 
-	/** The edits made since this failure was first seen: it outlived every one of them. */
-	function editsSince(signature: string): FileEdit[] {
-		const from = task.editedAtFirst.get(signature) ?? task.edited;
-		return task.edits.filter((e) => e.seq > from).map((e) => e.edit);
+	/** The user's latest messages within {@link GOAL_CHARS}, the newest given the most room. */
+	function goal(): string {
+		const parts: string[] = [];
+		let left = GOAL_CHARS;
+		for (let i = asked.length - 1; i >= 0; i--) {
+			// Two thirds of what is left, so there is always room for what was said before.
+			const share = i > 0 ? Math.ceil((left * 2) / 3) : left;
+			if (parts.length > 0 && share < MIN_GOAL_PART) break;
+			const part = startAndEnd(asked[i] ?? "", share);
+			parts.unshift(part);
+			left -= part.length;
+		}
+		return parts.length > 1 ? parts.map((part, i) => `[${i + 1}] ${part}`).join("\n\n") : (parts[0] ?? "");
 	}
 
 	/** What a sidecar is given to read, and the text its answer is checked against. */
-	function evidenceFor(count: number, draft: ToolResultDraft, outlived: readonly FileEdit[], masked: boolean) {
+	function evidenceFor(sighting: Sighting, draft: ToolResultDraft, outlived: readonly FileEdit[]) {
 		const excerpt = errorExcerpt(draft.output);
+		const request = goal();
 		const vars = {
-			count: String(count),
-			goal: goal || "(unknown)",
-			recent: task.recent.map((r) => `- ${r}`).join("\n") || "(none)",
+			history: sighting.standing
+				? `the command below has now reported the same errors ${sighting.count} times, with nothing else reported in between: whatever was changed since did not change them.`
+				: `the command below has reported the same errors ${sighting.count} times, but not in a row: it reported something else in between, and now these errors are back.`,
+			edits_heading: sighting.standing
+				? "Edits made since this run of the same failure began (it failed the same way after them)"
+				: "Edits made since this failure was last seen (something else was reported in between, then these errors again)",
+			goal: request || "(unknown)",
+			recent: state.recent.map((r) => `- ${r}`).join("\n") || "(none)",
 			command: commandOf(draft.input, draft.toolName),
-			exit_code: masked ? "hidden by a pipe" : draft.exitCode === null ? "unknown" : String(draft.exitCode),
+			exit_code: sighting.masked ? "hidden by a pipe" : draft.exitCode === null ? "unknown" : String(draft.exitCode),
 			excerpt,
 			edits: renderEdits(outlived),
 			code:
 				renderSites(errorSites(excerpt, ctx.cwd, MAX_SITES), ctx.cwd) ||
 				"(the output names no line in a file of this workspace)",
 		};
-		return { vars, text: `${draft.output}\n${goal}\n${task.recent.join("\n")}\n${vars.edits}\n${vars.code}` };
+		return { vars, text: `${draft.output}\n${request}\n${state.recent.join("\n")}\n${vars.edits}\n${vars.code}` };
 	}
 
 	type Evidence = ReturnType<typeof evidenceFor>;
+
+	/**
+	 * The sidecar's part of a notice: hypotheses at the loop threshold, else a hint. It answers by
+	 * {@link holdMs} or the host's signal at the latest (T5) and never rejects, since the notice
+	 * does not depend on it. A call still running then is cancelled and its answer dropped.
+	 */
+	async function advise(
+		failure: Failure,
+		sighting: Sighting,
+		draft: ToolResultDraft,
+		outlived: readonly FileEdit[],
+		signal: AbortSignal,
+	): Promise<{ readonly hypotheses?: Hypothesis[]; readonly hint?: string } | undefined> {
+		if (signal.aborted || !ctx.pool() || (!settings.sidecar && settings.hypotheses === 0)) return undefined;
+		const deadline = Date.now() + holdMs;
+		const left = () => deadline - Date.now();
+		const hold = new AbortController();
+		const work = async () => {
+			const evidence = evidenceFor(sighting, draft, outlived);
+			const hypotheses =
+				sighting.count >= settings.loopThreshold ? await hypothesize(failure, evidence, hold.signal, left) : undefined;
+			if (hypotheses) return { hypotheses };
+			const hint = await diagnose(failure, evidence, hold.signal, left);
+			return hint === undefined ? undefined : { hint };
+		};
+		const report = (error: unknown) => {
+			ctx.log(`sidecar advice failed: ${String(error)}`);
+			return undefined;
+		};
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const stopped = new Promise<undefined>((resolve) => {
+			timer = setTimeout(() => resolve(undefined), holdMs);
+			signal.addEventListener("abort", () => resolve(undefined), { once: true });
+		});
+		try {
+			// Caught on the work itself: it may fail after the wait for it is over.
+			return await Promise.race([work().catch(report), stopped]);
+		} finally {
+			clearTimeout(timer);
+			hold.abort();
+		}
+	}
 
 	/**
 	 * Phase 6 (D-015): K isolated sidecars, each from a different angle, in parallel. Only distinct,
 	 * grounded hypotheses that name a check are kept, and only a list of 2+ is shown: no LLM picks a
 	 * winner (research R6.1).
 	 */
-	async function hypothesize(signature: string, evidence: Evidence, signal: AbortSignal) {
+	async function hypothesize(failure: Failure, evidence: Evidence, signal: AbortSignal, left: () => number) {
 		const pool = ctx.pool();
-		if (settings.hypotheses === 0 || !pool || task.hypothesized.has(signature)) return undefined;
-		task.hypothesized.add(signature);
+		if (settings.hypotheses === 0 || !pool || failure.hypothesized) return undefined;
+		// Asked once, shown or not: it is several calls each time.
+		failure.hypothesized = true;
+		unsaved = true;
 		ctx.progress("Considering other causes of the repeated failure…");
 		const results = await Promise.all(
 			FRAMES.slice(0, settings.hypotheses).map((frame) =>
 				pool.run({
 					module: TRIAGE_ID,
 					priority: "interactive",
-					timeoutMs: settings.hypothesisTimeoutMs,
+					timeoutMs: Math.min(settings.hypothesisTimeoutMs, left()),
 					signal,
 					schema: HypothesisSchema,
 					schemaName: "hypothesis",
@@ -286,17 +521,19 @@ export function createTriage(raw: Readonly<Record<string, unknown>>, ctx: Module
 		return distinct.length >= 2 ? distinct : undefined;
 	}
 
-	async function diagnose(signature: string, evidence: Evidence, signal: AbortSignal) {
-		const calls = task.hintCalls.get(signature) ?? 0;
+	async function diagnose(failure: Failure, evidence: Evidence, signal: AbortSignal, left: () => number) {
 		const pool = ctx.pool();
-		if (!settings.sidecar || !pool || calls >= settings.maxHintsPerSignature) return undefined;
-		task.hintCalls.set(signature, calls + 1);
-		const earlier = task.hints.get(signature) ?? [];
+		if (!settings.sidecar || !pool || failure.hintCalls >= settings.maxHintsPerSignature) return undefined;
+		// The hypotheses used the time: the notice goes without a hint, and no call is spent on one.
+		if (signal.aborted || left() < MIN_SIDECAR_MS) return undefined;
+		failure.hintCalls += 1;
+		unsaved = true;
+		const earlier = [...failure.hints];
 		ctx.progress("Diagnosing the repeated failure…");
 		const result = await pool.run({
 			module: TRIAGE_ID,
 			priority: "interactive",
-			timeoutMs: settings.hintTimeoutMs,
+			timeoutMs: Math.min(settings.hintTimeoutMs, left()),
 			signal,
 			schema: DiagnosisSchema,
 			schemaName: "diagnosis",
@@ -333,9 +570,7 @@ export function createTriage(raw: Readonly<Record<string, unknown>>, ctx: Module
 			ctx.log("dropped a hint that repeats an earlier one");
 			return undefined;
 		}
-		const shown = clip(hint, 600);
-		task.hints.set(signature, [...earlier, shown]);
-		return shown;
+		return clip(hint, 600);
 	}
 }
 
@@ -377,19 +612,61 @@ function similarity(a: ReadonlySet<string>, b: ReadonlySet<string>): number {
 	return union === 0 ? 1 : shared / union;
 }
 
-function newTask(): TaskState {
+function newState(): State {
+	return { failures: new Map(), last: new Map(), recent: [], edits: [], edited: 0, calls: [], loopLevel: 0 };
+}
+
+/** The state an earlier instance saved, if it is one this version wrote. */
+function restore(saved: JsonValue | undefined): State | undefined {
+	if (saved === undefined || !Value.Check(SavedSchema, saved)) return undefined;
 	return {
-		counts: new Map(),
-		hintCalls: new Map(),
-		hints: new Map(),
-		recent: [],
-		hypothesized: new Set(),
-		edits: [],
-		edited: 0,
-		editedAtFirst: new Map(),
-		calls: [],
-		loopLevel: 0,
+		...newState(),
+		edited: saved.edited,
+		failures: new Map(saved.failures.map((f) => [f.id, { ...f, hints: [...f.hints], by: [...f.by] }])),
+		last: new Map(saved.last),
 	};
+}
+
+function dropOldest(map: Map<string, unknown>, max: number): void {
+	for (const key of map.keys()) {
+		if (map.size <= max) return;
+		map.delete(key);
+	}
+}
+
+function digest(text: string): string {
+	return createHash("sha256").update(text).digest("hex").slice(0, 32);
+}
+
+/**
+ * What a failing call reported: core's {@link failureKey}, and for a failed `edit` also the text it
+ * looked for (T2). The tool's message names only the file, so without this every failed edit to a
+ * file would be the same failure, whatever was tried.
+ */
+function failureIdentity(tool: Pick<ToolOutcome, "toolName" | "input" | "output">): string {
+	const key = failureKey(tool);
+	if (tool.toolName !== "edit") return key;
+	const edits = tool.input["edits"];
+	const sought = [tool.input["oldText"], ...(Array.isArray(edits) ? edits.map(oldTextOf) : [])].filter(
+		(text) => typeof text === "string",
+	);
+	return sought.length > 0 ? digest(`${key}\n${JSON.stringify(sought)}`) : key;
+}
+
+function oldTextOf(edit: unknown): unknown {
+	return typeof edit === "object" && edit !== null ? (edit as { oldText?: unknown }).oldText : undefined;
+}
+
+/**
+ * Names what was run, so a later pass can be matched to an earlier failure: a test or build run
+ * by the run itself (`cd x && cargo test 2>&1 | tail` is `cargo test`), another shell command by
+ * its text, a file tool by its path, any other tool by its name.
+ */
+function commandIdentity(tool: Pick<ToolOutcome, "toolName" | "input">): string {
+	const command = tool.input["command"];
+	if (typeof command === "string") return digest(verifyingRun(command)?.bare ?? command.replace(/\s+/g, " ").trim());
+	const path = tool.input["path"] ?? tool.input["file_path"];
+	return digest(typeof path === "string" ? `${tool.toolName} ${path}` : tool.toolName);
 }
 
 function isFailure(tool: Pick<ToolResultDraft, "isError" | "exitCode">): boolean {
@@ -428,35 +705,44 @@ function commandOf(input: ToolResultDraft["input"], toolName: string): string {
 
 /**
  * Describes the repeat at runtime instead of echoing the failed call back (research R3.3), and
- * escalates at the loop threshold (R3.4). It says what is known: the errors are the ones reported
- * before, and which edited files they outlived.
+ * escalates at the loop threshold (R3.4). It says what is known and no more (D-082): that edits
+ * "did not change it" only of a failure that stood through them.
  */
 function repeatNotice(repeat: {
 	readonly count: number;
+	/** How many of those came since the user last spoke. */
+	readonly sinceUser: number;
 	readonly errorLine: string | undefined;
-	/** Files edited since the failure was first seen. */
+	/** Files edited between the sightings compared. */
 	readonly edited: readonly string[];
+	readonly standing: boolean;
 	readonly masked: boolean;
 	readonly loopThreshold: number;
 	readonly handOverAt: number;
 }): string {
-	const { count, errorLine } = repeat;
-	const same = errorLine ? ` with the same errors as before (first: ${clip(errorLine)})` : " the same way as before";
+	const { count, errorLine, standing } = repeat;
+	const earlier = standing ? "as before" : "as an earlier run";
+	const between = standing ? "" : ", after other results in between";
+	const same = `${errorLine ? ` with the same errors ${earlier} (first: ${clip(errorLine)})` : ` the same way ${earlier}`}${between}`;
 	const pipe = repeat.masked ? " The exit code shown is the pipe's last command's, not this run's." : "";
 	const edits =
-		repeat.edited.length > 0
+		standing && repeat.edited.length > 0
 			? ` The edits made since (${repeat.edited
 					.slice(0, 4)
 					.map((p) => clip(p, 80))
 					.join(", ")}${repeat.edited.length > 4 ? ", …" : ""}) did not change it.`
 			: "";
-	if (count >= repeat.handOverAt) {
+	// The user answers a hand-over by speaking: it is asked for again only if the failures go on.
+	if (count >= repeat.handOverAt && repeat.sinceUser >= repeat.loopThreshold) {
 		return `[exo triage: this has now failed ${count} times${same}.${pipe}${edits} ${HAND_OVER}]`;
 	}
 	if (count >= repeat.loopThreshold) {
 		return `[exo triage: this has now failed ${count} times${same}.${pipe}${edits} The current approach is not working: stop retrying it, re-read the code around the error and question the assumption behind the last changes before the next attempt.]`;
 	}
-	return `[exo triage: this failed again${same}; it is the ${ordinal(count)} time this task.${pipe}${edits} Repeating the same fix is unlikely to help: change something first.]`;
+	const advice = standing
+		? "Repeating the same fix is unlikely to help: change something first."
+		: "It went away and came back: look at what the last changes undid before trying an earlier fix again.";
+	return `[exo triage: this failed${standing ? " again" : ""}${same}; it has now failed this way ${count} times.${pipe}${edits} ${advice}]`;
 }
 
 /** What a loop that survived its first warning is told: the agent cannot be stopped (D-010), so it is asked to stop. */
@@ -499,11 +785,6 @@ function startAndEnd(text: string, max: number): string {
 	if (text.length <= max) return text;
 	const head = Math.floor((max * 2) / 3);
 	return `${text.slice(0, head)}\n[…]\n${text.slice(text.length - (max - head))}`;
-}
-
-function ordinal(n: number): string {
-	const suffix = n % 100 >= 11 && n % 100 <= 13 ? "th" : (["th", "st", "nd", "rd"][n % 10] ?? "th");
-	return `${n}${suffix}`;
 }
 
 function clip(text: string, max = 200): string {
