@@ -1,12 +1,21 @@
+import "./home-guard.ts";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { errorSignature, runShellCommand, type ToolOutcome, type UserTurnContext } from "@exocortex/core";
+import {
+	type ExoModule,
+	errorSignature,
+	runShellCommand,
+	type ToolOutcome,
+	type UserTurnContext,
+} from "@exocortex/core";
 import { createTestModuleContext, type SidecarReply } from "@exocortex/testkit";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { cardDetail, detailShare, FAILURE_DETAIL_LINES, failureDetail } from "../src/detail.ts";
 import { commandKey, createEpisodeTracker } from "../src/episodes.ts";
-import { createMemory, deterministicLesson, recall } from "../src/memory.ts";
+import { deterministicLesson } from "../src/learn.ts";
+import { createMemory } from "../src/memory.ts";
+import { recall } from "../src/recall.ts";
 import { openMemoryStore } from "../src/store.ts";
 
 let dir: string;
@@ -61,13 +70,27 @@ function draft(tool: ToolOutcome) {
 
 type Embed = (texts: readonly string[]) => number[][] | undefined;
 
+let sessions = 0;
+
+/** One module instance in a harness session of its own, as a later `pi` run would be. */
 function setup(settings: Record<string, unknown> = {}, reply?: (prompt: string) => SidecarReply, embed?: Embed) {
 	const t = createTestModuleContext({
 		cwd: dir,
+		sessionId: `session-${++sessions}`,
 		...(reply ? { reply: (r) => reply(String(r.messages[0]?.["content"])) } : {}),
 		...(embed ? { embed } : {}),
 	});
-	return { t, memory: createMemory({ dbPath, ...settings }, t.context) };
+	const built = createMemory({ dbPath, ...settings }, t.context);
+	const memory: ExoModule = {
+		...built,
+		// A rewrite is taken as shown to the agent: the host commits what it hands to the harness (D-078).
+		rewriteToolResult: async (tool, signal) => {
+			const rewrite = await built.rewriteToolResult?.(tool, signal);
+			rewrite?.commit?.();
+			return rewrite;
+		},
+	};
+	return { t, memory };
 }
 
 async function until(predicate: () => boolean) {
@@ -76,7 +99,7 @@ async function until(predicate: () => boolean) {
 
 describe("episode tracker", () => {
 	it("emits a fix only for fail → edit → pass of the same command", () => {
-		const tracker = createEpisodeTracker();
+		const tracker = createEpisodeTracker({ cwd: dir, minDetail: 0.6 });
 		expect(tracker.observe(fail())).toEqual([]);
 		expect(tracker.observe(edit)).toEqual([]);
 		expect(tracker.observe(pass("cargo test"))).toEqual([]);
@@ -99,7 +122,7 @@ describe("episode tracker", () => {
 	});
 
 	it("ignores passes without edits and non-verifying commands", () => {
-		const tracker = createEpisodeTracker();
+		const tracker = createEpisodeTracker({ cwd: dir, minDetail: 0.6 });
 		tracker.observe(fail());
 		expect(tracker.observe(pass())).toEqual([]);
 		tracker.observe(fail("grep -r foo .", "error: nope"));
@@ -116,7 +139,7 @@ describe("episode tracker", () => {
 	});
 
 	it("keeps the first error when the error changes, and gives an episode for it and for the last (D-072)", () => {
-		const tracker = createEpisodeTracker();
+		const tracker = createEpisodeTracker({ cwd: dir, minDetail: 0.6 });
 		const other = { ...edit, input: { path: "b.rs", edits: [{ oldText: "a", newText: "b" }] } };
 		tracker.observe(fail());
 		tracker.observe(edit);
@@ -134,7 +157,7 @@ describe("episode tracker", () => {
 	});
 
 	it("does not keep an error that went away with nothing edited", () => {
-		const tracker = createEpisodeTracker();
+		const tracker = createEpisodeTracker({ cwd: dir, minDetail: 0.6 });
 		tracker.observe(fail());
 		tracker.observe(fail("cargo build", "error[E0308]: mismatched types"));
 		tracker.observe(edit);
@@ -254,10 +277,11 @@ describe("memory module", () => {
 		await new Promise((r) => setTimeout(r, 50));
 		const settle = { outcome: "completed", lastAssistantText: "" } as const;
 
-		// One more failure, then the command passes: the card helped.
+		// One more failure, an edit where the card pointed, then the command passes: the card helped.
 		const helped = setup();
 		await helped.memory.rewriteToolResult?.(draft(fail()), signal);
 		helped.memory.onToolResult?.(fail());
+		helped.memory.onToolResult?.(edit);
 		helped.memory.onToolResult?.(pass());
 		await helped.memory.onSettle?.(settle, signal);
 		expect(helped.t.records.at(-1)?.data).toMatchObject({ action: "credited", outcome: "helped" });
@@ -329,10 +353,10 @@ describe("memory module", () => {
 		const output = "ModuleNotFoundError: No module named 'yaml'";
 		const signature = errorSignature("bash", 1, output);
 		const base = { signature, detail: cardDetail(output), files: ["setup.cfg"], trigger: output, evidence: "{}" };
-		store.add({ ...base, scope: "repo-a", lesson: "Install pyyaml." });
+		store.add({ ...base, scope: "repo-a", lesson: "Install pyyaml.", distilled: true });
 		const settings = { maxCards: 2, minOverlap: 0.6, minDetail: 0.6 };
 		expect(recall(store, "repo-z", signature, output, settings)).toEqual([]);
-		store.add({ ...base, scope: "repo-b", lesson: "Add pyyaml to the dev requirements." });
+		store.add({ ...base, scope: "repo-b", lesson: "Add pyyaml to the dev requirements.", distilled: true });
 		expect(recall(store, "repo-z", signature, output, settings).map((r) => r.match)).toEqual([
 			"elsewhere",
 			"elsewhere",
@@ -414,6 +438,18 @@ describe("memory module", () => {
 		expect(await setup().memory.rewriteToolResult?.(draft(pass()), signal)).toBeUndefined();
 	});
 
+	it("keeps the valid settings beside an invalid one, the store's path above all", async () => {
+		const { t, memory } = setup({ maxCards: 99, distill: false, minDetail: "high" }, () => new Error("not asked"));
+		expect(t.logs.filter((l) => l.startsWith("memory /"))).toHaveLength(2);
+		memory.onToolResult?.(fail());
+		memory.onToolResult?.(edit);
+		memory.onToolResult?.(pass());
+		await until(() => t.records.length > 0);
+		// Learned into the store the settings named, without a sidecar as they said.
+		expect(openMemoryStore(dbPath).cards()).toHaveLength(1);
+		expect(t.requests).toEqual([]);
+	});
+
 	it("reports invalid settings", () => {
 		const { t } = setup({ maxCards: 99 });
 		expect(t.logs.some((l) => l.startsWith("memory /maxCards"))).toBe(true);
@@ -429,6 +465,7 @@ describe("deterministicLesson", () => {
 				signature: "s",
 				errorLine: "e",
 				detail: [],
+				shell: [],
 				steps: [
 					{ ...step, edits: [{ path: "a.cpp", before: "int y", after: "short y" }] },
 					{ ...step, edits: [{ path: "b.cpp", before: "int x", after: "long x" }] },
@@ -540,6 +577,7 @@ describe("preferences (D-060)", () => {
 	});
 
 	it("lists and forgets preferences on command", async () => {
+		expect(setup().memory.command?.("preferences")).toBe("Preference learning is off (memory.preferences).");
 		const { memory } = await session(
 			"I prefer small commits with one change each.",
 			proposal({ rule: "Keep each commit to one change.", quote: "I prefer small commits with one change each" }),
@@ -551,10 +589,9 @@ describe("preferences (D-060)", () => {
 		expect(memory.command?.("forget 7")).toBe("No preference 7.");
 		expect(memory.command?.("forget 1")).toContain("Forgot preference 1.");
 		expect(memory.command?.("preferences")).toBe(
-			"No preferences learned yet. /exo memory interview asks a few questions to start from.",
+			"No live preferences.\nRetired lately (/exo memory restore <id> brings one back):\n1. Keep each commit to one change. (retired by you)",
 		);
 		expect(memory.command?.("on")).toBeUndefined();
-		expect(setup().memory.command?.("preferences")).toBe("Preference learning is off (memory.preferences).");
 	});
 
 	it("is off by default, skips short messages and survives a failing sidecar", async () => {

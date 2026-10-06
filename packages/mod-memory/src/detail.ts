@@ -1,4 +1,4 @@
-import { classifyErrorLine, cleanTerminalOutput } from "@exocortex/core";
+import { cleanTerminalOutput, lineVerdicts } from "@exocortex/core";
 
 /**
  * Names that say nothing about which problem it was: what every failure of a kind prints, and
@@ -22,7 +22,7 @@ export const FAILURE_DETAIL_LINES = 80;
 const MAX_CARD_WORDS = 24;
 
 /**
- * The names a failing output mentions in its first `maxLines` error lines (D-072): quoted text,
+ * The names a failing output mentions in its first `maxLines` failure lines (D-072): quoted text,
  * dotted or `::` paths (`tests.test_cli.DueDateTest`, `render.rs`) and identifier-like tokens.
  * An error signature normalizes most of these away so that one failure matches across attempts;
  * they are what tells two failures of the same kind apart. Plain words of the message are left
@@ -30,7 +30,10 @@ const MAX_CARD_WORDS = 24;
  */
 export function failureDetail(output: string, maxLines: number): string[] {
 	const lines = cleanTerminalOutput(output).split("\n");
-	const kinds = lines.map((line) => classifyErrorLine(line) ?? classifyErrorLine(line.trim()));
+	// The lines that say the run failed (D-077), which are the ones the signature is read from. A
+	// line a toolchain prints beside an error (a log line, a linker note) names things the problem
+	// is not about.
+	const kinds = lineVerdicts(lines).map((verdict) => (verdict === "mention" ? "generic" : verdict && "specific"));
 	const wanted = kinds.includes("specific") ? "specific" : "generic";
 	const names = new Set<string>();
 	const add = (text: string) => {

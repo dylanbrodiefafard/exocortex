@@ -1,3 +1,4 @@
+import "./home-guard.ts";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -45,8 +46,11 @@ function user(answers: readonly (string | undefined)[]) {
 	return { dialog, asked, notices };
 }
 
+let sessions = 0;
+
+/** One module instance in a harness session of its own. */
 function setup(settings: Record<string, unknown> = { preferences: true }, reply?: () => SidecarReply) {
-	const t = createTestModuleContext({ cwd: dir, ...(reply ? { reply } : {}) });
+	const t = createTestModuleContext({ cwd: dir, sessionId: `interview-${++sessions}`, ...(reply ? { reply } : {}) });
 	return { t, memory: createMemory({ dbPath, ...settings }, t.context) };
 }
 

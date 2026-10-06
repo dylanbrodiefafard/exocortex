@@ -94,11 +94,11 @@ When pi compacts the conversation, a sidecar writes a structured handover (objec
 
 Memory learns two kinds of things, and neither needs the agent to do anything.
 
-**Fixes.** When a build or test command fails, the agent edits files and the same command then passes, memory saves a short lesson about that fix for this repo. The next time the same problem appears (the same kind of error naming the same tests or symbols), even in a later session, the lesson is added to the failing output as a past fix to check against the current code. Lessons that keep failing to help are retired automatically.
+**Fixes.** When a build or test command fails, the agent edits files and the same command then passes, memory saves a short lesson about that fix for this repo. It saves nothing when the edits cannot be the fix: only tests were changed, a test was skipped or lost an assertion, or a shell command changed files on the way (a checkout, an install, a formatter). With a sidecar model, the sidecar must also find that the edits explain the pass. The next time the same problem appears (the same kind of error naming the same tests or symbols), even in a later session, the lesson is added to the failing output as a past fix to check against the current code. Lessons that keep failing to help are retired automatically, and a lesson is replaced when its problem is later fixed through other files. `/exo memory cards` lists this repo's lessons and `/exo memory forget card <id>` removes one.
 
 **Preferences** (`"preferences": true`). It reads only what you type. Say something as a standing rule ("always write the failing test first"), or give the same instruction in two sessions, and it becomes a preference. Later prompts that leave it unsaid get it added as a short visible note; your prompt wins on any conflict. It also learns what you expect of one kind of task from your corrections: tell the agent "don't refactor the code around it when you fix a bug" in two sessions, and later bug-fix prompts get "For bug fixes: Do not refactor nearby code."
 
-`/exo memory interview` gets a new install started with eight multiple-choice questions and one open one, about a minute in total. `/exo memory preferences` lists what has been learned, and `/exo memory forget <id>` removes one.
+`/exo memory interview` gets a new install started with eight multiple-choice questions and one open one, about a minute in total. `/exo memory preferences` lists what has been learned, and `/exo memory forget <id>` removes one. When the model reads one of your messages as withdrawing a preference, you are told, and `/exo memory restore <id>` brings it back.
 
 ## Quick start
 
@@ -168,6 +168,9 @@ Everything is controlled from pi with the `/exo` command. Toggles last for the c
 | `/exo supervisor suggest\|auto` | Draft the follow-up in your editor, or send it automatically |
 | `/exo memory preferences` | List learned preferences |
 | `/exo memory forget <id>` | Remove a preference |
+| `/exo memory restore <id>` | Bring back a removed preference |
+| `/exo memory cards` | List the lessons saved for this repo |
+| `/exo memory forget card <id>` | Remove a lesson |
 | `/exo memory interview` | Answer a few questions to seed your preferences |
 
 ## Configuration

@@ -1,3 +1,4 @@
+import "./home-guard.ts";
 import { describe, expect, it } from "vitest";
 import {
 	activePreferences,

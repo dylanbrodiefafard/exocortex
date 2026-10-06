@@ -1,7 +1,8 @@
-import { mkdirSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, renameSync } from "node:fs";
 import { dirname } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { decodeVector, encodeVector, openDatabase } from "@exocortex/core";
+import { normalizeScope } from "./scope.ts";
 
 /**
  * One problem and the fix that was verified for it (brief §6.4, D-072). Phase 5 v1 stores only
@@ -21,6 +22,11 @@ export interface Card {
 	/** The error line it was learned from (full-text retrieval). */
 	readonly trigger: string;
 	readonly lesson: string;
+	/**
+	 * A sidecar wrote the lesson and found the fix worth keeping. Otherwise it is the deterministic
+	 * summary, which quotes the edit: it is never shown in another repo.
+	 */
+	readonly distilled: boolean;
 	/** Trace references and the fix, for audit. */
 	readonly evidence: string;
 	readonly seen: number;
@@ -40,19 +46,44 @@ export interface NewCard {
 	readonly trigger: string;
 	readonly lesson: string;
 	readonly evidence: string;
+	readonly distilled?: boolean;
+}
+
+/** Who retired a preference: the user's `forget`, a later interview answer, or a sidecar's reading of a message. */
+export type RetiredBy = "user" | "interview" | "model";
+
+interface RetiredPreference {
+	readonly id: number;
+	readonly rule: string;
+	readonly taskKind: TaskKind;
+	readonly retiredAt: number;
+	readonly retiredBy: RetiredBy;
 }
 
 export interface MemoryStore {
 	/** Live cards for a signature, from every repo. The caller decides which are the same problem (D-072). */
 	bySignature(signature: string): Card[];
-	/** Live cards whose trigger shares words with `text`, best first (FTS5 candidates, rescored). */
+	/**
+	 * Live cards of one repo whose trigger shares at least {@link MIN_SHARED_KEYWORDS} keywords with
+	 * `text`, best first. `overlap` is the smaller of the two shares: how much of the text's keywords
+	 * the trigger has, and how much of the trigger's the text has. A text with fewer keywords than
+	 * that says too little to match on.
+	 */
 	search(scope: string, text: string, limit: number): { card: Card; overlap: number }[];
+	card(id: number): Card | undefined;
 	/** ADD (delta ops only, R5.5). */
 	add(card: NewCard): number;
 	/** MERGE: the card's problem was fixed again. `seen` goes up and the evidence is appended. */
 	merge(id: number, evidence: string): void;
 	/** SUPERSEDE: retires `id` and adds its replacement. */
 	supersede(id: number, card: NewCard): number;
+	/** RETIRE one card. False when it was not live. */
+	retire(id: number): boolean;
+	/**
+	 * RETIRE a repo's live cards beyond `max`, the least useful first (helped − hurt, then the
+	 * oldest). Returns how many it retired.
+	 */
+	trim(scope: string, max: number): number;
 	markInjected(id: number): void;
 	credit(id: number, outcome: "helped" | "hurt"): void;
 	/** RETIRE cards that hurt more than they help (R5.3): hurt − helped ≥ 2 after 3+ injections. */
@@ -72,12 +103,19 @@ export interface MemoryStore {
 		sighting: Omit<Sighting, "seenAt" | "source"> & { readonly source?: SightingSource },
 	): void;
 	/** RETIRE: the user withdrew it, or asked to forget it. False when it was not live. */
-	retirePreference(id: number): boolean;
+	retirePreference(id: number, by?: RetiredBy): boolean;
+	/** The preferences retired last, newest first. */
+	retiredPreferences(limit: number): RetiredPreference[];
+	/** Makes a retired preference live again, with the sightings it had. False when it was not retired. */
+	restorePreference(id: number): boolean;
 	markPreferencesInjected(ids: readonly number[]): void;
 	/** Stores the embedding of a card's trigger or a preference's rule, per embedding model (D-062). */
 	setVector(kind: VectorKind, id: number, model: string, vector: Float32Array): void;
-	/** Every stored vector of one kind and model, by card or preference id. */
-	vectors(kind: VectorKind, model: string): Map<number, Float32Array>;
+	/**
+	 * Stored vectors of one kind and model, by card or preference id. With `scope`: only those of
+	 * that repo's live cards.
+	 */
+	vectors(kind: VectorKind, model: string, scope?: string): Map<number, Float32Array>;
 	close(): void;
 }
 
@@ -120,7 +158,9 @@ export interface StoredPreference {
 	readonly sightings: readonly Sighting[];
 }
 
-const MIGRATIONS: readonly string[] = [
+type Migration = string | ((db: DatabaseSync) => void);
+
+const MIGRATIONS: readonly Migration[] = [
 	`
 	CREATE TABLE cards (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -181,7 +221,20 @@ const MIGRATIONS: readonly string[] = [
 	ALTER TABLE cards ADD COLUMN detail TEXT NOT NULL DEFAULT '';
 	ALTER TABLE cards ADD COLUMN files TEXT NOT NULL DEFAULT '';
 	`,
+	// Every lesson that is not the deterministic summary came from the sidecar.
+	`
+		ALTER TABLE cards ADD COLUMN distilled INTEGER NOT NULL DEFAULT 0;
+		UPDATE cards SET distilled = 1 WHERE lesson NOT LIKE 'Fixed before by editing %';
+		ALTER TABLE preferences ADD COLUMN retired_by TEXT;
+		`,
+	// Keep this one last: a test steps back one version to run it again.
+	normalizeStoredScopes,
 ];
+
+/** Fewer shared keywords than this is a coincidence, not a similar error. */
+const MIN_SHARED_KEYWORDS = 3;
+/** Keyword candidates read from the index before they are rescored. */
+const SEARCH_CANDIDATES = 500;
 
 const STOPWORDS = new Set([
 	"the",
@@ -208,6 +261,7 @@ interface Row {
 	trigger: string;
 	lesson: string;
 	evidence: string;
+	distilled: number;
 	seen: number;
 	injected: number;
 	helped: number;
@@ -236,32 +290,64 @@ interface SightingRow {
 	seen_at: number;
 }
 
-/** Opens (and migrates) the memory card store. `:memory:` for tests. */
-export function openMemoryStore(path: string, now: () => number = Date.now): MemoryStore {
-	if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
-	const db = openDatabase(path);
-	migrate(db);
+/**
+ * Opens (and migrates) the memory card store. `:memory:` for tests.
+ * - The file is the user's alone (mode 600): it holds their words and pieces of their code.
+ * - A file that is not a database, or a damaged one, is set aside as `<name>.corrupt-<time>` and a
+ *   new store is started; `report` is told. A store from a newer Exocortex is refused, not replaced.
+ */
+export function openMemoryStore(
+	path: string,
+	now: () => number = Date.now,
+	report: (message: string) => void = () => {},
+): MemoryStore {
+	const db = openMigrated(path, now, report);
 	const live = "valid_to IS NULL";
 	const select = (where: string) => db.prepare(`SELECT * FROM cards WHERE ${where}`);
+	let depth = 0;
+
+	/** Runs `work` as one write transaction: all of it is stored, or none. Nests. */
+	function atomically<T>(work: () => T): T {
+		if (depth > 0) return work();
+		db.exec("BEGIN IMMEDIATE");
+		depth += 1;
+		try {
+			const result = work();
+			db.exec("COMMIT");
+			return result;
+		} catch (error) {
+			db.exec("ROLLBACK");
+			throw error;
+		} finally {
+			depth -= 1;
+		}
+	}
 
 	function insert(card: NewCard): number {
-		const result = db
-			.prepare(
-				"INSERT INTO cards (scope, signature, detail, files, trigger, lesson, evidence, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-			)
-			.run(
-				card.scope,
-				card.signature,
-				card.detail.join(" "),
-				card.files.join("\n"),
+		return atomically(() => {
+			const result = db
+				.prepare(
+					"INSERT INTO cards (scope, signature, detail, files, trigger, lesson, evidence, distilled, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+				)
+				.run(
+					card.scope,
+					card.signature,
+					card.detail.join(" "),
+					card.files.join("\n"),
+					card.trigger,
+					card.lesson,
+					card.evidence,
+					card.distilled ? 1 : 0,
+					now(),
+				);
+			const id = Number(result.lastInsertRowid);
+			db.prepare("INSERT INTO cards_fts (trigger, lesson, card_id) VALUES (?, ?, ?)").run(
 				card.trigger,
 				card.lesson,
-				card.evidence,
-				now(),
+				id,
 			);
-		const id = Number(result.lastInsertRowid);
-		db.prepare("INSERT INTO cards_fts (trigger, lesson, card_id) VALUES (?, ?, ?)").run(card.trigger, card.lesson, id);
-		return id;
+			return id;
+		});
 	}
 
 	return {
@@ -271,22 +357,31 @@ export function openMemoryStore(path: string, now: () => number = Date.now): Mem
 
 		search(scope, text, limit) {
 			const words = keywords(text);
-			if (words.length === 0) return [];
+			if (words.length < MIN_SHARED_KEYWORDS) return [];
 			const query = words.map((w) => `"${w}"`).join(" OR ");
+			// The index only finds candidates: its ranking favours a rare word repeated over many
+			// words shared, so every candidate is rescored before the list is cut.
 			const rows = db
 				.prepare(
 					`SELECT c.* FROM cards_fts f JOIN cards c ON c.id = f.card_id
 					 WHERE cards_fts MATCH ? AND c.${live} AND c.scope = ? ORDER BY bm25(cards_fts) LIMIT ?`,
 				)
-				.all(`trigger : (${query})`, scope, limit * 4) as unknown as Row[];
+				.all(`trigger : (${query})`, scope, SEARCH_CANDIDATES) as unknown as Row[];
 			return rows
-				.map((row) => {
+				.flatMap((row) => {
 					const card = toCard(row);
 					const triggerWords = new Set(keywords(card.trigger));
-					return { card, overlap: words.filter((w) => triggerWords.has(w)).length / words.length };
+					const shared = words.filter((w) => triggerWords.has(w)).length;
+					if (shared < MIN_SHARED_KEYWORDS) return [];
+					return [{ card, overlap: shared / Math.max(words.length, triggerWords.size) }];
 				})
-				.sort((a, b) => b.overlap - a.overlap)
+				.sort((a, b) => b.overlap - a.overlap || a.card.id - b.card.id)
 				.slice(0, limit);
+		},
+
+		card(id) {
+			const row = select("id = ?").get(id) as unknown as Row | undefined;
+			return row && toCard(row);
 		},
 
 		add(card) {
@@ -294,17 +389,37 @@ export function openMemoryStore(path: string, now: () => number = Date.now): Mem
 		},
 
 		merge(id, evidence) {
-			const existing = select("id = ?").get(id) as unknown as Row | undefined;
-			if (!existing) return;
-			db.prepare("UPDATE cards SET seen = seen + 1, evidence = ? WHERE id = ?").run(
-				mergeEvidence(existing.evidence, evidence),
-				id,
-			);
+			atomically(() => {
+				const existing = select("id = ?").get(id) as unknown as Row | undefined;
+				if (!existing) return;
+				db.prepare("UPDATE cards SET seen = seen + 1, evidence = ? WHERE id = ?").run(
+					mergeEvidence(existing.evidence, evidence),
+					id,
+				);
+			});
 		},
 
 		supersede(id, card) {
-			db.prepare("UPDATE cards SET valid_to = ? WHERE id = ? AND valid_to IS NULL").run(now(), id);
-			return insert(card);
+			return atomically(() => {
+				db.prepare("UPDATE cards SET valid_to = ? WHERE id = ? AND valid_to IS NULL").run(now(), id);
+				return insert(card);
+			});
+		},
+
+		retire(id) {
+			return Number(db.prepare(`UPDATE cards SET valid_to = ? WHERE id = ? AND ${live}`).run(now(), id).changes) > 0;
+		},
+
+		trim(scope, max) {
+			return Number(
+				db
+					.prepare(
+						`UPDATE cards SET valid_to = ? WHERE id IN (
+							SELECT id FROM cards WHERE ${live} AND scope = ?
+							ORDER BY helped - hurt DESC, created_at DESC, id DESC LIMIT -1 OFFSET ?)`,
+					)
+					.run(now(), scope, Math.max(0, max)).changes,
+			);
 		},
 
 		markInjected(id) {
@@ -388,10 +503,35 @@ export function openMemoryStore(path: string, now: () => number = Date.now): Mem
 			);
 		},
 
-		retirePreference(id) {
+		retirePreference(id, by = "user") {
 			return (
 				Number(
-					db.prepare("UPDATE preferences SET valid_to = ? WHERE id = ? AND valid_to IS NULL").run(now(), id).changes,
+					db
+						.prepare("UPDATE preferences SET valid_to = ?, retired_by = ? WHERE id = ? AND valid_to IS NULL")
+						.run(now(), by, id).changes,
+				) > 0
+			);
+		},
+
+		retiredPreferences(limit) {
+			const rows = db
+				.prepare("SELECT * FROM preferences WHERE valid_to IS NOT NULL ORDER BY valid_to DESC, id DESC LIMIT ?")
+				.all(limit) as unknown as (PreferenceRow & { valid_to: number; retired_by: string | null })[];
+			return rows.map((row) => ({
+				id: row.id,
+				rule: row.rule,
+				taskKind: TASK_KINDS.find((kind) => kind === row.task_kind) ?? "any",
+				retiredAt: row.valid_to,
+				retiredBy: row.retired_by === "model" || row.retired_by === "interview" ? row.retired_by : "user",
+			}));
+		},
+
+		restorePreference(id) {
+			return (
+				Number(
+					db
+						.prepare("UPDATE preferences SET valid_to = NULL, retired_by = NULL WHERE id = ? AND valid_to IS NOT NULL")
+						.run(id).changes,
 				) > 0
 			);
 		},
@@ -410,8 +550,16 @@ export function openMemoryStore(path: string, now: () => number = Date.now): Mem
 			);
 		},
 
-		vectors(kind, model) {
-			const rows = db.prepare("SELECT ref_id, vector FROM vectors WHERE kind = ? AND model = ?").all(kind, model);
+		vectors(kind, model, scope) {
+			const rows =
+				scope === undefined
+					? db.prepare("SELECT ref_id, vector FROM vectors WHERE kind = ? AND model = ?").all(kind, model)
+					: db
+							.prepare(
+								`SELECT v.ref_id, v.vector FROM vectors v JOIN cards c ON c.id = v.ref_id
+								 WHERE v.kind = ? AND v.model = ? AND c.scope = ? AND c.${live}`,
+							)
+							.all(kind, model, scope);
 			return new Map(
 				(rows as unknown as { ref_id: number; vector: Uint8Array }[]).map((row) => [
 					row.ref_id,
@@ -435,6 +583,7 @@ export function openMemoryStore(path: string, now: () => number = Date.now): Mem
 			files: row.files === "" ? [] : row.files.split("\n"),
 			trigger: row.trigger,
 			lesson: row.lesson,
+			distilled: row.distilled === 1,
 			evidence: row.evidence,
 			seen: row.seen,
 			injected: row.injected,
@@ -460,19 +609,87 @@ function mergeEvidence(previous: string, next: string): string {
 	return merged.length > 8_000 ? merged.slice(merged.length - 8_000) : merged;
 }
 
-function migrate(db: DatabaseSync): void {
-	const row = db.prepare("PRAGMA user_version").get() as { user_version: number } | undefined;
-	const current = row?.user_version ?? 0;
-	if (current > MIGRATIONS.length) throw new Error(`memory store schema v${current} is newer than this Exocortex`);
-	for (let version = current; version < MIGRATIONS.length; version++) {
-		db.exec("BEGIN");
+/**
+ * Brings a database to the current schema. Each step runs in a write transaction that is taken
+ * before the version is read, so of two processes opening a new store at once, the second waits
+ * and then finds the step done.
+ */
+export function migrate(db: DatabaseSync): void {
+	for (;;) {
+		db.exec("BEGIN IMMEDIATE");
 		try {
-			db.exec(MIGRATIONS[version] ?? "");
+			const row = db.prepare("PRAGMA user_version").get() as { user_version: number } | undefined;
+			const version = row?.user_version ?? 0;
+			if (version > MIGRATIONS.length) {
+				throw new Error(`memory store schema v${version} is newer than this Exocortex`);
+			}
+			const migration = MIGRATIONS[version];
+			if (migration === undefined) {
+				db.exec("COMMIT");
+				return;
+			}
+			if (typeof migration === "string") db.exec(migration);
+			else migration(db);
 			db.exec(`PRAGMA user_version = ${version + 1}`);
 			db.exec("COMMIT");
 		} catch (error) {
 			db.exec("ROLLBACK");
 			throw error;
 		}
+	}
+}
+
+/** Repo names stored before they had a normal form (M12): `remote:git@host:Owner/Repo.git`. */
+function normalizeStoredScopes(db: DatabaseSync): void {
+	for (const table of ["cards", "preference_sightings"]) {
+		const rows = db.prepare(`SELECT DISTINCT scope FROM ${table}`).all() as unknown as { scope: string }[];
+		const update = db.prepare(`UPDATE ${table} SET scope = ? WHERE scope = ?`);
+		for (const { scope } of rows) {
+			const normal = normalizeScope(scope);
+			if (normal !== scope) update.run(normal, scope);
+		}
+	}
+}
+
+/** What SQLite says when the file is not a database or its pages are damaged. */
+const CORRUPT = /not a database|malformed|SQLITE_NOTADB|SQLITE_CORRUPT/i;
+
+function openMigrated(path: string, now: () => number, report: (message: string) => void): DatabaseSync {
+	if (path === ":memory:") {
+		const db = openDatabase(path);
+		migrate(db);
+		return db;
+	}
+	mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+	const open = (): DatabaseSync => {
+		// Created before SQLite opens it, so the file and its journals never exist with wider access.
+		if (!existsSync(path)) closeSync(openSync(path, "a", 0o600));
+		for (const file of [path, `${path}-wal`, `${path}-shm`]) {
+			try {
+				if (existsSync(file)) chmodSync(file, 0o600);
+			} catch {
+				// Not ours to change (a shared store): SQLite decides whether it can be used.
+			}
+		}
+		const db = openDatabase(path);
+		try {
+			migrate(db);
+			return db;
+		} catch (error) {
+			db.close();
+			throw error;
+		}
+	};
+	try {
+		return open();
+	} catch (error) {
+		if (!CORRUPT.test(String(error))) throw error;
+		const aside = `${path}.corrupt-${now()}`;
+		renameSync(path, aside);
+		for (const suffix of ["-wal", "-shm"]) {
+			if (existsSync(`${path}${suffix}`)) renameSync(`${path}${suffix}`, `${aside}${suffix}`);
+		}
+		report(`memory store ${path}: ${String(error)}; set aside as ${aside}, starting a new one`);
+		return open();
 	}
 }

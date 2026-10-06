@@ -1,5 +1,11 @@
-import { describe, expect, it } from "vitest";
-import { keywords, openMemoryStore } from "../src/store.ts";
+import "./home-guard.ts";
+import { existsSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { openDatabase } from "@exocortex/core";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { recall } from "../src/recall.ts";
+import { keywords, migrate, openMemoryStore } from "../src/store.ts";
 
 const card = (scope: string, signature: string, trigger = "error[E0502]: cannot borrow `self.items` as mutable") => ({
 	scope,
@@ -183,6 +189,233 @@ describe("preference store (D-060)", () => {
 		store.widenPreference(id);
 		store.markPreferenceRepeated(id);
 		expect(store.preferences()[0]).toMatchObject({ taskKind: "any", repeated: 1 });
+		store.close();
+	});
+});
+
+describe("keyword recall (M5)", () => {
+	const settings = { maxCards: 2, minOverlap: 0.6, minDetail: 0.6 };
+	const lock = "timeout waiting for the lock on the build directory";
+
+	it("does not recall a card for one shared word, or for an error line that says too little", () => {
+		const store = openMemoryStore(":memory:");
+		store.add(card("repo-a", "sig-lock", lock));
+		expect(recall(store, "repo-a", "sig-other", "error: timeout", settings)).toEqual([]);
+		expect(recall(store, "repo-a", "sig-other", "error: timeout waiting", settings)).toEqual([]);
+		expect(store.search("repo-a", "error: cannot open file `data.bin`", 5)).toEqual([]);
+		// Most of both lines: a similar error.
+		expect(
+			recall(store, "repo-a", "sig-other", "error: timeout waiting for a lock on the build directory", settings).map(
+				(r) => r.match,
+			),
+		).toEqual(["similar"]);
+		store.close();
+	});
+
+	it("measures the overlap both ways: a short error inside a long trigger is not most of it", () => {
+		const store = openMemoryStore(":memory:");
+		store.add(
+			card(
+				"repo-a",
+				"sig-long",
+				"linker failed: undefined symbol ring_push referenced from queue_drain in libring archive member",
+			),
+		);
+		const [hit] = store.search("repo-a", "undefined symbol ring_push", 5);
+		expect(hit?.overlap).toBeLessThan(0.6);
+		store.close();
+	});
+
+	it("rescores every candidate before cutting to the limit", () => {
+		const store = openMemoryStore(":memory:");
+		const terms = ["alpha_one", "beta_two", "gamma_three", "delta_four"];
+		// Each of the target's words is common; the decoys share one rare word with the error, many times.
+		for (let i = 0; i < 10; i++) {
+			for (let a = 0; a < terms.length; a++) {
+				for (let b = a + 1; b < terms.length; b++)
+					store.add(card("repo-a", `pair-${i}-${a}-${b}`, `${terms[a]} ${terms[b]}`));
+			}
+		}
+		for (let i = 0; i < 20; i++) store.add(card("repo-a", `decoy-${i}`, "rareword rareword rareword"));
+		store.add(card("repo-a", "target", `${terms.join(" ")} common`));
+		const hits = store.search("repo-a", `${terms.join(" ")} rareword`, 4);
+		expect(hits[0]?.card.signature).toBe("target");
+		expect(hits).toHaveLength(1);
+		store.close();
+	});
+});
+
+describe("store safety (M10, M8)", () => {
+	let dir: string;
+	beforeEach(() => {
+		dir = mkdtempSync(join(tmpdir(), "exo-store-"));
+	});
+	afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+	it("migrates once when two processes open a new store at the same moment", () => {
+		const path = join(dir, "race.db");
+		const ours = openDatabase(path);
+		let raced = false;
+		/** Another process that migrates the same file right after we read its version. */
+		const other = () => {
+			const db = openDatabase(path, { busyTimeoutMs: 1 });
+			try {
+				migrate(db);
+			} catch (error) {
+				if (!/locked|busy/i.test(String(error))) throw error;
+			} finally {
+				db.close();
+			}
+		};
+		const racing = new Proxy(ours, {
+			get(target, property) {
+				const value = Reflect.get(target, property) as unknown;
+				if (property !== "prepare") return typeof value === "function" ? value.bind(target) : value;
+				return (sql: string) => {
+					const statement = target.prepare(sql);
+					if (!/user_version/.test(sql) || raced) return statement;
+					return {
+						get: () => {
+							const row = statement.get();
+							raced = true;
+							other();
+							return row;
+						},
+					};
+				};
+			},
+		});
+		expect(() => migrate(racing)).not.toThrow();
+		expect(raced).toBe(true);
+		ours.close();
+		const store = openMemoryStore(path);
+		expect(store.add(card("repo-a", "sig-1"))).toBe(1);
+		store.close();
+	});
+
+	it("adds a card and its search row together or not at all", () => {
+		const path = join(dir, "atomic.db");
+		const store = openMemoryStore(path);
+		const raw = openDatabase(path);
+		raw.exec("DROP TABLE cards_fts");
+		raw.close();
+		expect(() => store.add(card("repo-a", "sig-1"))).toThrow();
+		expect(() => store.supersede(1, card("repo-a", "sig-1"))).toThrow();
+		expect(store.cards()).toEqual([]);
+		store.close();
+	});
+
+	it("sets a corrupt file aside and starts fresh, but refuses a newer schema", () => {
+		const path = join(dir, "sub", "memory.db");
+		openMemoryStore(path).close();
+		writeFileSync(path, "this is not a database, it only has the name of one\n".repeat(40));
+		const reports: string[] = [];
+		const store = openMemoryStore(path, Date.now, (message) => reports.push(message));
+		expect(store.cards()).toEqual([]);
+		expect(store.add(card("repo-a", "sig-1"))).toBe(1);
+		store.close();
+		expect(readdirSync(join(dir, "sub")).filter((name) => name.includes(".corrupt-"))).toHaveLength(1);
+		expect(reports).toEqual([expect.stringMatching(/not a database.*set aside as .*memory\.db\.corrupt-/)]);
+
+		const raw = openDatabase(path);
+		raw.exec("PRAGMA user_version = 999");
+		raw.close();
+		expect(() => openMemoryStore(path)).toThrow(/newer than this Exocortex/);
+		expect(existsSync(path)).toBe(true);
+	});
+
+	it("keeps the file to its owner", () => {
+		const path = join(dir, "private", "memory.db");
+		openMemoryStore(path).close();
+		expect(statSync(path).mode & 0o777).toBe(0o600);
+		expect(statSync(join(dir, "private")).mode & 0o777).toBe(0o700);
+	});
+
+	it("returns only one repo's live card vectors when asked for a repo", () => {
+		const store = openMemoryStore(":memory:");
+		const here = store.add(card("repo-a", "sig-1"));
+		const gone = store.add(card("repo-a", "sig-2"));
+		const there = store.add(card("repo-b", "sig-3"));
+		for (const id of [here, gone, there]) store.setVector("card", id, "m", Float32Array.from([1, 0]));
+		store.retire(gone);
+		expect([...store.vectors("card", "m", "repo-a").keys()]).toEqual([here]);
+		expect(store.vectors("card", "m").size).toBe(3);
+		store.close();
+	});
+
+	it("caps a repo's live cards, retiring the least useful first", () => {
+		let now = 1;
+		const store = openMemoryStore(":memory:", () => now++);
+		const ids = [1, 2, 3, 4].map((n) => store.add(card("repo-a", `sig-${n}`)));
+		store.add(card("repo-b", "sig-b"));
+		store.credit(ids[0] ?? 0, "helped");
+		store.credit(ids[2] ?? 0, "hurt");
+		expect(store.trim("repo-a", 2)).toBe(2);
+		// The one that hurt goes first, then the oldest that proved nothing.
+		expect(
+			store
+				.cards("repo-a")
+				.filter((c) => c.validTo === null)
+				.map((c) => c.id),
+		).toEqual([ids[0], ids[3]]);
+		expect(store.trim("repo-a", 2)).toBe(0);
+		expect(store.cards("repo-b")[0]?.validTo).toBeNull();
+		store.close();
+	});
+
+	it("retires a card and finds one by id", () => {
+		const store = openMemoryStore(":memory:");
+		const id = store.add({ ...card("repo-a", "sig-1"), distilled: true });
+		expect(store.card(id)).toMatchObject({ id, distilled: true, validTo: null });
+		expect(store.card(99)).toBeUndefined();
+		expect(store.retire(id)).toBe(true);
+		expect(store.retire(id)).toBe(false);
+		expect(store.card(id)?.validTo).not.toBeNull();
+		store.close();
+	});
+
+	it("gives stored repo names their normal form when it migrates (M12)", () => {
+		const path = join(dir, "scopes.db");
+		const old = openMemoryStore(path);
+		old.add(card("remote:git@github.com:Owner/Repo.git", "sig-1"));
+		old.add(card("tree:abc", "sig-2"));
+		const preference = old.addPreference("Keep commits small.");
+		old.addSighting(preference, {
+			scope: "remote:https://token@github.com/owner/repo/",
+			session: "s",
+			standing: true,
+			correction: false,
+			quote: "q",
+		});
+		old.close();
+		// Back to the version before the last migration, which is the one that rewrites the names.
+		const raw = openDatabase(path);
+		const { user_version: version } = raw.prepare("PRAGMA user_version").get() as { user_version: number };
+		raw.exec(`PRAGMA user_version = ${version - 1}`);
+		raw.close();
+		const store = openMemoryStore(path);
+		expect(store.cards().map((c) => c.scope)).toEqual(["remote:github.com/owner/repo", "tree:abc"]);
+		expect(store.preferences()[0]?.sightings[0]?.scope).toBe("remote:github.com/owner/repo");
+		store.close();
+	});
+});
+
+describe("retired preferences (M6)", () => {
+	it("remembers who retired a preference and restores it", () => {
+		let now = 10;
+		const store = openMemoryStore(":memory:", () => now++);
+		const a = store.addPreference("Use tabs.");
+		const b = store.addPreference("Keep commits small.", "fix");
+		expect(store.retirePreference(a, "model")).toBe(true);
+		expect(store.retirePreference(b)).toBe(true);
+		expect(store.retiredPreferences(5)).toEqual([
+			{ id: b, rule: "Keep commits small.", taskKind: "fix", retiredAt: 13, retiredBy: "user" },
+			{ id: a, rule: "Use tabs.", taskKind: "any", retiredAt: 12, retiredBy: "model" },
+		]);
+		expect(store.restorePreference(a)).toBe(true);
+		expect(store.restorePreference(a)).toBe(false);
+		expect(store.preferences().map((p) => p.id)).toEqual([a]);
+		expect(store.retiredPreferences(5).map((p) => p.id)).toEqual([b]);
 		store.close();
 	});
 });

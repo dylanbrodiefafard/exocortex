@@ -11,7 +11,11 @@ export const SettingsSchema = Type.Object(
 		learn: Type.Boolean({ default: true }),
 		/** Inject matching cards into failing tool results. */
 		inject: Type.Boolean({ default: true }),
-		/** Have a background sidecar phrase each new card's lesson (else a deterministic summary of the fix). */
+		/**
+		 * Have a background sidecar read each fix: it decides whether the edits explain the pass and
+		 * are worth a card, and words the lesson. Off, or with no sidecar engine: every fix that code
+		 * does not refuse becomes a card with a deterministic summary of the edit.
+		 */
 		distill: Type.Boolean({ default: true }),
 		distillTimeoutMs: Type.Integer({ minimum: 1_000, default: 30_000 }),
 		thinking: Type.Boolean({ default: false }),
@@ -24,8 +28,13 @@ export const SettingsSchema = Type.Object(
 		 * signature alone, as before D-072.
 		 */
 		minDetail: Type.Number({ minimum: 0, maximum: 1, default: 0.6 }),
-		/** Full-text matches need this share of the error's keywords in the card's trigger. */
+		/**
+		 * A card for another kind of error is a similar one when its trigger and the error line share
+		 * at least 3 keywords and this share of each other's keywords (the smaller of the two shares).
+		 */
 		minOverlap: Type.Number({ minimum: 0, maximum: 1, default: 0.6 }),
+		/** Live cards kept per repo; beyond it the least useful (helped − hurt, then the oldest) retire. */
+		maxCardsPerRepo: Type.Integer({ minimum: 1, default: 500 }),
 		/**
 		 * D-060: learn how the user likes work done from their own messages, and add the preferences a
 		 * later prompt leaves unsaid. Off until it has been tried in daily use (D-052).
@@ -58,16 +67,26 @@ export const SettingsSchema = Type.Object(
 
 export type MemorySettings = Static<typeof SettingsSchema> & { readonly dbPath: string };
 
-/** Module settings from config (unknown keys such as `enabled` are ignored); invalid values fall back to defaults. */
+/**
+ * Module settings from config (unknown keys such as `enabled` are ignored). An invalid value falls
+ * back to its own default and is reported; the valid ones beside it are kept. Above all `dbPath`:
+ * a typo in another setting must not send the session to a different store.
+ */
 export function parseSettings(raw: Readonly<Record<string, unknown>>): {
 	readonly settings: MemorySettings;
 	readonly problems: readonly string[];
 } {
-	const withDefaults = Value.Default(SettingsSchema, { ...raw });
-	const ok = Value.Check(SettingsSchema, withDefaults);
-	const settings = (ok ? withDefaults : Value.Default(SettingsSchema, {})) as Static<typeof SettingsSchema>;
-	const problems = ok
-		? []
-		: [...Value.Errors(SettingsSchema, withDefaults)].map((e) => `memory ${e.instancePath || "/"}: ${e.message}`);
-	return { settings: { ...settings, dbPath: settings.dbPath ?? join(homedir(), ".exocortex", "memory.db") }, problems };
+	const given = Value.Default(SettingsSchema, { ...raw }) as Record<string, unknown>;
+	const errors = Value.Check(SettingsSchema, given) ? [] : [...Value.Errors(SettingsSchema, given)];
+	const kept = { ...raw };
+	// An error's path starts with the setting it is in: `/maxCards`.
+	for (const error of errors) delete kept[error.instancePath.split("/")[1] ?? ""];
+	const repaired = Value.Default(SettingsSchema, kept);
+	const settings = (Value.Check(SettingsSchema, repaired) ? repaired : Value.Default(SettingsSchema, {})) as Static<
+		typeof SettingsSchema
+	>;
+	return {
+		settings: { ...settings, dbPath: settings.dbPath ?? join(homedir(), ".exocortex", "memory.db") },
+		problems: errors.map((e) => `memory ${e.instancePath || "/"}: ${e.message}`),
+	};
 }

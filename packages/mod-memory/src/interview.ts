@@ -1,4 +1,7 @@
 import type { Dialog } from "@exocortex/core";
+import type { MemoryDeps } from "./deps.ts";
+import type { PreferenceSession } from "./preference-session.ts";
+import { sameRule } from "./preferences.ts";
 import type { TaskKind } from "./store.ts";
 
 /**
@@ -10,14 +13,14 @@ import type { TaskKind } from "./store.ts";
  * - "No preference" stores nothing.
  */
 
-export interface InterviewOption {
+interface InterviewOption {
 	readonly label: string;
 	/** The card this answer stores; none for "no preference". */
 	readonly rule?: string;
 	readonly kind?: TaskKind;
 }
 
-export interface InterviewQuestion {
+interface InterviewQuestion {
 	readonly ask: string;
 	readonly options: readonly InterviewOption[];
 }
@@ -200,4 +203,78 @@ export async function runInterview(dialog: Dialog, questions: readonly Interview
 		"Enter to skip",
 	);
 	return { answers, more: more?.trim() ?? "", cancelled: more === undefined };
+}
+
+const INTERVIEW_QUOTE_CHARS = 300;
+
+/**
+ * `/exo memory interview` (D-066): asks the questions, then stores each answer as a preference
+ * that applies in every repo. Only ever started by the user.
+ */
+export async function interview(
+	dialog: Dialog | undefined,
+	{ ctx, settings, store, scope }: MemoryDeps,
+	preferences: PreferenceSession,
+): Promise<string> {
+	if (!settings.preferences) return "Preference learning is off (memory.preferences): turn it on first.";
+	if (!dialog) return "The interview needs an interactive session.";
+	const result = await runInterview(dialog, INTERVIEW);
+	// An answer is about the user's work in general: it applies in every repo, named or not.
+	const repo = (await scope).id;
+	const before = new Set(store.preferences().map((p) => p.id));
+	for (const { question, option } of result.answers) applyAnswer(question, option, repo);
+	let unread = false;
+	if (result.more !== "") {
+		if (ctx.pool()) {
+			dialog.notify("Reading your last answer…");
+			await preferences.learn(result.more, "", "interview");
+		} else unread = true;
+	}
+	const after = store.preferences();
+	const added = after.filter((p) => !before.has(p.id)).length;
+	const retired = [...before].filter((id) => !after.some((p) => p.id === id)).length;
+	ctx.record({
+		kind: "exo.memory",
+		data: { action: "interview", answered: result.answers.length, added, retired, cancelled: result.cancelled },
+	});
+	const saved = after.filter((p) =>
+		p.sightings.some((s) => s.source === "interview" && s.session === preferences.session),
+	);
+	return [
+		result.cancelled ? "Interview stopped early; the answers so far are kept." : "Interview finished.",
+		saved.length === 0
+			? "No preferences were saved."
+			: `Preferences saved: ${saved.length} (${added} new). They apply in every repo, starting with your next prompt.`,
+		...(unread ? ["Your last answer was not read: that needs a sidecar engine."] : []),
+		"/exo memory preferences lists them; /exo memory forget <id> removes one.",
+	].join(" ");
+
+	/**
+	 * Stores one interview answer. The latest answer to a question is the answer: whatever another
+	 * option of the same question stored earlier is retired, also when the user now has no preference.
+	 */
+	function applyAnswer(question: InterviewQuestion, option: InterviewOption, repo: string): void {
+		const others = new Set(question.options.filter((o) => o !== option).map((o) => o.rule));
+		for (const earlier of store.preferences().filter((p) => others.has(p.rule))) {
+			preferences.retire(earlier.id, "interview");
+		}
+		if (option.rule === undefined) return;
+		const live = store.preferences();
+		const existing = live.find((p) => p.rule === option.rule) ?? sameRule(option.rule, live);
+		preferences.apply(
+			{
+				stated: {
+					existing: existing?.id,
+					rule: existing?.rule ?? option.rule,
+					standing: true,
+					kind: option.kind ?? "any",
+					correction: false,
+					quote: `${question.ask} → ${option.label}`.slice(0, INTERVIEW_QUOTE_CHARS),
+				},
+			},
+			repo,
+			undefined,
+			"interview",
+		);
+	}
 }

@@ -1587,6 +1587,60 @@ Open check: Exocortex's injected `custom_message` reaches ninfer as a second con
   - **The fingerprint reads files after each test run:** bounded as above, but a slow disk makes it later than the old single `git` command.
   - **The prompts changed** (`ledger.v3`, `verdict.v6`, `verdict-items.v6`) and are untested with the real model.
 - **How this sits with earlier entries.** D-010 (suggest, don't act) and D-039's "a model can never invent a command to run" hold, the second more strictly. D-046: options stay off; what changed is what the plain `supervisor` config does, and nothing has been A/B'd (as in D-061 and D-071). D-056's per-option configs need no change: no setting was renamed or added.
+---
+
+### D-081 — Memory: a pass is evidence, not proof; cards can get out; the store, the scope and the session state are hardened · accepted (2026-10-06; hardening stream M of D-076; amends D-049, D-060, D-062, D-064, D-072 and D-018's scope)
+- **Context:** the audit's items M1–M14 (`docs/HARDENING_PLAN.md`, section M). M1–M12 all reproduced: each has a test that failed against the old code before its fix. M13 is stream E's. The weakest point was admission: a card was stored whenever a command failed, something was edited and the command passed, and that card was then shown as "a past fix" and credited each time the command passed afterwards, whatever the agent had done.
+- **Decision.**
+  1. **`memory.ts` is split (M14)**, as a move with the tests passing before and after: `learn.ts` (episode → card), `admission.ts` (what code refuses), `recall.ts` (recall, credit, the card commands), `preference-session.ts` (the preference wiring), `interview.ts` (the interview wiring), `scope.ts`, `problem.ts`, `shell-effects.ts`, `paths.ts`, `text.ts`. `memory.ts` composes them.
+  2. **One predicate for "the same problem" (M3)**: `problemIn(known, signature, names, minDetail)` and `sameProblem(a, b)` (each in the other), in `problem.ts`. Recall, credit, learning and now the tracker use it. The tracker compared signatures only, so a second failing test with the same normalised signature was "the same error again" and its edits went onto the first test's card. It now opens a new step, as for any other change of error (D-072 item 4).
+  3. **Code refuses what it can see is not a fix (M1; amends D-049's admission).** An episode gets no card, and a traced `skipped` with the reason, when:
+     - `shell_change`: a shell command between the failure and the pass changed files or what is installed: `git checkout/restore/stash/reset/…`, `rm`, `mv`, `cp`, `sed -i`, `patch`, package installs, formatters and `--fix` linters, a redirect or `tee` into a file of the repo that is not a log. `shell-effects.ts` reads the line with core's `shellCommands`;
+     - `only_tests`: every edit is on an `isTestPath` path;
+     - `weakens_test`: an edit adds a skip marker (`#[ignore]`, `@pytest.mark.skip/xfail`, `t.Skip`, `it.skip`, `xit`, `DISABLED_`, …) or leaves fewer assertions than it found.
+     - Edits outside the working directory are not counted, and card files are paths inside the repo.
+     - Commands whose effect cannot be told (a script, a generator) are listed on the route the lesson sidecar reads.
+  4. **The lesson sidecar is the gate, not only the writer (M2; `lesson.v3`, `lesson.v2` removed).** The prompt asks first whether the edits explain why the error went away, and to answer "" when they only loosen a test, do not touch what the error is about, or it cannot tell.
+     - While the sidecar has not answered (timeout, `expired_held`, an error) there is no card. The fix waits and is asked about again at the next settle, three times in all, then dropped (`skipped`, `no_lesson`). Before, any failure wrote the deterministic card, which no gate had seen.
+     - The deterministic summary is still used when the sidecar wrote a lesson that failed the grounding check (it judged the fix worth keeping), and when there is no sidecar (`distill` off or no engine).
+     - Fixes are handled one at a time and the store is read again after the sidecar's answer, so two passes for one problem make one card.
+     - A file written whole is named, not quoted: "Fixed before by rewriting a.rs".
+  5. **A wrong card can get out (M4; amends D-072 item 7).**
+     - A known problem fixed again through other files than the card names supersedes the card (`store.supersede`, traced `superseded`), after the same gates. Through the same files it merges, as before.
+     - `helped` needs the pass to follow an edit to a file the card names (any edit, for a card from other repos). A pass without that is traced `credit_withheld` and credits nothing.
+     - A card counts as shown, and is credited, only when the host committed the rewrite (D-078's `commit`).
+     - `/exo memory cards` lists this repo's cards; `/exo memory forget card <id>` retires one.
+  6. **Keyword recall (M5)** needs 3 shared keywords and `minOverlap` of each side's keywords (the smaller share); an error line with fewer than 3 keywords matches nothing; up to 500 candidates are rescored before the list is cut.
+  7. **Preferences (M6, M7; amends D-060, D-062, D-064).**
+     - `replaces` retires a preference only when the user's sentence or the new rule shares a meaningful word with it, or the embedding model found it nearest. The retirement is traced `by: "model"`, the user is told at the next settle, `/exo memory preferences` lists the last five retired, and `/exo memory restore <id>` brings one back.
+     - A rule's polarity (a negation word or not) is read apart from its topic. `sameRule`, `same_as` and the embedding match need equal polarity; `alreadySaid` needs the sentence that carries the rule's words to have the rule's polarity.
+     - A proposed rule is compared with every live preference; the sidecar still sees the latest 30.
+  8. **Recalled text cannot pose as anything else (M8).** A lesson is stored and rendered as one line without `[exo` openers and `<<<`/`>>>`; session text inside the lesson prompt's fences cannot close them; other repos' cards are shown only when a sidecar wrote them, and without file names (store column `distilled`); the store file is mode 600 and a directory it creates 700.
+  9. **Session state (M9).** A sighting's session is `ctx.sessionId`. The cards shown in the task and the preferences in the conversation are saved with `saveState` and restored by the next instance. `dispose()` credits what is already settled and leaves the rest in the saved state.
+  10. **Store (M10).** Each migration step takes `BEGIN IMMEDIATE` before reading the version; a migration may be a function; `add`, `merge` and `supersede` are transactions; a file that is not a database is set aside as `<name>.corrupt-<time>` and a new one started (a newer schema is still refused); vectors are filtered by repo in SQL; `maxCardsPerRepo` (500) retires the least useful beyond it; ending a task survives a store error.
+  11. **Tracker (M11).** A step keeps its latest 8 edits, dropping first an edit to a file edited again later. A failing command not run again for 60 tool calls is forgotten.
+  12. **Scope (M12; amends D-018).** A remote is `remote:host/owner/repo` however it was cloned, without user names or tokens (they were stored); the last migration rewrites stored scopes. A git that times out leaves the scope unknown: nothing is learned or recalled in that session, traced `scope_unknown` and shown in the status.
+  13. **`failureDetail` reads `lineVerdicts`** (D-077): names come from the lines the signature is read from, not from log lines beside them.
+  14. **Settings.** An invalid setting falls back to its own default; the valid ones, `dbPath` above all, are kept. Before, one invalid value replaced every setting, so the session opened the default store. A test did exactly that to the user's `~/.exocortex/memory.db`; every memory test file now imports `test/home-guard.ts`, which points `HOME` at a temp directory and fails when the default path is reached or the real file changes.
+- **Different from the plan's proposed fix.**
+  - M8: only the `[exo` opener is neutralised, not every `[`: lessons quote code (`error[E0502]`, `a[0]`), and on one line a bracket alone opens nothing.
+  - M7: polarity is computed from the rule's text, not stored as a flag.
+  - M1: a shell change drops the episode; a command that cannot be read is annotated for the sidecar. The proposal left the choice open.
+  - M9: `dispose` credits only settled outcomes, because the host also disposes an instance it replaces mid-task.
+- **Not done, and why.**
+  - **M13** (draining the pool at shutdown): stream E.
+  - **A flaky test, or an edit beside the real cause, is not detected by code.** Only the sidecar's gate and later credit or supersession stand against it. Without a sidecar there is no such gate.
+  - **A fix made by a shell command** (`pip install`) is not learned: an episode still needs an edit, and now is dropped when such a command ran.
+  - **Fixes waiting for a lesson, the tracker's open commands and unread user messages** are not saved across a rebuild.
+  - **`keywords` still reads the first 16 words** of a prompt in `alreadySaid`.
+- **Open risks.**
+  - The refusals cost recall: a real fix that also drops an assertion, runs a formatter, or whose passing command line itself contains `rm` or a redirect into the repo gets no card.
+  - Polarity is a word list; "Keep answers short" and "Don't write long answers" become two preferences. The topical check for `replaces` is one shared stem.
+  - Superseding trusts the latest fix: when the first card was right and the second fix went elsewhere by chance, the better card is lost (it stays in the store, retired).
+  - A repo whose git answers slowly (a huge history without a remote) never learns; before, it used the path.
+  - Other repos' cards learned without a sidecar are no longer promoted.
+  - The schema is at version 8. A store opened by this branch cannot be opened by an older build.
+  - Untested with a real model: `lesson.v3`'s gate is prompt wording.
 
 ---
 

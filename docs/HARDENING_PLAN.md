@@ -24,7 +24,7 @@ A read-only audit of every package (2026-10-06) found the weak spots listed here
 | B. Adapter: hook dispatcher and lifecycle | `fix/adapter-dispatcher` | D-078 | 1 | merged (`b7ef097`) |
 | C. Eval: statistics and harness | `fix/eval-rigor` | D-079 | 1 | merged (`e7316f3`) |
 | D. Core: trace, inference, config, processes | `fix/core-infra` | D-080 | 1 | merged (`e5a056c`) |
-| M. Memory | `fix/memory-admission` | D-081 | 2 | in progress |
+| M. Memory | `fix/memory-admission` | D-081 | 2 | merged |
 | T. Triage | `fix/triage-identity` | D-082 | 2 | merged |
 | R. Trimmer | `fix/trimmer-selection` | D-083 | 2 | merged |
 | S. Supervisor | `fix/supervisor-evidence` | D-084 | 2 | merged |
@@ -111,20 +111,20 @@ Files owned: `packages/core/src/{trace,inference}/`, `packages/core/src/{config,
 
 Files owned: `packages/mod-memory/`.
 
-- [ ] **M1. A pass is admitted as a fix whatever the edits were.** `episodes.ts:98-124`, `memory.ts:511-550`. Skipping the test, an unrelated edit beside a shell fix, or a flaky test all store a card. *Fix:* refuse an episode whose edits are all on `isTestPath` paths or add skip/ignore/xfail markers; record mutating shell commands between failure and pass and drop or annotate such an episode; ignore edits outside the cwd; tell `lesson.v2` to return "" when the route only loosens a test.
-- [ ] **M2. The lesson falls back to the deterministic text without the reusability gate.** `memory.ts:529-537, 671-694`. *Fix:* with D3 in place, retry at the next settle on timeout instead of writing a deterministic card; re-check `existing` after the await with an in-flight map; for a `write`, name only the file.
-- [ ] **M3. The tracker matches errors by signature alone.** `episodes.ts:72`. Two different failing tests with one normalised signature become one card. *Fix:* one `sameProblem(signature, detailA, detailB, minDetail)` predicate used in `onFailure` and at `memory.ts:503, 515-522, 721`.
-- [ ] **M4. A wrong lesson is never replaced.** `memory.ts:524-528, 164-171`, `store.ts:305`. *Fix:* when a known problem is fixed again by edits to different files, distill and `store.supersede`; withhold `helped` when the pass's edited files do not intersect the shown card's files.
-- [ ] **M5. Keyword recall fires on one shared word.** `store.ts:272-290`, `memory.ts:728-731`. *Fix:* at least 3 shared keywords and a symmetric measure; no result for a query under 3 keywords; rescore before capping candidates.
-- [ ] **M6. The sidecar can retire any preference with an unchecked `replaces`.** `preferences.ts:84-91`, `memory.ts:363`. *Fix:* require topical overlap between the replaced rule and the quote or new rule; notify the user; list recently retired preferences with a restore command.
-- [ ] **M7. Preference identity ignores negation.** `store.ts:186-199`, `preferences.ts:143-154, 189-194`. *Fix:* a polarity flag per rule, required equal in `sameRule` and `alreadySaid`; check all live preferences, not the last 30.
-- [ ] **M8. Recalled text is stored and replayed unsanitised, and crosses repos.** `memory.ts:695-701, 758-796`. *Fix:* collapse whitespace and strip `[`, `<<<`, `>>>` from lessons at admission; escape delimiters in `renderRoute`; for other-repo matches render only distilled lessons without file names; create the database with mode 600.
-- [ ] **M9. Session identity and per-task state reset on rebuild.** `memory.ts:146-156`. *Fix:* use B11's session id for `session`; keep per-session state keyed by it; call `finishTask()` on dispose.
-- [ ] **M10. Store: migration race, non-atomic writes, no recovery, no cap.** `store.ts:240-303, 463-477`. *Fix:* `BEGIN IMMEDIATE` and re-read `user_version`; transactions around `insert` and `merge`; quarantine a corrupt file and start fresh; try/finally in `finishTask`; filter vectors by scope in SQL; cap live cards per scope.
-- [ ] **M11. The edit cap keeps the earliest edits.** `episodes.ts:119-122`. *Fix:* keep the latest edit per path; expire an open command after K intervening tool calls.
-- [ ] **M12. Repo scope is an unnormalised string and falls back silently.** `memory.ts:799-809`. *Fix:* normalise to `host/owner/repo`; tell a timeout from "no remote" and disable learning for the session on timeout.
-- [ ] **M13. Lesson-writing is cancelled at shutdown.** *Fix:* the adapter's `session_shutdown` awaits D4's bounded `drain` before closing the pool.
-- [ ] **M14. `memory.ts` is one 570-line closure.** *Fix:* split into `learn.ts`, `recall.ts`, preference wiring beside `preferences.ts`, interview wiring in `interview.ts`, `scope.ts`; `memory.ts` composes them.
+- [x] **M1. A pass is admitted as a fix whatever the edits were.** `episodes.ts:98-124`, `memory.ts:511-550`. Skipping the test, an unrelated edit beside a shell fix, or a flaky test all store a card. *Fix:* refuse an episode whose edits are all on `isTestPath` paths or add skip/ignore/xfail markers; record mutating shell commands between failure and pass and drop or annotate such an episode; ignore edits outside the cwd; tell `lesson.v2` to return "" when the route only loosens a test.
+- [x] **M2. The lesson falls back to the deterministic text without the reusability gate.** `memory.ts:529-537, 671-694`. *Fix:* with D3 in place, retry at the next settle on timeout instead of writing a deterministic card; re-check `existing` after the await with an in-flight map; for a `write`, name only the file.
+- [x] **M3. The tracker matches errors by signature alone.** `episodes.ts:72`. Two different failing tests with one normalised signature become one card. *Fix:* one `sameProblem(signature, detailA, detailB, minDetail)` predicate used in `onFailure` and at `memory.ts:503, 515-522, 721`.
+- [x] **M4. A wrong lesson is never replaced.** `memory.ts:524-528, 164-171`, `store.ts:305`. *Fix:* when a known problem is fixed again by edits to different files, distill and `store.supersede`; withhold `helped` when the pass's edited files do not intersect the shown card's files.
+- [x] **M5. Keyword recall fires on one shared word.** `store.ts:272-290`, `memory.ts:728-731`. *Fix:* at least 3 shared keywords and a symmetric measure; no result for a query under 3 keywords; rescore before capping candidates.
+- [x] **M6. The sidecar can retire any preference with an unchecked `replaces`.** `preferences.ts:84-91`, `memory.ts:363`. *Fix:* require topical overlap between the replaced rule and the quote or new rule; notify the user; list recently retired preferences with a restore command.
+- [x] **M7. Preference identity ignores negation.** `store.ts:186-199`, `preferences.ts:143-154, 189-194`. *Fix:* a polarity flag per rule, required equal in `sameRule` and `alreadySaid`; check all live preferences, not the last 30.
+- [x] **M8. Recalled text is stored and replayed unsanitised, and crosses repos.** `memory.ts:695-701, 758-796`. *Fix:* collapse whitespace and strip `[`, `<<<`, `>>>` from lessons at admission; escape delimiters in `renderRoute`; for other-repo matches render only distilled lessons without file names; create the database with mode 600.
+- [x] **M9. Session identity and per-task state reset on rebuild.** `memory.ts:146-156`. *Fix:* use B11's session id for `session`; keep per-session state keyed by it; call `finishTask()` on dispose.
+- [x] **M10. Store: migration race, non-atomic writes, no recovery, no cap.** `store.ts:240-303, 463-477`. *Fix:* `BEGIN IMMEDIATE` and re-read `user_version`; transactions around `insert` and `merge`; quarantine a corrupt file and start fresh; try/finally in `finishTask`; filter vectors by scope in SQL; cap live cards per scope.
+- [x] **M11. The edit cap keeps the earliest edits.** `episodes.ts:119-122`. *Fix:* keep the latest edit per path; expire an open command after K intervening tool calls.
+- [x] **M12. Repo scope is an unnormalised string and falls back silently.** `memory.ts:799-809`. *Fix:* normalise to `host/owner/repo`; tell a timeout from "no remote" and disable learning for the session on timeout.
+- [-] **M13. Lesson-writing is cancelled at shutdown.** *Fix:* the adapter's `session_shutdown` awaits D4's bounded `drain` before closing the pool. *Done by stream E.*
+- [x] **M14. `memory.ts` is one 570-line closure.** *Fix:* split into `learn.ts`, `recall.ts`, preference wiring beside `preferences.ts`, interview wiring in `interview.ts`, `scope.ts`; `memory.ts` composes them.
 
 ## T. Triage (wave 2)
 
