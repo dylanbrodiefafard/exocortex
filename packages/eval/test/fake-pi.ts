@@ -30,10 +30,17 @@ export interface FakePiBehavior {
 	readonly ignoreAbort?: boolean;
 	/** Ask for the editor text to be set to this before settling, the first time only. */
 	readonly suggestOnce?: string;
+	/**
+	 * Take this long to exit once stdin closes, as pi does while a `session_shutdown` handler
+	 * waits (PI_API_NOTES §16), then write `shutdown-done` in the working directory, holding the
+	 * drain time it was asked for (`EXO_SHUTDOWN_DRAIN_MS`).
+	 */
+	readonly shutdownMs?: number;
 }
 
 const SOURCE = `
 const { execSync } = require("node:child_process");
+const { writeFileSync } = require("node:fs");
 const behavior = JSON.parse(process.env.FAKE_PI ?? "{}");
 const label = process.env.EXO_TRACE_LABEL ?? "";
 const out = (record) => process.stdout.write(JSON.stringify(record) + "\\n");
@@ -86,7 +93,13 @@ process.stdin.on("data", (chunk) => {
 		if (line.trim() !== "") handle(JSON.parse(line));
 	}
 });
-process.stdin.on("end", () => process.exit(0));
+process.stdin.on("end", () => {
+	if (behavior.shutdownMs === undefined) process.exit(0);
+	setTimeout(() => {
+		writeFileSync("shutdown-done", process.env.EXO_SHUTDOWN_DRAIN_MS ?? "");
+		process.exit(0);
+	}, behavior.shutdownMs);
+});
 `;
 
 /** Writes the fake CLI into `dir` and returns its path, for `PiRpcOptions.cliPath`. */

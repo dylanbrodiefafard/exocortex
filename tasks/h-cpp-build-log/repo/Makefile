@@ -13,7 +13,10 @@ CXXFLAGS := $(STD) $(OPT) $(WARNINGS) -fno-omit-frame-pointer -fdiagnostics-colo
 LDFLAGS  :=
 
 BUILD    := build
-LIB_SRCS := src/strutil.cpp src/csv.cpp src/record.cpp src/stats.cpp src/histogram.cpp src/report.cpp
+# Every .cpp in src/ is part of the library. These build first, in this order; any other follows.
+LIB_ORDER := src/strutil.cpp src/csv.cpp src/record.cpp src/stats.cpp src/histogram.cpp src/report.cpp
+LIB_FOUND := $(sort $(wildcard src/*.cpp))
+LIB_SRCS := $(filter $(LIB_FOUND),$(LIB_ORDER)) $(filter-out $(LIB_ORDER),$(LIB_FOUND))
 LIB_OBJS := $(LIB_SRCS:%.cpp=$(BUILD)/%.o)
 LIB      := $(BUILD)/liblatency.a
 TEST_BIN := $(BUILD)/latency_tests

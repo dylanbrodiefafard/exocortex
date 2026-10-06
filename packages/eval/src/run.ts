@@ -1,10 +1,10 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig, openTraceStore } from "@exocortex/core";
 import { type ParseError, parse as parseJsonc } from "jsonc-parser";
-import { computeTraceMetrics, type TraceMetrics } from "./metrics.ts";
+import { computeTraceMetrics, type TraceMetrics, type WorkspaceEdits, type WorkspaceFacts } from "./metrics.ts";
 import { PiRpcProcess, type PromptResult } from "./pi-rpc.ts";
 import { deriveSeed, mulberry32, shuffled } from "./random.ts";
 import { invalidReason, type RunRecord, readResultLines } from "./records.ts";
@@ -18,6 +18,7 @@ import {
 	prepareWorkspace,
 	runCheck,
 	runShell,
+	workspaceEdits,
 } from "./workspace.ts";
 
 export interface EvalOptions {
@@ -29,8 +30,9 @@ export interface EvalOptions {
 	/** Directory for this run's artifacts (created). */
 	readonly runDir: string;
 	/**
-	 * Parent for per-run workspaces. Defaults to the OS temp dir: workspaces must live outside
-	 * this repo so the agent can't wander up into `tasks/` and read solutions or hidden tests.
+	 * Parent for per-run workspaces. Defaults to a new directory under the OS temp dir, removed
+	 * when the run ends: workspaces must live outside this repo so the agent can't wander up into
+	 * `tasks/` and read solutions or hidden tests, and two runs must never share one.
 	 */
 	readonly workRoot?: string;
 	readonly model?: string;
@@ -46,6 +48,11 @@ export interface EvalOptions {
 	readonly seed?: number;
 	/** Skip every (task, config, repeat) already in `runDir`'s `results.jsonl`. */
 	readonly resume?: boolean;
+	/**
+	 * How long pi may wait at the end of a run for background sidecar calls before it cancels them
+	 * (the adapter's `EXO_SHUTDOWN_DRAIN_MS`). Default {@link DEFAULT_DRAIN_MS}.
+	 */
+	readonly drainMs?: number;
 	readonly log?: (line: string) => void;
 }
 
@@ -64,6 +71,19 @@ const DEFAULT_PI_CLI = join(
 	"cli.js",
 );
 const ADAPTER_ENTRY = fileURLToPath(import.meta.resolve("@exocortex/pi-adapter"));
+
+/**
+ * The harness closes pi the moment the agent settles, and memory's lesson-writing is a background
+ * call that only starts then (D-086). An interactive session gives such calls 2 s at quit; a run
+ * gives them 30 s, which is one call's own deadline (memory's `distillTimeoutMs`), so a call that
+ * was free to start is never the one cut off. It costs nothing when nothing is in the background.
+ */
+const DEFAULT_DRAIN_MS = 30_000;
+/**
+ * What pi's shutdown may take on top of the drain before the harness kills it: disposing modules
+ * (2 s at most, D-078), the trace's last flush (500 ms, D-080) and the process's own exit.
+ */
+const CLOSE_MARGIN_MS = 5_000;
 
 /** `run.json` of a run directory, or undefined when it has none or it does not parse. */
 export function readRunMeta(runDir: string): RunMeta | undefined {
@@ -99,28 +119,35 @@ export async function runEval(options: EvalOptions): Promise<RunRecord[]> {
 		tasks: options.tasks.map((t) => t.spec.id),
 	};
 	writeFileSync(join(options.runDir, "run.json"), `${JSON.stringify(meta, null, 2)}\n`);
-	const workRoot = options.workRoot ?? join(tmpdir(), `exo-eval-${basename(options.runDir)}`);
-	const dbPath = join(options.runDir, "trace.db");
-	const configPaths = new Map(
-		options.configs.map((name) => [name, writeRunConfig(options, name, workRoot, dbPath, log)]),
-	);
-	const resultsPath = join(options.runDir, "results.jsonl");
-	const done = options.resume ? finishedRuns(options.runDir, resultsPath, log) : new Map<string, RunRecord>();
-
+	// A directory of this run's own (D-086): one named only after the run directory was shared by
+	// every run whose directory had that name, and the first to finish removed the others' workspaces.
+	const workRoot = options.workRoot ?? mkdtempSync(join(tmpdir(), `exo-eval-${basename(options.runDir)}-`));
 	const results: RunRecord[] = [];
-	for (const slot of slots(options, seed)) {
-		const earlier = done.get(slotKey(slot.task.spec.id, slot.config, slot.repeat));
-		if (earlier) {
-			results.push(earlier);
-			continue;
+	try {
+		const dbPath = join(options.runDir, "trace.db");
+		const configPaths = new Map(
+			options.configs.map((name) => [name, writeRunConfig(options, name, workRoot, dbPath, log)]),
+		);
+		const resultsPath = join(options.runDir, "results.jsonl");
+		const done = options.resume ? finishedRuns(options.runDir, resultsPath, log) : new Map<string, RunRecord>();
+
+		for (const slot of slots(options, seed)) {
+			const earlier = done.get(slotKey(slot.task.spec.id, slot.config, slot.repeat));
+			if (earlier) {
+				results.push(earlier);
+				continue;
+			}
+			const run: RunContext = { ...slot, options, workRoot, dbPath, configPath: configPaths.get(slot.config) ?? "" };
+			const record = await runWithRetry(run, `${slot.task.spec.id}--${slot.config}--r${slot.repeat}`, log);
+			results.push(record);
+			appendFileSync(resultsPath, `${JSON.stringify(record)}\n`);
+			log(`  ${resultLine(record)}`);
 		}
-		const run: RunContext = { ...slot, options, workRoot, dbPath, configPath: configPaths.get(slot.config) ?? "" };
-		const record = await runWithRetry(run, `${slot.task.spec.id}--${slot.config}--r${slot.repeat}`, log);
-		results.push(record);
-		appendFileSync(resultsPath, `${JSON.stringify(record)}\n`);
-		log(`  ${resultLine(record)}`);
+	} finally {
+		// A work root the caller named may hold other things; the default one is this run's to remove.
+		const leftovers = options.workRoot === undefined ? workRoot : join(workRoot, TRIMMER_DIR);
+		if (!options.keepWorkdirs) rmSync(leftovers, { recursive: true, force: true });
 	}
-	if (!options.keepWorkdirs) rmSync(join(workRoot, TRIMMER_DIR), { recursive: true, force: true });
 	return results;
 }
 
@@ -217,8 +244,9 @@ async function runOne(run: RunContext, label: string): Promise<RunRecord> {
 		error,
 	});
 
+	let baseline: string;
 	try {
-		await prepareWorkspace(task, workdir);
+		baseline = await prepareWorkspace(task, workdir);
 		if (task.spec.setup) {
 			const setup = await runShell(task.spec.setup, workdir, task.spec.checkTimeoutSec * 1000);
 			if (setup.exitCode !== 0) return fail("setup_failed", `setup failed: ${setup.outputTail}`);
@@ -227,8 +255,66 @@ async function runOne(run: RunContext, label: string): Promise<RunRecord> {
 		return fail("setup_failed", String(error));
 	}
 
-	let agent: PromptResult;
+	let driven: Driven;
+	try {
+		driven = await driveAgent(run, label, workdir);
+	} catch (error) {
+		return fail("harness_error", `driving pi failed: ${String(error)}`);
+	}
+	const { agent, closeMs, killedAtClose } = driven;
+
+	// Everything after the agent can fail for reasons that are not the agent's (a full disk, a
+	// locked trace): record that as a harness error and keep the suite going.
+	try {
+		// Before the guard: it restores files, and with them their times.
+		const edits = await workspaceEdits(workdir, baseline);
+		const score = await scoreWorkspace(task, workdir, asideDirOf(workdir));
+		writeFileSync(join(options.runDir, "logs", `${label}.check.log`), score.output);
+		for (const line of guardLines(score.guard)) options.log?.(`  ${line}`);
+		if (score.tooFewTests) {
+			options.log?.(`  check exited 0 but ran ${score.checkTests ?? "no"} tests; the task needs ${task.spec.minTests}`);
+		}
+		return {
+			...base,
+			outcome: agent.outcome,
+			success: score.success,
+			checkExitCode: score.checkExitCode,
+			checkTimedOut: score.checkTimedOut,
+			agentMs: agent.durationMs,
+			acceptedSuggestions: agent.acceptedSuggestions,
+			tamperedTests: score.guard.tamperedTests,
+			tamperedFiles: score.guard.tamperedFiles,
+			setAsideTests: score.guard.setAsideTests,
+			checkTests: score.checkTests,
+			...(score.tooFewTests ? { tooFewTests: true } : {}),
+			...(edits ? { edits } : {}),
+			closeMs,
+			...(killedAtClose ? { killedAtClose: true } : {}),
+			wallClockMs: Math.round(performance.now() - started) - closeMs,
+			metrics: readMetrics(run.dbPath, label, workspaceFacts(task, edits)),
+			...(agent.error === undefined ? {} : { error: agent.error }),
+		};
+	} catch (error) {
+		return fail("harness_error", `scoring failed: ${String(error)}`, agent);
+	}
+}
+
+interface Driven {
+	readonly agent: PromptResult;
+	/** How long pi took to exit after the agent settled. */
+	readonly closeMs: number;
+	/** Pi outlasted the close grace and was killed. */
+	readonly killedAtClose: boolean;
+}
+
+/** Starts pi in the workspace, gives it the task's prompt, and closes it when the agent stops. */
+async function driveAgent(run: RunContext, label: string, workdir: string): Promise<Driven> {
+	const { options, task } = run;
+	const drainMs = options.drainMs ?? DEFAULT_DRAIN_MS;
 	let pi: PiRpcProcess | undefined;
+	let agent: PromptResult;
+	let closeMs = 0;
+	let killedAtClose = false;
 	try {
 		mkdirSync(join(options.runDir, "logs"), { recursive: true });
 		pi = new PiRpcProcess({
@@ -250,50 +336,26 @@ async function runOne(run: RunContext, label: string): Promise<RunRecord> {
 			env: {
 				EXO_CONFIG: run.configPath,
 				EXO_TRACE_LABEL: label,
+				EXO_SHUTDOWN_DRAIN_MS: String(drainMs),
 				...(options.piAgentDir ? { PI_CODING_AGENT_DIR: options.piAgentDir } : {}),
 			},
 			stderrPath: join(options.runDir, "logs", `${label}.stderr.log`),
+			closeGraceMs: drainMs + CLOSE_MARGIN_MS,
 		});
 		agent = await pi.prompt(task.spec.prompt, {
 			maxTurns: task.spec.maxTurns,
 			timeoutMs: task.spec.timeoutSec * 1000,
 			acceptSuggestions: true,
 		});
-	} catch (error) {
-		return fail("harness_error", `driving pi failed: ${String(error)}`);
 	} finally {
-		await pi?.close().catch(() => {});
+		// The harness closes pi the moment the agent settles, which is when memory's background
+		// calls may first run: the close waits for them (D-086), and that wait is not the run's time.
+		const closing = performance.now();
+		killedAtClose = (await pi?.close().catch(() => undefined))?.killed ?? false;
+		closeMs = Math.round(performance.now() - closing);
 	}
-
-	// Everything after the agent can fail for reasons that are not the agent's (a full disk, a
-	// locked trace): record that as a harness error and keep the suite going.
-	try {
-		const score = await scoreWorkspace(task, workdir, asideDirOf(workdir));
-		writeFileSync(join(options.runDir, "logs", `${label}.check.log`), score.output);
-		for (const line of guardLines(score.guard)) options.log?.(`  ${line}`);
-		if (score.tooFewTests) {
-			options.log?.(`  check exited 0 but ran ${score.checkTests ?? "no"} tests; the task needs ${task.spec.minTests}`);
-		}
-		return {
-			...base,
-			outcome: agent.outcome,
-			success: score.success,
-			checkExitCode: score.checkExitCode,
-			checkTimedOut: score.checkTimedOut,
-			agentMs: agent.durationMs,
-			acceptedSuggestions: agent.acceptedSuggestions,
-			tamperedTests: score.guard.tamperedTests,
-			tamperedFiles: score.guard.tamperedFiles,
-			setAsideTests: score.guard.setAsideTests,
-			checkTests: score.checkTests,
-			...(score.tooFewTests ? { tooFewTests: true } : {}),
-			wallClockMs: Math.round(performance.now() - started),
-			metrics: readMetrics(run.dbPath, label),
-			...(agent.error === undefined ? {} : { error: agent.error }),
-		};
-	} catch (error) {
-		return fail("harness_error", `scoring failed: ${String(error)}`, agent);
-	}
+	if (killedAtClose) options.log?.(`  pi did not shut down within ${drainMs + CLOSE_MARGIN_MS} ms and was killed`);
+	return { agent, closeMs, killedAtClose };
 }
 
 function guardLines(guard: GuardResult): string[] {
@@ -341,8 +403,16 @@ export async function scoreWorkspace(task: Task, workdir: string, asideDir: stri
 	};
 }
 
-/** Metrics for one labelled run, computed from the run directory's trace; null when it left no session. */
-export function readMetrics(dbPath: string, label: string): TraceMetrics | null {
+/** What the harness knows about a run beyond its trace: the task's check and how the workspace ended up. */
+export function workspaceFacts(task: Task | undefined, edits: WorkspaceEdits | undefined): WorkspaceFacts {
+	return { ...(edits ? { edits } : {}), ...(task ? { checks: [task.spec.check] } : {}) };
+}
+
+/**
+ * Metrics for one labelled run, computed from the run directory's trace; null when it left no
+ * session. `workspace` is what the trace cannot say (see {@link workspaceFacts}).
+ */
+export function readMetrics(dbPath: string, label: string, workspace: WorkspaceFacts = {}): TraceMetrics | null {
 	const store = openTraceStore({ path: dbPath });
 	try {
 		const sessions = store.sessions({ label });
@@ -350,6 +420,7 @@ export function readMetrics(dbPath: string, label: string): TraceMetrics | null 
 		return computeTraceMetrics(
 			sessions.flatMap((s) => store.events(s.id)),
 			sessions.flatMap((s) => store.sidecarCalls(s.id)),
+			workspace,
 		);
 	} finally {
 		store.close();

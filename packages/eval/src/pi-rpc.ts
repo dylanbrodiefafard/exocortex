@@ -13,8 +13,14 @@ export interface PiRpcOptions {
 	readonly env: Readonly<Record<string, string>>;
 	/** pi's stderr is appended here. */
 	readonly stderrPath: string;
-	/** How long an abort and a close wait for pi before killing it. Default 5 s. */
+	/** How long an abort waits for pi before killing it. Default 5 s. */
 	readonly graceMs?: number;
+	/**
+	 * How long a close waits for pi to exit by itself before killing it. Default: `graceMs`. Pi
+	 * awaits its extensions' `session_shutdown` handlers without a limit (PI_API_NOTES §16), and
+	 * Exocortex's waits there for background sidecar calls, so this has to cover that wait.
+	 */
+	readonly closeGraceMs?: number;
 }
 
 export interface PromptLimits {
@@ -58,9 +64,11 @@ export class PiRpcProcess {
 	private nextId = 0;
 	private exited: string | undefined;
 	private readonly graceMs: number;
+	private readonly closeGraceMs: number;
 
 	constructor(options: PiRpcOptions) {
 		this.graceMs = options.graceMs ?? ABORT_GRACE_MS;
+		this.closeGraceMs = options.closeGraceMs ?? this.graceMs;
 		this.stderr = createWriteStream(options.stderrPath, { flags: "a" });
 		this.child = spawn(process.execPath, [options.cliPath, "--mode", "rpc", ...options.args], {
 			cwd: options.cwd,
@@ -187,16 +195,28 @@ export class PiRpcProcess {
 		};
 	}
 
-	/** Closes stdin (pi's documented shutdown), then kills the process group if it lingers. */
-	async close(): Promise<void> {
+	/**
+	 * Closes stdin (pi's documented shutdown) and waits for pi to exit, which it does once its
+	 * extensions' `session_shutdown` handlers have returned; then kills the process group, which
+	 * is all that is left of a pi that exited and the end of one that did not. `killed` says the
+	 * close grace ran out first: that pi's shutdown was cut short, and whatever it had still to
+	 * write (the end of its trace, a memory card) is missing.
+	 */
+	async close(): Promise<{ readonly killed: boolean }> {
+		let killed = false;
 		if (!this.exited) {
-			const exited = new Promise<void>((resolve) => this.child.once("exit", () => resolve()));
+			let timer: NodeJS.Timeout | undefined;
+			const exited = new Promise<boolean>((resolve) => this.child.once("exit", () => resolve(true)));
 			this.child.stdin.end();
-			const timeout = new Promise<void>((resolve) => setTimeout(resolve, this.graceMs).unref());
-			await Promise.race([exited, timeout]);
+			const timeout = new Promise<boolean>((resolve) => {
+				timer = setTimeout(() => resolve(false), this.closeGraceMs);
+			});
+			killed = !(await Promise.race([exited, timeout]));
+			clearTimeout(timer);
 		}
 		killGroup(this.child.pid);
 		await new Promise<void>((resolve) => this.stderr.end(resolve));
+		return { killed };
 	}
 
 	private async abort(): Promise<void> {

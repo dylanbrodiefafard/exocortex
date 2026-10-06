@@ -17,7 +17,9 @@ const MODULE_MODES: Readonly<Record<string, readonly string[]>> = { supervisor: 
  *   toggles are kept in the session (an `exo.overrides` entry), so `/reload` and `/resume` keep them;
  * - `/exo <module> on|off`: toggle one module, e.g. `/exo trimmer on`;
  * - `/exo supervisor suggest|auto`: also switch the supervisor's mode;
- * - `/exo memory preferences` / `/exo memory forget <id>`: list or retire learned preferences;
+ * - `/exo memory preferences` / `/exo memory forget <id>` / `/exo memory restore <id>`: list, retire or
+ *   bring back learned preferences;
+ * - `/exo memory cards` / `/exo memory forget card <id>`: list or retire learned cards (D-081);
  * - `/exo memory interview`: a few questions whose answers become preferences (D-066).
  */
 export function registerExoCommand(pi: ExtensionAPI, runtime: Runtime): void {

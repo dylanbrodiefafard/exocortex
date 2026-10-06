@@ -99,6 +99,8 @@ describe("computeTraceMetrics", () => {
 			sidecarCalls: 0,
 			sidecarTokens: 0,
 			sidecarFailures: 0,
+			backgroundFinishedAtShutdown: 0,
+			backgroundCutOff: 0,
 			verdicts: { complete: 0, incomplete: 0, failed: 0, uncertain: 0 },
 			lastVerdict: null,
 			deterministicVerdicts: 0,
@@ -249,6 +251,124 @@ describe("computeTraceMetrics", () => {
 			result("6", "bash", false),
 		]);
 		expect(retried).toMatchObject({ verifiedAfterLastEdit: true, maxRepeatedFailures: 3 });
+	});
+
+	it("counts background sidecar calls that finished at shutdown and those that were cut off (E2, D-086)", () => {
+		const drained = (settled: number, remaining: number) =>
+			event(
+				"exo.action",
+				{ action: "drained", settled, remaining, ms: 40, limitMs: 30_000 },
+				{ synthetic: true, module: "sidecars" },
+			);
+		expect(computeTraceMetrics([])).toMatchObject({ backgroundFinishedAtShutdown: 0, backgroundCutOff: 0 });
+		// One session per accepted suggestion or retry: the counts add up over a run's sessions.
+		const metrics = computeTraceMetrics([drained(2, 0), drained(1, 3)]);
+		expect(metrics).toMatchObject({ backgroundFinishedAtShutdown: 3, backgroundCutOff: 3 });
+		// Waiting at shutdown is not the supervisor continuing the agent.
+		expect(metrics.continuations).toBe(0);
+	});
+
+	describe("verified after the last edit (E1, D-086)", () => {
+		let id = 0;
+		/** One bash call and its result, `at` ms into the run. */
+		function bash(command: string, at: number, result: { exitCode?: number; output?: string } = {}) {
+			id += 1;
+			const exitCode = result.exitCode ?? 0;
+			return [
+				event("tool.call", { toolCallId: `v${id}`, toolName: "bash", input: { command } }, { ts: at - 1 }),
+				event(
+					"tool.result",
+					{
+						toolCallId: `v${id}`,
+						toolName: "bash",
+						isError: exitCode !== 0,
+						exitCode,
+						content: [{ type: "text", text: result.output ?? "" }],
+					},
+					{ ts: at },
+				),
+			];
+		}
+		function edit(at: number) {
+			id += 1;
+			return [
+				event("tool.call", { toolCallId: `v${id}`, toolName: "edit", input: { path: "src/lib.rs" } }, { ts: at - 1 }),
+				event("tool.result", { toolCallId: `v${id}`, toolName: "edit", isError: false }, { ts: at }),
+			];
+		}
+		/** The workspace differs from the baseline in one file, last written at `lastEditMs`. */
+		const edited = (lastEditMs: number | null) => ({ edits: { files: ["src/lib.rs"], lastEditMs } });
+		const verified = (events: StoredTraceEvent[], workspace?: Parameters<typeof computeTraceMetrics>[2]) =>
+			computeTraceMetrics(events, [], workspace).verifiedAfterLastEdit;
+		const GREEN = "test result: ok. 2 passed; 0 failed; 0 ignored";
+		const RED = "test parse ... FAILED\ntest result: FAILED. 1 passed; 1 failed; 0 ignored";
+
+		it("does not count a test run that failed behind a pipe", () => {
+			const run = (output: string) => [...edit(10), ...bash("cargo test 2>&1 | tail -5", 20, { output })];
+			expect(verified(run(RED))).toBe(false);
+			expect(verified(run(RED), edited(10))).toBe(false);
+			// The same line with the runner's pass summary is a verification.
+			expect(verified(run(GREEN), edited(10))).toBe(true);
+			// Cut down to nothing readable, it proves nothing either way.
+			expect(verified(run(""), edited(10))).toBe(false);
+		});
+
+		it("does not count a command that only mentions a runner", () => {
+			for (const command of ["grep -rn pytest .", "cat Makefile", "echo cargo test", "which make", "git log -- make"]) {
+				expect(verified([...edit(10), ...bash(command, 20)], edited(10)), command).toBe(false);
+				expect(verified([...edit(10), ...bash(command, 20)]), command).toBe(false);
+			}
+		});
+
+		it("sees an edit made through bash, from the workspace's diff", () => {
+			const events = [...bash("cargo test", 10, { output: GREEN }), ...bash("sed -i s/a/b/ src/lib.rs", 20)];
+			// No edit tool was used: the trace alone cannot know (the old answer, kept when no diff exists).
+			expect(verified(events)).toBeNull();
+			expect(verified(events, edited(19))).toBe(false);
+			expect(verified([...events, ...bash("cargo test", 30, { output: GREEN })], edited(19))).toBe(true);
+		});
+
+		it("says null only when the workspace is unchanged, whatever tools ran", () => {
+			expect(
+				verified([...edit(10), ...bash("git checkout src/lib.rs", 20)], { edits: { files: [], lastEditMs: null } }),
+			).toBeNull();
+		});
+
+		it("counts the run that wrote the last change itself (a lock file, a formatter in the same line)", () => {
+			// `Cargo.lock` is written while `cargo test` runs: before its result, after its call.
+			expect(verified([...edit(10), ...bash("cargo test", 30, { output: GREEN })], edited(29))).toBe(true);
+			expect(verified([...edit(10), ...bash("cargo test", 30, { output: GREEN })], edited(30.4))).toBe(true);
+		});
+
+		it("takes a deleted file as an edit at an unknown time", () => {
+			const events = [...bash("cargo test", 10, { output: GREEN }), ...bash("rm src/old.rs", 20)];
+			expect(verified(events, { edits: { files: ["src/old.rs"], lastEditMs: null } })).toBe(true);
+			expect(verified(bash("rm src/old.rs", 20), { edits: { files: ["src/old.rs"], lastEditMs: null } })).toBe(false);
+		});
+
+		it("knows a test binary run by its path, and the task's own check when it names no known runner", () => {
+			expect(verified([...edit(10), ...bash("./build/tests", 20)], edited(10))).toBe(true);
+			expect(verified([...edit(10), ...bash("make -s && ./build/tests", 20)], edited(10))).toBe(true);
+			// Nothing in `python3 tests/run.py` says it runs tests, unless the task's check is that command.
+			const script = [...edit(10), ...bash("python3 tests/run.py", 20)];
+			expect(verified(script, edited(10))).toBe(false);
+			expect(verified(script, { ...edited(10), checks: ["python3 tests/run.py"] })).toBe(true);
+			expect(
+				verified([...edit(10), ...bash("python3 tests/run.py -v", 20)], {
+					...edited(10),
+					checks: ["python3 tests/run.py"],
+				}),
+			).toBe(true);
+			// A check that is several commands names none of them as a test: `test -e x` is not one.
+			const compound = { ...edited(10), checks: ["test -e .cargo && cargo test"] };
+			expect(verified([...edit(10), ...bash("test -e .cargo", 20)], compound)).toBe(false);
+		});
+
+		it("a failing run is not a verification, and a later passing one is", () => {
+			const failing = bash("make test", 20, { exitCode: 2, output: "FAILED" });
+			expect(verified([...edit(10), ...failing], edited(10))).toBe(false);
+			expect(verified([...edit(10), ...failing, ...bash("make test", 30)], edited(10))).toBe(true);
+		});
 	});
 
 	describe("recurring errors and triage hints", () => {

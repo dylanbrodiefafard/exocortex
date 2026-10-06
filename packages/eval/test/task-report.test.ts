@@ -1,12 +1,13 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { runProcess } from "@exocortex/core";
 import { afterEach, describe, expect, it } from "vitest";
 import type { RunRecord } from "../src/records.ts";
 import { summarize } from "../src/report.ts";
 import { scoreWorkspace, validateTasks, validationPasses } from "../src/run.ts";
 import { loadTasks, recordMinTests, type Task } from "../src/task.ts";
-import { applyCheckGuard, prepareWorkspace } from "../src/workspace.ts";
+import { applyCheckGuard, prepareWorkspace, runCheck, workspaceEdits } from "../src/workspace.ts";
 
 const REPO = join(import.meta.dirname, "..", "..", "..");
 let tmp: string | undefined;
@@ -162,6 +163,130 @@ describe("tags and hidden overlays", () => {
 		expect(result?.solutionPasses).toBe(false);
 		expect(result?.detail).toContain("solution.patch edits protected tests (tests/test_x.py)");
 		expect(result && validationPasses(result)).toBe(false);
+	});
+});
+
+describe("workspaceEdits (D-086)", () => {
+	it("prepares over a workspace an interrupted run left behind, instead of failing every run after it", async () => {
+		fixture("stale", { id: "stale", language: "other", prompt: "x", check: "true" });
+		writeFileSync(join(tmp ?? "", "stale", "repo", "a.txt"), "a\n");
+		const [task] = loadTasks(tmp ?? "");
+		if (!task) throw new Error("no task");
+		const dir = mkdtempSync(join(tmpdir(), "exo-work-"));
+		await prepareWorkspace(task, dir);
+		// The run was killed here: its workspace stays, with the agent's half-done work in it.
+		writeFileSync(join(dir, "a.txt"), "half done\n");
+		writeFileSync(join(dir, "scratch.txt"), "left over\n");
+		// The same label again (a resumed run, or a retry): "nothing to commit" used to end it as a failed setup.
+		const baseline = await prepareWorkspace(task, dir);
+		expect(readFileSync(join(dir, "a.txt"), "utf8")).toBe("a\n");
+		expect(existsSync(join(dir, "scratch.txt"))).toBe(false);
+		expect(await workspaceEdits(dir, baseline)).toEqual({ files: [], lastEditMs: null });
+		rmSync(dir, { recursive: true, force: true });
+	});
+
+	it("lists what differs from the baseline, however it was changed, and when it was last written", async () => {
+		fixture("edits", { id: "edits", language: "other", prompt: "x", check: "true" });
+		const repo = join(tmp ?? "", "edits", "repo");
+		for (const name of ["a.txt", "b.txt", "c.txt", "d.txt"]) writeFileSync(join(repo, name), `${name}\n`);
+		writeFileSync(join(repo, ".gitignore"), "*.log\n");
+		const [task] = loadTasks(tmp ?? "");
+		if (!task) throw new Error("no task");
+		const dir = mkdtempSync(join(tmpdir(), "exo-work-"));
+		const baseline = await prepareWorkspace(task, dir);
+		expect(baseline).toMatch(/^[0-9a-f]{40}$/);
+		expect(await workspaceEdits(dir, baseline)).toEqual({ files: [], lastEditMs: null });
+
+		// Deleted only: a change with no time.
+		rmSync(join(dir, "d.txt"));
+		expect(await workspaceEdits(dir, baseline)).toEqual({ files: ["d.txt"], lastEditMs: null });
+
+		// No edit tool involved: the shell wrote these.
+		const at = (ms: number) => new Date(1_700_000_000_000 + ms);
+		writeFileSync(join(dir, "a.txt"), "changed\n");
+		utimesSync(join(dir, "a.txt"), at(1000), at(1000));
+		mkdirSync(join(dir, "src"));
+		writeFileSync(join(dir, "src", "new file.txt"), "new\n");
+		utimesSync(join(dir, "src", "new file.txt"), at(3000), at(3000));
+		// Rewritten with what it already held, and build output: neither is an edit.
+		writeFileSync(join(dir, "b.txt"), "b.txt\n");
+		mkdirSync(join(dir, "build"));
+		writeFileSync(join(dir, "build", "out.o"), "object");
+		writeFileSync(join(dir, "run.log"), "ignored by the fixture");
+		expect(await workspaceEdits(dir, baseline)).toEqual({
+			files: ["a.txt", "d.txt", "src/new file.txt"],
+			lastEditMs: 1_700_000_003_000,
+		});
+
+		// The agent committed its work: the comparison is still against the baseline.
+		const env = { GIT_AUTHOR_NAME: "a", GIT_AUTHOR_EMAIL: "a@b", GIT_COMMITTER_NAME: "a", GIT_COMMITTER_EMAIL: "a@b" };
+		await runProcess("git", ["add", "-A"], { cwd: dir, timeoutMs: 10_000 });
+		await runProcess("git", ["commit", "-q", "--no-gpg-sign", "-m", "wip"], { cwd: dir, timeoutMs: 10_000, env });
+		writeFileSync(join(dir, "c.txt"), "after the commit\n");
+		utimesSync(join(dir, "c.txt"), at(5000), at(5000));
+		expect(await workspaceEdits(dir, baseline)).toEqual({
+			files: ["a.txt", "c.txt", "d.txt", "src/new file.txt"],
+			lastEditMs: 1_700_000_005_000,
+		});
+
+		// Without its repository the workspace cannot say.
+		rmSync(join(dir, ".git"), { recursive: true });
+		expect(await workspaceEdits(dir, baseline)).toBeUndefined();
+		rmSync(dir, { recursive: true, force: true });
+	});
+});
+
+describe("shipped fixtures under the check guard (D-086)", () => {
+	/** The sources `make test` would compile, in order. `make -n` needs no compiler. */
+	async function planned(dir: string): Promise<string[]> {
+		const plan = (await runCheck("make -n test", dir, 20_000)).outputTail;
+		const commands = plan.split("\n").filter((line) => !line.startsWith("echo "));
+		return commands.flatMap((line) => line.match(/[\w/]+\.cpp\b/g) ?? []);
+	}
+	async function workspaceOf(id: string): Promise<{ task: Task; dir: string }> {
+		const [task] = loadTasks(join(REPO, "tasks"), [id]);
+		if (!task) throw new Error(`no task ${id}`);
+		const dir = mkdtempSync(join(tmpdir(), "exo-work-"));
+		await prepareWorkspace(task, dir);
+		return { task, dir };
+	}
+
+	// The guard restores the Makefile, so a Makefile that names its sources fails a solution that
+	// adds one. Each fixture's own sources still build in the order they always did.
+	it.each([
+		[
+			"h-cpp-build-log",
+			"src/added.cpp",
+			[
+				...["strutil", "csv", "record", "stats", "histogram", "report"].map((name) => `src/${name}.cpp`),
+				...["tools/latency_report.cpp", "tests/tests.cpp", "examples/histogram_demo.cpp"],
+			],
+			6,
+		],
+		[
+			"h-cpp-netcalc",
+			"src/added.cpp",
+			["src/ipv4.cpp", "src/ipv6.cpp", "tests/test_netcalc.cpp", "tools/netcalc.cpp"],
+			0,
+		],
+		["h-cpp-ledger", "added.cpp", ["test_ledger.cpp", "money.cpp", "ledger.cpp"], 3],
+	])("%s builds a source file the agent adds", async (id, added, sources, at) => {
+		const { task, dir } = await workspaceOf(id);
+		expect(await planned(dir)).toEqual(sources);
+		writeFileSync(join(dir, added), "int exo_added() { return 1; }\n");
+		const guard = applyCheckGuard(task, dir, `${dir}.aside`);
+		const after = await planned(dir);
+		rmSync(dir, { recursive: true, force: true });
+		expect(guard).toEqual({ tamperedTests: [], tamperedFiles: [], setAsideTests: [] });
+		expect(after).toEqual(sources.toSpliced(at, 0, added));
+	});
+
+	it("h-cpp-ledger does not link a scratch program left beside the sources", async () => {
+		const { dir } = await workspaceOf("h-cpp-ledger");
+		writeFileSync(join(dir, "repro.cpp"), '#include "money.hpp"\nint main() { return 0; }\n');
+		const after = await planned(dir);
+		rmSync(dir, { recursive: true, force: true });
+		expect(after).toEqual(["test_ledger.cpp", "money.cpp", "ledger.cpp"]);
 	});
 });
 

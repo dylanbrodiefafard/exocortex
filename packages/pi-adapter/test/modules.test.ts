@@ -630,7 +630,9 @@ describe("user-turn context, suggestions and module commands", () => {
 				}),
 			},
 			{ slow: { enabled: true }, bad: { enabled: true } },
-			{ budgetsMs: { userTurn: 20 } },
+			// Wide enough that a timer firing late on a busy machine does not use up the second
+			// provider's share: at 20 ms the first one's 10 ms timer could fire after the whole budget.
+			{ budgetsMs: { userTurn: 400 } },
 		);
 		await h.pi.emit("session_start");
 		await h.pi.emit("input", { text: "go", source: "interactive" });

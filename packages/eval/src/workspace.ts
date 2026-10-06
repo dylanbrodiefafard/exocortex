@@ -1,6 +1,7 @@
 import { cpSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
 import { type CommandOutput, isTestPath, runProcess, runShellCommand } from "@exocortex/core";
+import type { WorkspaceEdits } from "./metrics.ts";
 import type { Task } from "./task.ts";
 
 export type CommandResult = CommandOutput;
@@ -20,19 +21,61 @@ const CHECK_TAIL_CHARS = 8_000_000;
 /**
  * Copies the task's fixture repo into `workdir` and commits it as the baseline, so the agent's
  * changes are visible as a git diff. Fixtures are tiny; this is the only "isolation" eval needs
- * (D-013, D-014).
+ * (D-013, D-014). Returns the baseline commit's id, for {@link workspaceEdits}.
  */
-export async function prepareWorkspace(task: Task, workdir: string): Promise<void> {
+export async function prepareWorkspace(task: Task, workdir: string): Promise<string> {
+	// A run that was killed leaves its workspace behind. Copying over it would keep the old run's
+	// work, and an unchanged one fails the commit ("nothing to commit") for every run after it.
+	rmSync(workdir, { recursive: true, force: true });
 	mkdirSync(workdir, { recursive: true });
 	cpSync(task.repoDir, workdir, { recursive: true });
+	let output = "";
 	for (const args of [
 		["init", "-q", "-b", "main"],
 		["add", "-A"],
 		["commit", "-q", "--no-gpg-sign", "-m", "fixture baseline"],
+		["rev-parse", "HEAD"],
 	]) {
 		const result = await runCommand("git", args, { cwd: workdir, timeoutMs: 30_000, env: GIT_ENV });
 		if (result.exitCode !== 0) throw new Error(`git ${args.join(" ")} failed: ${result.outputTail}`);
+		output = result.outputTail;
 	}
+	return output.trim();
+}
+
+/** A list of paths can be long (an agent that vendored a dependency); a cut-off one would be a wrong one. */
+const PATHS_TAIL_CHARS = 4_000_000;
+
+/**
+ * How the workspace now differs from its baseline commit (D-086): every file changed, added or
+ * deleted since, by whatever means, and when the newest of them was written. Commits the agent
+ * made are looked through (the comparison is against the baseline, not `HEAD`), files the
+ * fixture's `.gitignore` names and build output are left out, and a file put back as it was is
+ * not a change. Undefined when the repository cannot answer (the agent removed `.git`): the
+ * caller then knows only what the trace says.
+ *
+ * Call it before the check guard, which restores files and so rewrites their times.
+ */
+export async function workspaceEdits(workdir: string, baseline: string): Promise<WorkspaceEdits | undefined> {
+	const git = async (args: readonly string[]) => {
+		const result = await runProcess("git", args, { cwd: workdir, timeoutMs: 30_000, tailChars: PATHS_TAIL_CHARS });
+		return result.exitCode === 0 ? result.outputTail : undefined;
+	};
+	const changed = await git(["diff", "--name-only", "--no-renames", "-z", baseline, "--"]);
+	const added = await git(["ls-files", "--others", "--exclude-standard", "-z"]);
+	if (changed === undefined || added === undefined) return undefined;
+	const files = [...new Set(`${changed}\0${added}`.split("\0"))]
+		.filter((path) => path !== "" && !path.split("/").some((part) => SKIPPED_DIRS.has(part)))
+		.sort();
+	let lastEditMs: number | null = null;
+	for (const path of files) {
+		try {
+			lastEditMs = Math.max(lastEditMs ?? 0, lstatSync(join(workdir, path)).mtimeMs);
+		} catch {
+			// Deleted: a change with no time of its own.
+		}
+	}
+	return { files, lastEditMs };
 }
 
 /** Copies the task's hidden acceptance files over the workspace (overwriting same-named files). */

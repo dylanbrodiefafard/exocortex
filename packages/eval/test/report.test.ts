@@ -366,4 +366,32 @@ describe("report", () => {
 		expect(markdown).not.toContain("| all-off | 0 |");
 		expect(renderMarkdown([trimmed("all-off", 0, 0)], "t")).not.toContain("## Trimmed outputs");
 	});
+
+	it("shows background sidecar work that was finished or cut off when the session ended (E2)", () => {
+		const ended = (taskId: string, config: string, finished: number, cutOff: number, extra: Partial<RunRecord> = {}) =>
+			run(taskId, config, true, {
+				metrics: { ...computeTraceMetrics([]), backgroundFinishedAtShutdown: finished, backgroundCutOff: cutOff },
+				...extra,
+			});
+		const markdown = renderMarkdown(
+			[
+				ended("a", "all-off", 0, 0, { closeMs: 40 }),
+				ended("a", "memory", 2, 0, { closeMs: 1_900 }),
+				ended("b", "memory", 1, 3, { closeMs: 30_100 }),
+				ended("c", "memory", 0, 0, { closeMs: 35_000, killedAtClose: true }),
+			],
+			"t",
+		);
+		expect(markdown).toContain("## Background work at session end");
+		// config | finished while pi waited | cut off | runs with a call cut off | pi killed at close | median close
+		expect(markdown).toContain("| memory | 3 | 3 | 1 | 1 | 30.1s |");
+		expect(markdown).not.toContain("| all-off | 0 | 0 |");
+		expect(markdown).toContain("a card whose lesson was cut off");
+		// Nothing in the background anywhere: no section.
+		expect(renderMarkdown([ended("a", "all-off", 0, 0)], "t")).not.toContain("## Background work");
+		// A record from before the metric existed is not a run with nothing cut off, but it is not shown either.
+		expect(renderMarkdown([run("a", "old", true, { metrics: computeTraceMetrics([]) })], "t")).not.toContain(
+			"## Background work",
+		);
+	});
 });

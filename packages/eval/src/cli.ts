@@ -4,7 +4,7 @@ import { basename, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { type RunRecord, readResults } from "./records.ts";
 import { renderMarkdown } from "./report.ts";
-import { readMetrics, readRunMeta, runEval, validateTasks, validationPasses } from "./run.ts";
+import { readMetrics, readRunMeta, runEval, validateTasks, validationPasses, workspaceFacts } from "./run.ts";
 import { loadTasks, recordMinTests, type Task } from "./task.ts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..", "..", "..");
@@ -145,9 +145,12 @@ function report(runDir: string, tasks: readonly Task[], values: CliValues): numb
 	const all = readResults(runDir, (message) => process.stderr.write(`warning: ${message}\n`));
 	const ids = new Set(tasks.map((t) => t.spec.id));
 	const dbPath = join(runDir, "trace.db");
+	const byId = new Map(tasks.map((t) => [t.spec.id, t]));
+	// The workspace is gone by now: what it looked like is in the record (`edits`), when it has it.
+	const recomputed = (r: RunRecord) => readMetrics(dbPath, r.label, workspaceFacts(byId.get(r.taskId), r.edits));
 	const records: RunRecord[] = all
 		.filter((r) => ids.has(r.taskId))
-		.map((r) => (existsSync(dbPath) ? { ...r, metrics: readMetrics(dbPath, r.label) ?? r.metrics } : r));
+		.map((r) => (existsSync(dbPath) ? { ...r, metrics: recomputed(r) ?? r.metrics } : r));
 	if (records.length === 0) {
 		process.stderr.write(`No results for the selected tasks in ${runDir}\n`);
 		return 1;

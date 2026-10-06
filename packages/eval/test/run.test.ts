@@ -84,6 +84,28 @@ describe("runEval", { timeout: 30_000 }, () => {
 		expect(readdirSync(join(tmp, "work"))).toEqual([]);
 	});
 
+	it("gives each run its own workspaces, also when two run directories have the same name (E4)", async () => {
+		// Every test names its run directory `run`, and so may two real runs started with the same
+		// `--out`: with one work root per name, the first to finish removed the other's workspace.
+		const name = `run-${process.pid}-${Date.now()}`;
+		const fix = task("fix");
+		Object.assign(process.env, fakePiEnv({ shell: `sleep 0.3; ${SOLVE}` }));
+		const evaluateIn = (parent: string) =>
+			runEval({
+				tasks: [fix],
+				configs: ["a"],
+				configsDir: join(tmp, "configs"),
+				repeats: 1,
+				runDir: join(tmp, parent, name),
+				piCliPath: writeFakePi(tmp),
+			});
+		const [one, two] = await Promise.all([evaluateIn("one"), evaluateIn("two")]);
+		expect(one[0]).toMatchObject({ outcome: "settled", success: true });
+		expect(two[0]).toMatchObject({ outcome: "settled", success: true });
+		// The default work root is the harness's own to remove.
+		expect(readdirSync(tmpdir()).filter((entry) => entry.includes(name))).toEqual([]);
+	});
+
 	it("runs the configs of each task and repeat in a seeded, recorded, replayable order", async () => {
 		const configs = ["a", "b", "c"];
 		const { log, runDir, records } = await evaluate(
@@ -214,6 +236,46 @@ describe("runEval", { timeout: 30_000 }, () => {
 		const { records } = await evaluate({ shell: SOLVE }, { tasks: [task("fix")] });
 		expect(records[0]?.outcome).toBe("harness_error");
 		expect(records[0]?.error).toContain("driving pi failed");
+	});
+
+	it("records how the workspace differs from the baseline, before the guard touches it (E1)", async () => {
+		const edit = `${SOLVE}; echo scratch > notes.txt; mkdir build; echo o > build/out.o`;
+		const before = Date.now();
+		const { records } = await evaluate({ shell: edit }, { tasks: [task("fix")] });
+		// No edit tool ran, and there is no trace at all: the diff is what says the agent edited.
+		expect(records[0]?.edits?.files).toEqual(["notes.txt", "visible.txt"]);
+		expect(records[0]?.edits?.lastEditMs).toBeGreaterThanOrEqual(before - 1_000);
+		const untouched = await evaluate({ turns: 1 }, { tasks: [task("fix2")], runDir: join(tmp, "run2") });
+		expect(untouched.records[0]?.edits).toEqual({ files: [], lastEditMs: null });
+	});
+
+	it("waits at close for pi's shutdown, asks it to drain for longer, and keeps that wait out of the run's time (E2)", async () => {
+		const slowExit = { shell: SOLVE, shutdownMs: 600 };
+		const { records } = await evaluate(slowExit, { tasks: [task("fix")], keepWorkdirs: true });
+		const [record] = records;
+		expect(record).toMatchObject({ outcome: "settled", success: true });
+		expect(record?.killedAtClose).toBeUndefined();
+		expect(record?.closeMs).toBeGreaterThanOrEqual(550);
+		// The fake pi exited by itself, having been told the eval's drain time and not the 2 s default.
+		expect(readFileSync(join(tmp, "work", "fix--a--r1", "shutdown-done"), "utf8")).toBe("30000");
+		const asked = await evaluate(slowExit, {
+			tasks: [task("fix2")],
+			keepWorkdirs: true,
+			drainMs: 1_234,
+			runDir: join(tmp, "run2"),
+		});
+		expect(readFileSync(join(tmp, "work", "fix2--a--r1", "shutdown-done"), "utf8")).toBe("1234");
+		// The wall clock is the run's, without the wait for background work.
+		const total = (asked.records[0]?.wallClockMs ?? 0) + (asked.records[0]?.closeMs ?? 0);
+		expect(asked.records[0]?.wallClockMs).toBeLessThan(total - 500);
+	});
+
+	it("kills a pi that never finishes shutting down, says so in the record and scores the run anyway", async () => {
+		const stuck = { shell: SOLVE, shutdownMs: 600_000 };
+		const { records, log } = await evaluate(stuck, { tasks: [task("fix")], drainMs: 0 });
+		expect(records[0]).toMatchObject({ outcome: "settled", success: true, killedAtClose: true });
+		expect(log.some((line) => line.includes("did not shut down within 5000 ms"))).toBe(true);
+		expect(renderMarkdown(records, "t")).toContain("| a | 0 | 0 | 0 | 1 |");
 	});
 
 	it("keeps workspaces when asked", async () => {

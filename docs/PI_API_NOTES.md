@@ -598,6 +598,29 @@ Read in the installed 1.0.2 build under `node_modules/@earendil-works/`. Paths a
 - **`pi.appendEntry` makes the entry the new leaf** (`core/session-manager.js:901-912`, `:815-820`), also in the middle of a tool batch. The projection skips it, so the request prefix is unchanged (tested: the next request's messages start with the previous request's).
 - **Compaction entries keep `details`** (`core/session-manager.d.ts:46-59`), and `session_before_compact` hands over `branchEntries` (`core/extensions/types.d.ts:579-589`), so an extension can read back the details it returned with the previous compaction.
 
+## 16. `session_shutdown`: awaited in every mode, with no time limit (D-086)
+
+Read in the installed 1.0.2 build; paths and line numbers as in §15. The eval test "pi waits for an async `session_shutdown` handler before it exits" (`packages/eval/test/eval.integration.test.ts`) checks the RPC item marked **tested** against real pi.
+
+- **Every handler is awaited, one after another, and nothing bounds the wait.**
+  - `emitSessionShutdownEvent` awaits `extensionRunner.emit(event)` (`core/extensions/runner.js:80-86`), and `emit` awaits each handler in turn inside a try/catch (`runner.js:813-840`). There is no timer in either.
+  - A handler that throws or rejects is reported through `emitError` and the next one still runs (`runner.js:827-836`).
+  - So a handler that never returns holds pi for ever. Exocortex's handlers bound themselves: the drain of background sidecar calls (`EXO_SHUTDOWN_DRAIN_MS`, 2 s by default), disposing modules (2 s) and the trace's last flush (500 ms).
+- **Where it is emitted, and what waits on it:**
+  - **Quit**, any mode: `AgentSessionRuntime.dispose()` awaits the event, then disposes the session (`core/agent-session-runtime.js:296-303`). It does not abort a running agent first.
+  - **`/new`, `/resume`, `/fork`:** `teardownCurrent` awaits `session.abort()`, then the event, then disposes (`core/agent-session-runtime.js:102-113`). The new session is built only after that.
+  - **`/reload`:** `reload()` awaits the event before it invalidates the old runner (`core/agent-session.js:2899-2903`).
+- **TUI.** `InteractiveMode.shutdown()` (`modes/interactive/interactive-mode.js:3426-3461`):
+  - **On quit** (Ctrl+D, double Ctrl+C, `/quit`) it drains terminal input for up to 1 s and **stops the TUI first** (`:3453-3454`), then awaits `runtimeHost.dispose()` (`:3455`), prints the resume hint and exits (`:3456-3460`). While the handlers run the user sees a restored terminal with no prompt and no message: every millisecond a handler takes there looks like a hang.
+  - **On SIGTERM or SIGHUP** the order is the other way round: handlers first (`:3441`), then the terminal (`:3443-3445`).
+  - **A second request does nothing:** `shutdown()` returns at once when one is in progress (`:3427-3428`). But stopping the TUI puts the terminal back in cooked mode (`pi-tui/dist/terminal.js:374-375`) and pi installs no SIGINT handler outside suspend (`interactive-mode.js:3566-3585`), so Ctrl+C during the wait kills the process: the handler is cut off where it stands and later handlers do not run.
+- **RPC** (**tested**). `shutdown()` in `modes/rpc/rpc-mode.js:579-596` awaits `runtimeHost.dispose()` (`:589`), then flushes stdout and exits (`:592-595`).
+  - It runs when stdin ends (`:639-642`), on SIGTERM or SIGHUP (`:275-287`), and after a command or a settle once an extension asked for shutdown (`:256-258`, `:265-269`, `:597-601`).
+  - Closing stdin is therefore a graceful shutdown: the process exits when the last handler returns, however long that takes. A driver has to wait at least as long as the handlers may take before it kills the process.
+  - **A second signal exits at once** (`if (shuttingDown) process.exit(exitCode)`, `:580-582`).
+- **Print/json:** `disposeRuntime` awaits `runtimeHost.dispose()` (`modes/print-mode.js:23-30`), in the `finally` of the run (`:138`) and on a signal (`:39-41`).
+- **Handlers run in registration order** (§2), so one extension's wait delays every later handler, other extensions' included.
+
 ---
 
 ## Answers to Exocortex open questions

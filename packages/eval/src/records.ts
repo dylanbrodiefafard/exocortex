@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { TraceMetrics } from "./metrics.ts";
+import type { TraceMetrics, WorkspaceEdits } from "./metrics.ts";
 import type { RunOutcome } from "./pi-rpc.ts";
 
 export interface RunRecord {
@@ -28,6 +28,19 @@ export interface RunRecord {
 	readonly tooFewTests?: boolean;
 	/** 2 when the first attempt was invalid and the run was repeated once (D-079). */
 	readonly attempts?: number;
+	/**
+	 * How the workspace differed from the task's baseline when the agent stopped, before the check
+	 * guard touched it (D-086). Kept so a re-rendered report can still tell an edit from none.
+	 */
+	readonly edits?: WorkspaceEdits;
+	/**
+	 * How long pi took to shut down once the agent had settled: mostly its wait for background
+	 * sidecar calls (D-086). Not part of `wallClockMs`: an interactive user does not wait for it.
+	 */
+	readonly closeMs?: number;
+	/** Pi outlasted the close grace and was killed: the end of its trace, and any card still being written, is missing. */
+	readonly killedAtClose?: boolean;
+	/** The whole run, from preparing the workspace to the check's end, without `closeMs`. */
 	readonly wallClockMs: number;
 	readonly metrics: TraceMetrics | null;
 	readonly error?: string;

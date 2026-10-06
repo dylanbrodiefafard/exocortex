@@ -22,15 +22,25 @@ If you run an embeddings server (D-062), set `embeddings.baseUrl` and `embedding
 
 Re-render any slice with `npm run eval -- --report eval-runs/<stamp> --tags <slice>`.
 
-## 0. Calibrate the new fixtures (do first)
+## 0. Calibrate every hard fixture (do first, once)
+
+**Every hard task needs a new baseline, including the 12 calibrated in D-037.** The hardening pass (D-076) changed what a run is scored against, so no earlier baseline rate can be relied on:
+
+- the check guard is stricter than the one those 12 were calibrated under (D-079): it restores build files, sets aside tests the agent added and fails a check that ran too few tests;
+- three fixtures' `Makefile`s changed (D-086): `h-cpp-build-log`, `h-cpp-ledger` and `h-cpp-netcalc` now build a source file the agent adds, where the guard used to fail such a solution.
+
+One run covers all 28, the 16 still tagged `uncalibrated` among them. It is 84 runs, about 3 hours:
 
 ```sh
-npm run eval -- --model ninfer/coding --tags uncalibrated --config all-off --repeat 3
+npm run eval -- --model ninfer/coding --tags hard --config all-off --repeat 3
 ```
 
-- **Keep** tasks between 1/3 and 2/3. Rework or drop tasks at 0/3 or 3/3: they carry no signal (EVAL_TASKS.md). Then remove the `uncalibrated` tag.
+Do it once, after every hardening stream is merged and before step 1. The steps below compare against `all-off` rows measured in their own batch, so they do not reuse these numbers; what this run decides is which tasks are worth running at all.
+
+- **Keep** tasks between 1/3 and 2/3. Rework or drop tasks at 0/3 or 3/3: they carry no signal (EVAL_TASKS.md). Then remove the `uncalibrated` tag from the ones kept.
 - In the first calibration, 6 of 12 hard tasks scored 3/3 (D-037). Consider making those harder, or retagging them `regression` and running them less often.
-- **Calibrate the already-calibrated hard tasks again too** (`--tags hard`). The check guard is stricter than the one they were calibrated under (D-079), so a task's baseline rate may have moved. While reading the result, look at `tamperedFiles` and `setAsideTests` in `results.jsonl` for failing runs: a run that failed only because the guard restored a `Makefile` it had a good reason to change points at a fixture to fix (give the task its own `protect` list), not at the agent.
+- **Read the guard's work on failing runs.** Look at `tamperedFiles` and `setAsideTests` in `results.jsonl`: a run that failed only because the guard restored a `Makefile` it had a good reason to change points at a fixture to fix (a wildcard for its sources, or its own `protect` list), not at the agent.
+- **Read the *lucky passes* column as a new number.** It now counts a pass whose last change to the workspace, made by any tool, was not followed by a passing test or build run as core reads one (D-086). Earlier reports counted differently and are not comparable.
 
 ## 1. Phase 3 acceptance: supervisor vs baseline
 

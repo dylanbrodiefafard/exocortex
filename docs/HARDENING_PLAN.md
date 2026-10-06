@@ -29,7 +29,7 @@ A read-only audit of every package (2026-10-06) found the weak spots listed here
 | R. Trimmer | `fix/trimmer-selection` | D-083 | 2 | merged |
 | S. Supervisor | `fix/supervisor-evidence` | D-084 | 2 | merged |
 | K. Compaction | `fix/compaction-facts` | D-085 | 2 | merged |
-| E. Eval follow-up | `fix/eval-followup` | D-086 | 2 | in progress |
+| E. Eval follow-up | `fix/eval-followup` | D-086 | 2 | merged |
 
 ---
 
@@ -123,7 +123,7 @@ Files owned: `packages/mod-memory/`.
 - [x] **M10. Store: migration race, non-atomic writes, no recovery, no cap.** `store.ts:240-303, 463-477`. *Fix:* `BEGIN IMMEDIATE` and re-read `user_version`; transactions around `insert` and `merge`; quarantine a corrupt file and start fresh; try/finally in `finishTask`; filter vectors by scope in SQL; cap live cards per scope.
 - [x] **M11. The edit cap keeps the earliest edits.** `episodes.ts:119-122`. *Fix:* keep the latest edit per path; expire an open command after K intervening tool calls.
 - [x] **M12. Repo scope is an unnormalised string and falls back silently.** `memory.ts:799-809`. *Fix:* normalise to `host/owner/repo`; tell a timeout from "no remote" and disable learning for the session on timeout.
-- [-] **M13. Lesson-writing is cancelled at shutdown.** *Fix:* the adapter's `session_shutdown` awaits D4's bounded `drain` before closing the pool. *Done by stream E.*
+- [x] **M13. Lesson-writing is cancelled at shutdown.** *Fix:* the adapter's `session_shutdown` awaits D4's bounded `drain` before closing the pool. *Done by stream E (D-086).*
 - [x] **M14. `memory.ts` is one 570-line closure.** *Fix:* split into `learn.ts`, `recall.ts`, preference wiring beside `preferences.ts`, interview wiring in `interview.ts`, `scope.ts`; `memory.ts` composes them.
 
 ## T. Triage (wave 2)
@@ -176,7 +176,9 @@ Files owned: `packages/mod-compaction/`.
 
 ## E. Eval follow-up (wave 2)
 
-Files owned: `packages/eval/`.
+Files owned: `packages/eval/`, `packages/testkit/`, `tasks/`, `docs/AB_PLAN.md`, `docs/EVAL_TASKS.md`; for M13's adapter half, the shutdown path in `packages/pi-adapter/src/{sidecars,index}.ts`.
 
-- [ ] **E1. "Lucky pass" has its own idea of a verifying run.** `metrics.ts:352-378`. A piped failing run counts as verification; `grep -rn pytest .` counts; bash edits are not edits. *Fix:* use core's classifier (A1–A3) for both "is a verify command" and "passed"; detect edits from the final diff against the baseline commit.
-- [ ] **E2. Closing pi at settle cuts memory's lesson-writing short.** `pi-rpc.ts:135-136, 167-176`. *Fix:* with M13 in place, raise the close grace to cover the drain and record how many background calls were cut off per run.
+- [x] **E1. "Lucky pass" has its own idea of a verifying run.** `metrics.ts:352-378`. A piped failing run counts as verification; `grep -rn pytest .` counts; bash edits are not edits. *Fix:* use core's classifier (A1–A3) for both "is a verify command" and "passed"; detect edits from the final diff against the baseline commit. *Done (D-086):* as proposed. The diff also says when the last change was written, so a run counts when it ended after that. `./build/tests` is a test run (core reads it as one); `python3 tests/run.py` is one only when it is the task's own check, which the eval now passes to core.
+- [x] **E2. Closing pi at settle cuts memory's lesson-writing short.** `pi-rpc.ts:135-136, 167-176`. *Fix:* with M13 in place, raise the close grace to cover the drain and record how many background calls were cut off per run. *Done (D-086):* the adapter half of M13 is here too (`pool.drain` at `session_shutdown`, 2 s by default, `EXO_SHUTDOWN_DRAIN_MS`). The eval asks for 30 s, waits 35 s at close, and reports calls finished, calls cut off and runs where pi had to be killed.
+- [x] **E3. Three C++ fixtures fail a correct solution that adds a source file** (D-079's open risk). `tasks/h-cpp-build-log`, `h-cpp-ledger`, `h-cpp-netcalc`: the `Makefile` the guard restores named its sources. *Done (D-086):* each builds the sources it finds, in the order it always built its own; all 34 tasks still validate.
+- [x] **E4. `eval.integration.test.ts` "supervisor suggest mode…" fails now and then.** *Done (D-086):* not timing. Every run whose directory had the same name shared one work root under the OS temp dir, and every test names its run directory `run`: a test finishing in another checkout removed this one's workspace mid-run. Each run now makes its own work root. The same cause explains the other intermittent failures in that file ("marks a run invalid…" with `metrics: null`, and two more). Also fixed: a workspace left by a killed run is removed before reuse; the integration tests no longer read the machine's `~/.exocortex/config.jsonc`; the false-positive simulation in `stats.test.ts` is one test per design; an adapter test's 20 ms shared budget is 400 ms.

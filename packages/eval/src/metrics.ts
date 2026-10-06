@@ -3,10 +3,12 @@ import {
 	callKey,
 	failureKey,
 	maskedFailure,
+	outcomeOf,
 	type SidecarCallRecord,
 	type StoredTraceEvent,
 	sharedPrefix,
 	trailingLoop,
+	verifyingRun,
 } from "@exocortex/core";
 
 /** Per-run metrics derived purely from the harness-agnostic trace (brief §7). */
@@ -40,8 +42,10 @@ export interface TraceMetrics {
 	/** Verdicts reached without an LLM call (supervisor preVerdict, D-046). */
 	readonly deterministicVerdicts: number;
 	/**
-	 * Whether a test or build command succeeded after the agent's last file edit; null when it
-	 * edited nothing. A pass without it is a "lucky pass" candidate (research R7.6).
+	 * Whether a test or build run passed after the agent's last change to the workspace; null when
+	 * it changed nothing. A pass without it is a "lucky pass" candidate (research R7.6). What counts
+	 * as a run and as passing is core's reading (D-077), and the changes are the workspace's diff
+	 * against the task's baseline when {@link WorkspaceFacts.edits} is given (D-086).
 	 */
 	readonly verifiedAfterLastEdit: boolean | null;
 	/** Most times one identical command failed: blind retrying (research R7.6). */
@@ -86,6 +90,13 @@ export interface TraceMetrics {
 	readonly sidecarTokens: number;
 	/** Sidecar calls that did not succeed (timeout, error, invalid output, ...), excluding cap/budget rejections. */
 	readonly sidecarFailures: number;
+	/**
+	 * Background sidecar calls (memory's lesson-writing) still queued or running when the session
+	 * ended: those that finished in the time shutdown gave them, and those it cut off (D-086).
+	 * Optional: results recorded before these existed lack them.
+	 */
+	readonly backgroundFinishedAtShutdown?: number;
+	readonly backgroundCutOff?: number;
 }
 
 /** One normalized error signature that came back within a run. */
@@ -105,9 +116,29 @@ export interface RecurringError {
 	readonly fixed: boolean;
 }
 
+/** What the harness knows about a run that its trace cannot say (D-086). */
+export interface WorkspaceFacts {
+	/**
+	 * How the finished workspace differs from the task's baseline commit. With it, an edit is a
+	 * file that ended up different, however it was written (`sed -i`, a heredoc, a formatter), and
+	 * a file put back as it was is not one. Without it, edits are the edit tools' calls.
+	 */
+	readonly edits?: WorkspaceEdits;
+	/** The task's check command: a run of it verifies, even when it names no runner core knows. */
+	readonly checks?: readonly string[];
+}
+
+export interface WorkspaceEdits {
+	/** Repo-relative paths that were changed, added or deleted; build output and ignored files aside. */
+	readonly files: readonly string[];
+	/** When the newest of those still present was last written (epoch ms); null when none is (deletions only). */
+	readonly lastEditMs: number | null;
+}
+
 export function computeTraceMetrics(
 	events: readonly StoredTraceEvent[],
 	sidecarCalls: readonly SidecarCallRecord[] = [],
+	workspace: WorkspaceFacts = {},
 ): TraceMetrics {
 	let inputTokens = 0;
 	let cachedTokens = 0;
@@ -179,7 +210,7 @@ export function computeTraceMetrics(
 			).length,
 		verdicts: countVerdicts(events),
 		lastVerdict: lastVerdict(events),
-		...processQuality(events),
+		...processQuality(events, workspace),
 		deterministicVerdicts: events.filter(
 			(e) => e.kind === "exo.verdict" && record(e.data)["source"] === "deterministic",
 		).length,
@@ -202,7 +233,21 @@ export function computeTraceMetrics(
 		sidecarFailures: sidecarCalls.filter(
 			(c) => c.outcome !== "ok" && c.outcome !== "rejected_turn_cap" && c.outcome !== "rejected_budget",
 		).length,
+		...shutdownDrains(events),
 	};
+}
+
+/** What the adapter's wait for background calls at `session_shutdown` came to (its `drained` action). */
+function shutdownDrains(events: readonly StoredTraceEvent[]) {
+	let backgroundFinishedAtShutdown = 0;
+	let backgroundCutOff = 0;
+	for (const e of events) {
+		const data = record(e.data);
+		if (e.kind !== "exo.action" || data["action"] !== "drained") continue;
+		backgroundFinishedAtShutdown += number(data["settled"]);
+		backgroundCutOff += number(data["remaining"]);
+	}
+	return { backgroundFinishedAtShutdown, backgroundCutOff };
 }
 
 /** How many commands the agent runs right after a compaction count as "its next actions" (research R4.4). */
@@ -374,32 +419,50 @@ function failed(toolResult: Readonly<Record<string, unknown>>, command = ""): bo
 }
 
 const EDIT_TOOL = /^(edit|write|multi_?edit|apply_?patch)$/i;
-const VERIFY_COMMAND =
-	/\b(pytest|unittest|cargo (test|build|check)|go (test|build|vet)|ctest|make\b|cmake --build|npm (run )?(test|build)|npx (vitest|jest|tsc)|tox|g\+\+|clang\+\+)/;
 
-function processQuality(events: readonly StoredTraceEvent[]) {
-	const commands = new Map<string, string>();
-	for (const e of events) {
-		const data = record(e.data);
-		if (e.kind === "tool.call")
-			commands.set(String(data["toolCallId"]), String(record(data["input"])["command"] ?? ""));
-	}
+/**
+ * Whether the agent's last change was followed by a passing test or build run, and how often it
+ * repeated one failing command.
+ * - **A verifying run** is what core reads as one (`verifyingRun`: the line is parsed, so
+ *   `grep -rn pytest .` is not), or a run of the task's own check.
+ * - **It passed** when core's `outcomeOf` says so: a run whose exit code a pipe hid is read from
+ *   its output, and one that shows a failure or nothing readable does not count. The reading is
+ *   core's own, never a sidecar's, so the metric means the same in every config.
+ * - **The last change** is the newest write to a file that differs from the baseline. A run
+ *   counts when it ended at or after that write: what the run itself wrote (`Cargo.lock`, a
+ *   formatter earlier on the same line) comes before its result. Without the workspace's diff,
+ *   the last successful edit-tool call stands in, by position.
+ */
+function processQuality(events: readonly StoredTraceEvent[], workspace: WorkspaceFacts) {
+	const commands = commandsByCall(events);
+	const options = { tests: workspace.checks ?? [] };
 	let lastEdit = -1;
 	let lastVerified = -1;
+	let lastVerifiedMs: number | null = null;
 	const failures = new Map<string, number>();
 	events.forEach((e, index) => {
 		if (e.kind !== "tool.result") return;
 		const data = record(e.data);
 		const command = commands.get(String(data["toolCallId"])) ?? "";
-		const failed = data["isError"] === true;
-		if (EDIT_TOOL.test(String(data["toolName"])) && !failed) lastEdit = index;
-		if (!failed && VERIFY_COMMAND.test(command)) lastVerified = index;
-		if (failed && command !== "") failures.set(command, (failures.get(command) ?? 0) + 1);
+		const isError = data["isError"] === true;
+		if (EDIT_TOOL.test(String(data["toolName"])) && !isError) lastEdit = index;
+		if (isError && command !== "") failures.set(command, (failures.get(command) ?? 0) + 1);
+		if (command === "" || !verifyingRun(command, options)) return;
+		const exitCode = typeof data["exitCode"] === "number" ? data["exitCode"] : null;
+		const outcome = outcomeOf({ input: { command }, isError, exitCode, output: contentText(data["content"]) });
+		if (outcome !== "passed") return;
+		lastVerified = index;
+		lastVerifiedMs = e.ts;
 	});
-	return {
-		verifiedAfterLastEdit: lastEdit === -1 ? null : lastVerified > lastEdit,
-		maxRepeatedFailures: Math.max(0, ...failures.values()),
-	};
+	const edits = workspace.edits;
+	const verifiedAfterLastEdit = edits
+		? edits.files.length === 0
+			? null
+			: lastVerifiedMs !== null && lastVerifiedMs >= Math.floor(edits.lastEditMs ?? 0)
+		: lastEdit === -1
+			? null
+			: lastVerified > lastEdit;
+	return { verifiedAfterLastEdit, maxRepeatedFailures: Math.max(0, ...failures.values()) };
 }
 
 function lastVerdict(events: readonly StoredTraceEvent[]): TraceMetrics["lastVerdict"] {

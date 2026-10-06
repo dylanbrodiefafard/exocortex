@@ -185,6 +185,8 @@ Config is JSONC, read from three places:
 
 A project's file comes with the repository, so it can switch modules on or off and tune them, and nothing more. `engine`, `embeddings`, `pool` and `trace` there are ignored and reported: where sidecar calls go, and with which API key, is yours to decide. Look at a cloned repository's `.exocortex/config.jsonc` before you work in it, as you would its scripts: a module's settings can name commands to run (the supervisor's `checks`).
 
+When you quit pi, Exocortex waits up to 2 seconds for background work to finish (a lesson memory is still writing). `EXO_SHUTDOWN_DRAIN_MS=<ms>` changes that; `0` turns the wait off.
+
 [`exocortex.config.example.jsonc`](exocortex.config.example.jsonc) documents every option. The ones you are most likely to set:
 
 - **`engine`**: where sidecar calls go (`baseUrl`, `model`, `apiKey`) and which `profile` the server matches: `generic`, `vllm`, `sglang`, `llamacpp` or `ninfer`. Unset fields fall back to pi's main model when it is an OpenAI-compatible provider.

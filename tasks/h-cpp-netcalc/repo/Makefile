@@ -4,7 +4,8 @@ CXXFLAGS := -std=c++17 -O1 -g -Wall -Wextra -Wpedantic -Wshadow -Wconversion -fd
 CPPFLAGS := -Iinclude -Itests
 
 BUILD    := build
-LIB_SRCS := src/ipv4.cpp src/ipv6.cpp
+# Every .cpp in src/ is part of the library.
+LIB_SRCS := $(sort $(wildcard src/*.cpp))
 LIB_OBJS := $(LIB_SRCS:%.cpp=$(BUILD)/%.o)
 LIB      := $(BUILD)/libnetcalc.a
 TEST_BIN := $(BUILD)/netcalc_tests

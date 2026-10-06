@@ -59,18 +59,13 @@ export default function exocortex(pi: ExtensionAPI): void {
 	const onError = (where: string, error: unknown): void => emit("exo.error", () => ({ where, error: String(error) }));
 
 	const runtime = createRuntime({ env, onError, moduleSettings: MODULE_SETTINGS });
-	// First of all at shutdown: modules are disposed while the pool and the trace session they
-	// may still write to are open.
-	pi.on("session_shutdown", async () => {
-		try {
-			await runtime.disposeModules();
-		} catch (error) {
-			onError("modules.dispose", error);
-		}
-	});
-	// Sidecars before the recorder: at shutdown the pool closes (recording in-flight calls)
-	// before the trace session ends.
-	registerSidecars(pi, { runtime, env, onError });
+	// The order at shutdown (D-078, D-086), all inside the sidecars' handler, which is the first:
+	// 1. background sidecar calls get a bounded time to finish, with the modules still alive to
+	//    write down what they return (memory's lessons);
+	// 2. modules are disposed while the pool and the trace session they may still write to are open;
+	// 3. the pool closes, recording the calls it cuts off.
+	// Then the recorder, registered after it, ends the trace session.
+	registerSidecars(pi, { runtime, env, onError, beforeClose: () => runtime.disposeModules() });
 	registerTraceRecorder(pi, { runtime, env, onError });
 	registerModuleHost(pi, {
 		runtime,

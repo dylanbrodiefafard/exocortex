@@ -185,10 +185,46 @@ export function renderMarkdown(records: readonly RunRecord[], title: string, ord
 		...loopSection(valid, configs),
 		...trimmerSection(valid, configs),
 		...contextSection(valid, configs),
+		...shutdownSection(valid, configs),
 		...repeatSection(records, valid, summaries),
 		...pairedSection(records, summaries),
 	);
 	return `${lines.join("\n")}\n`;
+}
+
+/**
+ * Background sidecar calls at the end of each run (D-086). The harness closes pi when the agent
+ * settles, which is when memory's lesson-writing first gets to run; pi waits for it, up to a
+ * limit. Shown only when some run had such work or had to be killed.
+ */
+function shutdownSection(records: readonly RunRecord[], configs: readonly string[]): string[] {
+	const rows = configs.map((config) => {
+		const runs = records.filter((r) => r.config === config);
+		const metrics = metricsOf(records, config);
+		return {
+			config,
+			finished: sum(metrics.map((m) => m.backgroundFinishedAtShutdown ?? 0)),
+			cutOff: sum(metrics.map((m) => m.backgroundCutOff ?? 0)),
+			runsCutOff: metrics.filter((m) => (m.backgroundCutOff ?? 0) > 0).length,
+			killed: runs.filter((r) => r.killedAtClose === true).length,
+			closeSec: median(runs.flatMap((r) => (r.closeMs === undefined ? [] : [r.closeMs / 1000]))),
+		};
+	});
+	const shown = rows.filter((r) => r.finished + r.cutOff + r.killed > 0);
+	if (shown.length === 0) return [];
+	return [
+		"",
+		"## Background work at session end",
+		"",
+		"| config | calls finished while pi waited | calls cut off | runs with a call cut off | runs where pi was killed | median close |",
+		"|---|---|---|---|---|---|",
+		...shown.map(
+			(r) =>
+				`| ${r.config} | ${r.finished} | ${r.cutOff} | ${r.runsCutOff} | ${r.killed} | ${r.closeSec.toFixed(1)}s |`,
+		),
+		"",
+		"Memory writes a card's lesson with a background sidecar call that runs only once the agent is idle, and the harness closes pi at that moment. Pi waits for those calls before it exits; *median close* is how long that took, and it is not part of the wall-clock columns. *Cut off* calls were still queued or running when the wait ended: a card whose lesson was cut off has a fallback lesson or is missing, so a memory config with many of them was not measured as memory would run in a real session. A run where pi was *killed* at close lost the end of its trace as well, and its counts here are unknown.",
+	];
 }
 
 /** Every token a run spent: main input, cached and output, plus all sidecar calls. */

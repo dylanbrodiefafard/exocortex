@@ -7,6 +7,7 @@ import {
 	moduleLimitsFrom,
 	resolveEmbeddings,
 	resolveEngine,
+	type SidecarPool,
 } from "@exocortex/core";
 import type { Runtime } from "./runtime.ts";
 
@@ -14,9 +15,33 @@ export interface SidecarOptions {
 	readonly runtime: Runtime;
 	readonly env: Readonly<Record<string, string | undefined>>;
 	readonly onError: (where: string, error: unknown) => void;
+	/**
+	 * Runs at `session_shutdown` after background calls have had their time and before the pool
+	 * closes: the place to dispose modules, which may still be writing what those calls returned.
+	 */
+	readonly beforeClose?: () => Promise<void>;
 }
 
 const API_KEY_LOOKUP_TIMEOUT_MS = 2_000;
+
+/**
+ * How long a session's end waits for `background` sidecar calls (memory writing a card's lesson)
+ * before the pool closes and cancels them (D-086). Pi awaits `session_shutdown` handlers with no
+ * limit of its own, and on quit it has already put the terminal back (PI_API_NOTES §16), so this
+ * is time the user spends looking at a terminal that has not returned. Two seconds is about one
+ * short call on a local engine and still reads as "closing"; the wait ends the moment nothing is
+ * left, and most sessions end with nothing running.
+ */
+export const DEFAULT_SHUTDOWN_DRAIN_MS = 2_000;
+/** A mistyped setting cannot hold a quit for longer than this. */
+export const MAX_SHUTDOWN_DRAIN_MS = 300_000;
+/** Overrides {@link DEFAULT_SHUTDOWN_DRAIN_MS}, in ms; `0` turns the wait off. The eval asks for longer. */
+const SHUTDOWN_DRAIN_ENV = "EXO_SHUTDOWN_DRAIN_MS";
+
+export function shutdownDrainMs(env: Readonly<Record<string, string | undefined>>): number {
+	const value = (env[SHUTDOWN_DRAIN_ENV] ?? "").trim();
+	return /^\d+$/.test(value) ? Math.min(Number(value), MAX_SHUTDOWN_DRAIN_MS) : DEFAULT_SHUTDOWN_DRAIN_MS;
+}
 
 /**
  * Owns the sidecar pool's lifecycle for each pi session (brief §5.2):
@@ -25,7 +50,8 @@ const API_KEY_LOOKUP_TIMEOUT_MS = 2_000;
  * - marks the main agent active between `agent_start` and `agent_settled`, so background work waits;
  * - on a new prompt (not a message steered into the running turn), starts a new turn and cancels
  *   stale hot-path calls;
- * - closed at `session_shutdown`.
+ * - at `session_shutdown`: background calls get a bounded time to finish, `beforeClose` runs, and
+ *   the pool closes, cancelling what is left.
  *
  * Register this before the trace recorder so in-flight calls are still recorded at shutdown.
  */
@@ -118,15 +144,46 @@ export function registerSidecars(pi: ExtensionAPI, options: SidecarOptions): voi
 	);
 	pi.on(
 		"session_shutdown",
-		guarded("sidecars.session_shutdown", () => {
+		guarded("sidecars.session_shutdown", async () => {
+			// From here a rebuild still waiting on a key lookup builds nothing.
 			generation += 1;
 			mainActive = false;
+			// Whatever goes wrong in either step, the pool is closed: none outlives its session.
+			try {
+				await drain(runtime.pool);
+			} catch (error) {
+				onError("sidecars.drain", error);
+			}
+			try {
+				await options.beforeClose?.();
+			} catch (error) {
+				onError("sidecars.beforeClose", error);
+			}
 			const pool = runtime.pool;
 			runtime.pool = undefined;
 			runtime.embedder = undefined;
 			pool?.close();
 		}),
 	);
+
+	/**
+	 * Lets queued and running `background` calls finish, for at most the configured time. The pool
+	 * stays in `runtime` meanwhile, so a module can still submit the call its result leads to. What
+	 * happened goes to the trace when there was anything to wait for: `remaining` calls were cut off.
+	 */
+	async function drain(pool: SidecarPool | undefined): Promise<void> {
+		const limitMs = shutdownDrainMs(options.env);
+		if (!pool || limitMs === 0) return;
+		const started = performance.now();
+		const { settled, remaining } = await pool.drain(limitMs);
+		if (settled + remaining === 0) return;
+		runtime.record({
+			kind: "exo.action",
+			synthetic: true,
+			module: "sidecars",
+			data: { action: "drained", settled, remaining, ms: Math.round(performance.now() - started), limitMs },
+		});
+	}
 }
 
 /** The main model's endpoint, when it is an OpenAI-compatible chat model (D-032 fallback). */

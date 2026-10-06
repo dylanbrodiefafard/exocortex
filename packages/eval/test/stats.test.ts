@@ -135,24 +135,30 @@ describe("signFlip", () => {
 		expect(Math.abs(a.p - b.p)).toBeLessThan(0.01);
 	});
 
-	it("keeps its false-positive rate at or under 5% when the configs do not differ", { timeout: 60_000 }, () => {
-		const random = mulberry32(42);
-		for (const [tasks, repeats, simulations] of [
-			[6, 3, 2_000],
-			[8, 3, 2_000],
-			[12, 5, 2_000],
-			[20, 3, 300],
-			[28, 5, 300],
-		] as const) {
+	// One test per design, each with its own clock. As one test the five took 10 s on an idle
+	// machine and over 60 s on a busy one, nearly all of it in the two designs above the exact
+	// limit: each of their simulations draws and sorts 49,999 sign assignments, which is the
+	// procedure under test and cannot be made smaller without testing something else.
+	it.each([
+		[6, 3, 2_000],
+		[8, 3, 2_000],
+		[12, 5, 2_000],
+		[20, 3, 300],
+		[28, 5, 300],
+	] as const)(
+		"keeps its false-positive rate at or under 5% when the configs do not differ: %i tasks × %i repeats",
+		{ timeout: 180_000 },
+		(tasks, repeats, simulations) => {
+			const random = mulberry32(42 + tasks);
 			let rejected = 0;
 			for (let s = 0; s < simulations; s++) {
 				if (excludesZero(signFlip(nullDeltas(tasks, repeats, random), s + 1).ci)) rejected += 1;
 			}
 			// Three standard errors of slack over the nominal 5%.
 			const slack = 3 * Math.sqrt((0.05 * 0.95) / simulations);
-			expect(rejected / simulations, `${tasks} tasks × ${repeats} repeats`).toBeLessThanOrEqual(0.05 + slack);
-		}
-	});
+			expect(rejected / simulations).toBeLessThanOrEqual(0.05 + slack);
+		},
+	);
 
 	it("is where the old percentile bootstrap went wrong: twice the stated error rate at six tasks", {
 		timeout: 60_000,

@@ -1,7 +1,14 @@
+import type { ModuleFactory } from "@exocortex/core";
 import { type FakeOpenAIServer, startFakeOpenAIServer } from "@exocortex/testkit";
 import { afterEach, describe, expect, it } from "vitest";
 import { registerExoCommand } from "../src/command.ts";
-import { registerSidecars } from "../src/sidecars.ts";
+import { registerModuleHost } from "../src/modules.ts";
+import {
+	DEFAULT_SHUTDOWN_DRAIN_MS,
+	MAX_SHUTDOWN_DRAIN_MS,
+	registerSidecars,
+	shutdownDrainMs,
+} from "../src/sidecars.ts";
 import { type AdapterHarness, createAdapterHarness } from "./harness.ts";
 
 let harness: AdapterHarness | undefined;
@@ -13,9 +20,17 @@ afterEach(async () => {
 	server = undefined;
 });
 
-function setup(config: Record<string, unknown>) {
+function setup(
+	config: Record<string, unknown>,
+	extra: { env?: Record<string, string>; beforeClose?: () => Promise<void> } = {},
+) {
 	harness = createAdapterHarness(config);
-	registerSidecars(harness.pi.api, { runtime: harness.runtime, env: harness.env, onError: harness.onError });
+	registerSidecars(harness.pi.api, {
+		runtime: harness.runtime,
+		env: { ...harness.env, ...extra.env },
+		onError: harness.onError,
+		...(extra.beforeClose ? { beforeClose: extra.beforeClose } : {}),
+	});
 	registerExoCommand(harness.pi.api, harness.runtime);
 	return harness;
 }
@@ -217,6 +232,188 @@ describe("sidecar lifecycle", () => {
 			// No pool is left behind for a session that is gone.
 			expect(h.runtime.pool).toBeUndefined();
 			expect(h.runtime.embedder).toBeUndefined();
+		});
+	});
+
+	describe("background work at shutdown (M13, D-086)", () => {
+		const request = { messages: [{ role: "user" as const, content: "x" }], maxTokens: 4 };
+		/** A session whose sidecar server takes `delayMs` to answer, with what shutdown writes to the trace. */
+		async function session(delayMs: number, extra: Parameters<typeof setup>[1] = {}) {
+			server = await startFakeOpenAIServer([], { fallback: { kind: "text", text: "lesson", delayMs } });
+			const h = setup({ engine: { baseUrl: server.baseUrl, model: "m" } }, extra);
+			await h.pi.emit("session_start");
+			const pool = h.runtime.pool;
+			if (!pool) throw new Error("no pool");
+			const traced: { kind: string; module?: string; data: Record<string, unknown> }[] = [];
+			h.runtime.traceSession = { append: (e: never) => traced.push(e) } as never;
+			const run = (priority: "background" | "interactive") =>
+				pool.run({ module: "memory", priority, timeoutMs: 5_000, request });
+			return { h, pool, run, traced };
+		}
+		const elapsed = async (work: Promise<unknown>) => {
+			const started = performance.now();
+			await work;
+			return performance.now() - started;
+		};
+
+		it("lets a running background call finish before the pool closes, and records it", async () => {
+			const { h, run, traced } = await session(80);
+			const lesson = run("background");
+			await new Promise((resolve) => setTimeout(resolve, 10));
+			await h.pi.emit("session_shutdown", { reason: "quit" });
+			expect(await lesson).toMatchObject({ ok: true, value: "lesson" });
+			expect(h.runtime.pool).toBeUndefined();
+			expect(traced).toHaveLength(1);
+			expect(traced[0]).toMatchObject({
+				kind: "exo.action",
+				module: "sidecars",
+				data: { action: "drained", settled: 1, remaining: 0, limitMs: 2_000 },
+			});
+		});
+
+		it("runs a call that was held for the main agent: at shutdown nothing is left to wait for", async () => {
+			const { h, pool, run } = await session(30);
+			await h.pi.emit("agent_start");
+			const lesson = run("background");
+			await new Promise((resolve) => setTimeout(resolve, 10));
+			expect(pool.stats().queued.background).toBe(1);
+			await h.pi.emit("session_shutdown", { reason: "quit" });
+			expect((await lesson).ok).toBe(true);
+		});
+
+		it("stops waiting when the time is up, cuts off what is left and says how many", async () => {
+			const { h, run, traced } = await session(1_500, { env: { EXO_SHUTDOWN_DRAIN_MS: "60" } });
+			const lessons = [run("background"), run("background"), run("background")];
+			const took = await elapsed(h.pi.emit("session_shutdown", { reason: "quit" }));
+			expect(took).toBeGreaterThanOrEqual(55);
+			expect(took).toBeLessThan(1_000);
+			for (const lesson of lessons) expect(await lesson).toMatchObject({ ok: false, outcome: "closed" });
+			expect(traced.map((e) => e.data)).toEqual([
+				{ action: "drained", settled: 0, remaining: 3, ms: expect.any(Number), limitMs: 60 },
+			]);
+			expect(h.runtime.pool).toBeUndefined();
+			expect(h.errors).toEqual([]);
+		});
+
+		it("does not wait for hot-path calls, or at all when nothing is in the background", async () => {
+			const { h, run, traced } = await session(1_500);
+			const verdict = run("interactive");
+			const took = await elapsed(h.pi.emit("session_shutdown", { reason: "quit" }));
+			expect(took).toBeLessThan(500);
+			expect(await verdict).toMatchObject({ ok: false, outcome: "closed" });
+			// Nothing was drained, so the trace is not told: most sessions end this way.
+			expect(traced).toEqual([]);
+		});
+
+		it("can be turned off, and a setting that is not a time is the default", async () => {
+			expect(shutdownDrainMs({})).toBe(DEFAULT_SHUTDOWN_DRAIN_MS);
+			expect(shutdownDrainMs({ EXO_SHUTDOWN_DRAIN_MS: "30000" })).toBe(30_000);
+			expect(shutdownDrainMs({ EXO_SHUTDOWN_DRAIN_MS: " 250 " })).toBe(250);
+			expect(shutdownDrainMs({ EXO_SHUTDOWN_DRAIN_MS: "0" })).toBe(0);
+			for (const bad of ["", "soon", "-5", "1.5", "1e3", "NaN"]) {
+				expect(shutdownDrainMs({ EXO_SHUTDOWN_DRAIN_MS: bad }), bad).toBe(DEFAULT_SHUTDOWN_DRAIN_MS);
+			}
+			// A typo cannot make quitting hang for hours.
+			expect(shutdownDrainMs({ EXO_SHUTDOWN_DRAIN_MS: "999999999" })).toBe(MAX_SHUTDOWN_DRAIN_MS);
+
+			const { h, run, traced } = await session(1_500, { env: { EXO_SHUTDOWN_DRAIN_MS: "0" } });
+			const lesson = run("background");
+			const took = await elapsed(h.pi.emit("session_shutdown", { reason: "quit" }));
+			expect(took).toBeLessThan(500);
+			expect(await lesson).toMatchObject({ ok: false, outcome: "closed" });
+			expect(traced).toEqual([]);
+		});
+
+		it("disposes modules after the drain and before the pool closes", async () => {
+			const order: string[] = [];
+			let state: ReturnType<typeof poolState> | undefined;
+			const poolState = () => ({ open: harness?.runtime.pool !== undefined, order: [...order] });
+			const { h, run } = await session(60, {
+				beforeClose: async () => {
+					state = poolState();
+					order.push("disposed");
+				},
+			});
+			// What memory does: the lesson comes back, then the card is written.
+			const lesson = run("background").then((result) => order.push(result.ok ? "lesson written" : "lesson lost"));
+			await h.pi.emit("session_shutdown", { reason: "quit" });
+			await lesson;
+			expect(state).toEqual({ open: true, order: ["lesson written"] });
+			expect(order).toEqual(["lesson written", "disposed"]);
+			expect(h.runtime.pool).toBeUndefined();
+		});
+
+		it("still closes the pool when disposing fails, and reports it", async () => {
+			const { h, pool, run } = await session(10, {
+				beforeClose: async () => {
+					throw new Error("dispose broke");
+				},
+			});
+			await h.pi.emit("session_shutdown", { reason: "quit" });
+			expect(h.errors.map((e) => e.where)).toEqual(["sidecars.beforeClose"]);
+			expect(h.runtime.pool).toBeUndefined();
+			expect(await run("interactive")).toMatchObject({ ok: false, outcome: "closed" });
+			expect(pool.stats().running).toBe(0);
+		});
+
+		it("wired as the entrypoint wires it, a module gets its lesson before it is disposed", async () => {
+			server = await startFakeOpenAIServer([], { fallback: { kind: "text", text: "lesson", delayMs: 60 } });
+			const h = createAdapterHarness({
+				engine: { baseUrl: server.baseUrl, model: "m" },
+				modules: { memory: { enabled: true } },
+			});
+			harness = h;
+			const log: string[] = [];
+			// Memory in small: a tool result starts a background call, and its answer is written down.
+			const memory: ModuleFactory = (_settings, ctx) => ({
+				id: "memory",
+				onToolResult: () => {
+					void ctx
+						.pool()
+						?.run({ module: "memory", priority: "background", timeoutMs: 5_000, request })
+						.then((result) => log.push(result.ok ? "lesson written" : `lesson lost (${result.outcome})`));
+				},
+				dispose: () => void log.push("disposed"),
+			});
+			// The order index.ts registers them in.
+			registerSidecars(h.pi.api, {
+				runtime: h.runtime,
+				env: h.env,
+				onError: h.onError,
+				beforeClose: () => h.runtime.disposeModules(),
+			});
+			registerModuleHost(h.pi.api, { runtime: h.runtime, onError: h.onError, log: () => {}, modules: { memory } });
+			await h.pi.emit("session_start");
+			await h.pi.emit("agent_start");
+			await h.pi.emit("tool_result", {
+				toolName: "bash",
+				toolCallId: "1",
+				input: { command: "make test" },
+				isError: false,
+				content: [{ type: "text", text: "ok" }],
+			});
+			await h.pi.emit("agent_settled");
+			// What the eval's driver does: close pi the moment the agent settles.
+			await h.pi.emit("session_shutdown", { reason: "quit" });
+			expect(log).toEqual(["lesson written", "disposed"]);
+			expect(h.errors).toEqual([]);
+		});
+
+		it("reports a drain that fails and closes the pool all the same", async () => {
+			const { h, pool, run } = await session(10);
+			pool.drain = () => Promise.reject(new Error("drain broke"));
+			await h.pi.emit("session_shutdown", { reason: "quit" });
+			expect(h.errors.map((e) => e.where)).toEqual(["sidecars.drain"]);
+			expect(await run("interactive")).toMatchObject({ ok: false, outcome: "closed" });
+		});
+
+		it("lets a call a module submits while draining finish too", async () => {
+			const { h, run, traced } = await session(40);
+			// A lesson whose result leads straight to a second call (a card to merge into).
+			const chain = run("background").then(() => run("background"));
+			await h.pi.emit("session_shutdown", { reason: "new" });
+			expect((await chain).ok).toBe(true);
+			expect(traced[0]?.data).toMatchObject({ settled: 2, remaining: 0 });
 		});
 	});
 

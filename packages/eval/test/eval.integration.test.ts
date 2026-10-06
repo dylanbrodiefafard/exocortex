@@ -1,13 +1,15 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
 	type FakeOpenAIServer,
 	type FakeOpenAIServerOptions,
 	type ScriptedReply,
 	startFakeOpenAIServer,
 } from "@exocortex/testkit";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { PiRpcProcess } from "../src/pi-rpc.ts";
 import type { RunRecord } from "../src/records.ts";
 import { renderMarkdown } from "../src/report.ts";
 import { runEval } from "../src/run.ts";
@@ -19,12 +21,28 @@ const CONFIGS_DIR = join(REPO, "packages", "eval", "configs");
 
 let server: FakeOpenAIServer | undefined;
 let tmp: string | undefined;
+let home = "";
+const realHome = process.env["HOME"];
+
+// Nothing here may depend on the machine: the harness reads `~/.exocortex/config.jsonc` for the
+// engine and pool (D-038), and with the owner's real one the sidecar calls of these tests would
+// go to a real model server. Pi inherits the same empty home.
+beforeEach(() => {
+	home = mkdtempSync(join(tmpdir(), "exo-home-"));
+	process.env["HOME"] = home;
+});
 
 afterEach(async () => {
 	await server?.close();
 	if (tmp) rmSync(tmp, { recursive: true, force: true });
+	// Whatever a test wrote under the home directory, it should not have.
+	const strays = readdirSync(home);
+	rmSync(home, { recursive: true, force: true });
+	if (realHome === undefined) delete process.env["HOME"];
+	else process.env["HOME"] = realHome;
 	server = undefined;
 	tmp = undefined;
+	expect(strays).toEqual([]);
 });
 
 async function evalWith(
@@ -66,6 +84,53 @@ async function evalWith(
 	return { records, runDir };
 }
 
+describe("real pi in RPC mode", { timeout: 60_000 }, () => {
+	it("pi waits for an async `session_shutdown` handler before it exits (PI_API_NOTES §16)", async () => {
+		tmp = mkdtempSync(join(tmpdir(), "exo-eval-"));
+		const agentDir = join(tmp, "agent");
+		mkdirSync(agentDir, { recursive: true });
+		const provider = { baseUrl: "http://127.0.0.1:9/v1", api: "openai-completions", apiKey: "none" };
+		writeFileSync(
+			join(agentDir, "models.json"),
+			JSON.stringify({ providers: { fake: { ...provider, models: [{ id: "fake-model", contextWindow: 32768 }] } } }),
+		);
+		// What Exocortex's own handler does while it drains: return a promise that takes a while.
+		const probe = join(tmp, "probe.mjs");
+		writeFileSync(
+			probe,
+			`import { writeFileSync } from "node:fs";
+			export default function probe(pi) {
+				pi.registerCommand("probe", { description: "probe", handler: async () => {} });
+				pi.on("session_shutdown", async () => {
+					await new Promise((resolve) => setTimeout(resolve, 700));
+					writeFileSync(${JSON.stringify(join(tmp, "shutdown-done"))}, "");
+				});
+			}`,
+		);
+		const cliPath = join(
+			dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"))),
+			"bundle",
+			"cli.js",
+		);
+		const pi = new PiRpcProcess({
+			cliPath,
+			cwd: tmp,
+			args: ["-ne", "-ns", "-np", "-nc", "--no-themes", "--offline", "--no-session", "-e", probe],
+			env: { PI_CODING_AGENT_DIR: agentDir },
+			stderrPath: join(tmp, "stderr.log"),
+			closeGraceMs: 30_000,
+		});
+		// A command an extension handles: pi is up, and no model is asked anything.
+		const handled = await pi.prompt("/probe", { maxTurns: 1, timeoutMs: 30_000 });
+		expect(handled).toMatchObject({ outcome: "settled", turns: 0 });
+		const started = performance.now();
+		// Closing stdin is the documented shutdown: pi exits only once the handler has returned.
+		expect(await pi.close()).toEqual({ killed: false });
+		expect(performance.now() - started).toBeGreaterThanOrEqual(650);
+		expect(existsSync(join(tmp, "shutdown-done"))).toBe(true);
+	});
+});
+
 describe("runEval with the real pi CLI and a scripted model", { timeout: 60_000 }, () => {
 	it("scores a run that fixes the task as a success, with trace metrics", async () => {
 		const patch = TASK.solutionPatch ?? "";
@@ -88,7 +153,13 @@ describe("runEval with the real pi CLI and a scripted model", { timeout: 60_000 
 			injections: 0,
 			continuations: 0,
 			prefixKeptRate: 1,
+			// The fix came through bash and no test ran after it: a lucky pass (E1). By tool names
+			// this run "edited nothing".
+			verifiedAfterLastEdit: false,
+			backgroundCutOff: 0,
 		});
+		expect(record?.edits?.files).toEqual(["pagination.py"]);
+		expect(record?.killedAtClose).toBeUndefined();
 		expect(readFileSync(join(runDir, "results.jsonl"), "utf8").trim().split("\n")).toHaveLength(1);
 		const markdown = renderMarkdown(records, "test");
 		expect(markdown).toContain("| all-off | 1/1 (100%) |");
@@ -98,6 +169,24 @@ describe("runEval with the real pi CLI and a scripted model", { timeout: 60_000 
 	it("scores a run that changes nothing as a failure", async () => {
 		const { records } = await evalWith([{ kind: "text", text: "Looks fine to me." }]);
 		expect(records[0]).toMatchObject({ outcome: "settled", success: false, checkExitCode: 1 });
+		expect(records[0]?.metrics?.verifiedAfterLastEdit).toBeNull();
+	});
+
+	it("knows a pass was verified when the tests ran after the last change, piped or not (E1)", async () => {
+		const patch = TASK.solutionPatch ?? "";
+		const bash = (command: string): ScriptedReply => ({
+			kind: "tool_calls",
+			calls: [{ name: "bash", arguments: { command } }],
+		});
+		const { records } = await evalWith([
+			bash(`git apply ${patch}`),
+			// A mention of the runner is not a run of it; the piped run is read from its output.
+			bash("grep -rn unittest . | head -3"),
+			bash("python3 -m unittest -q test_pagination 2>&1 | tail -3"),
+			{ kind: "text", text: "Fixed and verified." },
+		]);
+		expect(records[0]).toMatchObject({ outcome: "settled", success: true });
+		expect(records[0]?.metrics).toMatchObject({ verifiedAfterLastEdit: true, toolErrors: 0 });
 	});
 
 	it("aborts at maxTurns and records the abnormal outcome", async () => {
