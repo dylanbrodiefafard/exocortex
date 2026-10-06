@@ -302,19 +302,6 @@ A module becomes on by default only after an A/B run shows it helps.
 | [`docs/EVAL_TASKS.md`](docs/EVAL_TASKS.md) | Eval task tiers and authoring rules |
 | [`docs/AB_PLAN.md`](docs/AB_PLAN.md) | The plan for A/B testing each module |
 
-## Project layout
-
-```
-packages/
-  core/         harness-agnostic core (never imports pi): config, trace, inference, sidecar pool, module API
-  pi-adapter/   the pi extension entrypoint: event wiring, module host, /exo
-  mod-*/        modules: supervisor, trimmer, triage, memory, compaction (prompts/ holds their versioned prompts)
-  eval/         RPC-driven eval harness, metrics and reports (configs/ holds Exocortex configs to A/B)
-  testkit/      test-only fakes (scripted OpenAI-compatible server, module context)
-tasks/          eval fixtures
-docs/
-```
-
 ## Acknowledgements
 
 - [pi](https://github.com/badlogic/pi-mono), the coding agent Exocortex extends.
