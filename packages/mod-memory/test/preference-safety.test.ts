@@ -1,6 +1,6 @@
 import "./home-guard.ts";
 import { describe, expect, it } from "vitest";
-import { admitPreference, alreadySaid, sameRule } from "../src/preferences.ts";
+import { admitRelation, alreadySaid } from "../src/preferences.ts";
 import { openMemoryStore, type StoredPreference } from "../src/store.ts";
 import { SETTLED, setup, signal, until, workspace } from "./helpers.ts";
 
@@ -14,72 +14,23 @@ const preference = (id: number, rule: string): StoredPreference => ({
 	createdAt: 0,
 	sightings: [],
 });
-const proposal = (extra: Record<string, unknown>) => ({
+const statement = (extra: Record<string, unknown>) => ({
 	rule: "",
 	quote: "",
-	standing: false,
+	holds: "standing" as const,
 	applies_to: "any" as const,
 	correction: false,
-	same_as: 0,
-	replaces: 0,
 	...extra,
 });
-const TABS = preference(1, "Indent with tabs, not spaces.");
-const TDD = preference(2, "Write the failing test before the implementation.");
+const isRelate = (prompt: string) => prompt.includes("They have just stated one.");
+const TABS = "Indent with tabs, not spaces.";
+const TDD = "Write the failing test before the implementation.";
+const SPACES = "Indent with spaces.";
 
-describe("the sidecar cannot retire a preference the user did not speak about (M6)", () => {
-	const known = [TABS, TDD];
-
-	it("retires only when the user's words or the new rule are about the preference", () => {
-		const message = "Keep the commit messages short. Actually, use spaces for indenting from now on.";
-		// The sidecar points at the wrong preference.
-		expect(
-			admitPreference(proposal({ quote: "Keep the commit messages short", replaces: 2 }), message, known, known, "/x"),
-		).toEqual({});
-		expect(
-			admitPreference(
-				proposal({ rule: "Keep commit messages short.", quote: "Keep the commit messages short", replaces: 2 }),
-				message,
-				known,
-				known,
-				"/x",
-			),
-		).toMatchObject({ stated: { rule: "Keep commit messages short." } });
-		expect(
-			admitPreference(
-				proposal({ rule: "Keep commit messages short.", quote: "Keep the commit messages short", replaces: 2 }),
-				message,
-				known,
-				known,
-				"/x",
-			).retire,
-		).toBeUndefined();
-		// The user did speak about it.
-		expect(
-			admitPreference(
-				proposal({ rule: "Indent with spaces.", quote: "use spaces for indenting from now on", replaces: 1 }),
-				message,
-				known,
-				known,
-				"/x",
-			),
-		).toMatchObject({ retire: 1, stated: { existing: undefined, rule: "Indent with spaces." } });
-		// The embedding model found it nearest in meaning: that counts as being about it.
-		expect(
-			admitPreference(
-				proposal({ quote: "Keep the commit messages short", replaces: 2 }),
-				message,
-				known,
-				known,
-				"/x",
-				TDD,
-			),
-		).toEqual({ retire: 2 });
-	});
-
+describe("a preference retired on a sidecar's reading can be seen and undone (M6)", () => {
 	it("tells the user at the next settle, lists what was retired and restores it on command", async () => {
 		const store = openMemoryStore(space.dbPath());
-		const id = store.addPreference(TABS.rule);
+		const id = store.addPreference(TABS);
 		store.addSighting(id, {
 			scope: "x",
 			session: "s",
@@ -92,7 +43,12 @@ describe("the sidecar cannot retire a preference the user did not speak about (M
 		const s = setup(
 			space,
 			{ preferences: true },
-			{ reply: () => ({ preferences: [proposal({ quote: "use spaces for indenting from now on", replaces: 1 })] }) },
+			{
+				reply: (prompt) =>
+					isRelate(prompt)
+						? { same: 0, contradicts: [1] }
+						: { preferences: [statement({ rule: SPACES, quote: "use spaces for indenting from now on" })] },
+			},
 		);
 		s.memory.onUserTurn?.({ text, origin: "user" });
 		expect(await s.memory.onSettle?.(SETTLED, signal)).toBeUndefined();
@@ -103,70 +59,80 @@ describe("the sidecar cannot retire a preference the user did not speak about (M
 		expect(notice).toEqual({
 			kind: "notify",
 			level: "warning",
-			summary: `memory retired a preference after your last message: "${TABS.rule}". /exo memory restore ${id} brings it back`,
+			summary: `memory retired a preference after your last message: "${TABS}". /exo memory restore ${id} brings it back`,
 		});
 		// Said once.
 		expect(await s.memory.onSettle?.(SETTLED, signal)).toBeUndefined();
 
+		const retired = `Retired lately (/exo memory restore <id> brings one back):\n${id}. ${TABS} (retired by the model)`;
 		expect(s.memory.command?.("preferences")).toBe(
-			`No live preferences.\nRetired lately (/exo memory restore <id> brings one back):\n${id}. ${TABS.rule} (retired by the model)`,
+			`2. ${SPACES} (said in 1 session; applies here; added 0×)\n${retired}`,
 		);
 		expect(s.memory.command?.("restore x")).toBe("Usage: /exo memory restore <id>");
 		expect(s.memory.command?.("restore 99")).toBe("No retired preference 99.");
 		expect(s.memory.command?.(`restore ${id}`)).toBe(`Restored preference ${id}.`);
 		expect(s.t.records.at(-1)?.data).toEqual({ action: "preference_restored", preference: id });
-		expect(s.memory.command?.("preferences")).toContain(`${id}. ${TABS.rule} (`);
+		expect(s.memory.command?.("preferences")).toContain(`${id}. ${TABS} (`);
 		// The user's own "forget" is listed as theirs.
 		expect(s.memory.command?.(`forget ${id}`)).toContain("Forgot");
 		expect(s.memory.command?.("preferences")).toContain("(retired by you)");
+	});
+
+	it("retires nothing the relation sidecar was not shown", async () => {
+		const store = openMemoryStore(space.dbPath());
+		store.addPreference(TABS);
+		const s = setup(
+			space,
+			{ preferences: true },
+			{
+				reply: (prompt) =>
+					isRelate(prompt)
+						? { same: 0, contradicts: [2, 7] }
+						: { preferences: [statement({ rule: SPACES, quote: "use spaces for indenting" })] },
+			},
+		);
+		s.memory.onUserTurn?.({ text: "From now on use spaces for indenting.", origin: "user" });
+		await s.memory.onSettle?.(SETTLED, signal);
+		await until(() => s.t.records.length > 0);
+		expect(s.actions()).toEqual(["preference_learned"]);
+		expect(store.preferences().map((p) => p.rule)).toEqual([TABS, SPACES]);
 	});
 });
 
 describe("a rule and its opposite are two rules (M7)", () => {
 	const semicolons = preference(1, "Use semicolons in TypeScript code.");
 
-	it("does not take a negated rule for the rule", () => {
-		expect(sameRule("Do not use semicolons in TypeScript code.", [semicolons])).toBeUndefined();
-		expect(sameRule("Never use semicolons in TypeScript code.", [semicolons])).toBeUndefined();
-		expect(sameRule("Use semicolons in all TypeScript code.", [semicolons])?.id).toBe(1);
-		const never = preference(2, "Never add comments to the code.");
-		expect(sameRule("Don't add comments to code.", [never])?.id).toBe(2);
+	it("does not merge opposites when the sidecar's answer calls one preference both", () => {
+		expect(admitRelation({ same: 1, contradicts: [1] }, [semicolons])).toEqual({ same: undefined, contradicts: [] });
 	});
 
-	it("does not take a prompt that says the opposite as stating the rule", () => {
+	it("leaves a rule out of a prompt that speaks about it, whichever way the prompt puts it", () => {
+		// Said the other way, the request wins; said the same way, the rule would only repeat it.
 		expect(
 			alreadySaid("Fix the parser, and don't add comments to the code this time", "Add comments to the code."),
-		).toBe(false);
-		expect(alreadySaid("Fix the parser and add comments to the code", "Add comments to the code.")).toBe(true);
-		// A negation elsewhere in the prompt is not about the rule.
-		expect(
-			alreadySaid("Don't touch the README. Add comments to the code you change.", "Add comments to the code."),
 		).toBe(true);
+		expect(alreadySaid("Fix the parser and add comments to the code", "Add comments to the code.")).toBe(true);
 		expect(alreadySaid("Do not add any comments to the code", "Never add comments to the code.")).toBe(true);
+		expect(alreadySaid("Fix the parser and update the README", "Add comments to the code.")).toBe(false);
 	});
 
-	it("does not merge opposites on the sidecar's or the embedding model's word", () => {
-		const message = "From now on do not use semicolons in TypeScript code.";
-		const said = proposal({
-			rule: "Do not use semicolons in TypeScript code.",
-			quote: "do not use semicolons in TypeScript code",
-		});
-		for (const admitted of [
-			admitPreference({ ...said, same_as: 1 }, message, [semicolons], [semicolons], "/x"),
-			admitPreference(said, message, [semicolons], [semicolons], "/x", semicolons),
-		]) {
-			expect(admitted.stated).toMatchObject({ existing: undefined, rule: "Do not use semicolons in TypeScript code." });
-		}
-	});
-
-	it("recognises a rule among all live preferences, not only the latest thirty", async () => {
+	it("finds the preference a rule restates among all live ones, not only the latest thirty", async () => {
 		const store = openMemoryStore(space.dbPath());
-		const first = store.addPreference(TDD.rule);
+		const first = store.addPreference(TDD);
 		for (let i = 0; i < 31; i++) store.addPreference(`Name migration files with prefix number ${i}00${i}.`);
 		const s = setup(
 			space,
 			{ preferences: true },
-			{ reply: () => ({ preferences: [proposal({ rule: TDD.rule, quote: "write the failing test first" })] }) },
+			{
+				reply: (prompt) =>
+					isRelate(prompt)
+						? { same: Number(/(\d+)\. Write the failing test/.exec(prompt)?.[1] ?? 0), contradicts: [] }
+						: {
+								preferences: [
+									statement({ rule: "Write a failing test first.", quote: "write the failing test first" }),
+								],
+							},
+			},
 		);
 		s.memory.onUserTurn?.({ text: "From now on write the failing test first.", origin: "user" });
 		await s.memory.onSettle?.(SETTLED, signal);

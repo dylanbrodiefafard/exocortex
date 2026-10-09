@@ -161,7 +161,7 @@ describe("/exo memory interview (D-066)", () => {
 	it("admits the open answer like a typed message, as standing rules", async () => {
 		const more = "Use British spelling in comments, and keep functions short.";
 		const proposed = (quote: string, rule: string) => ({
-			preferences: [{ rule, quote, standing: false, applies_to: "any", correction: false, same_as: 0, replaces: 0 }],
+			preferences: [{ rule, quote, holds: "task", applies_to: "any", correction: false }],
 		});
 		const { memory, t } = setup({ preferences: true }, () => proposed("Use British spelling", "Use British spelling."));
 		const u = user(skipAll({}, more));

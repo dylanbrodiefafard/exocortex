@@ -38,7 +38,7 @@
 	},
 
 	// Optional: an OpenAI-compatible /embeddings server, e.g. a small model on the CPU (D-062).
-	// Memory uses it to recognise the same error or preference in other words; without it, keywords decide.
+	// Memory uses it to recognise the same error in other words; without it, keywords decide.
 	"embeddings": {
 		// "baseUrl": "http://localhost:8081/v1",
 		// "model": "your-embedding-model",
@@ -103,8 +103,7 @@
 			"maxPreferences": 5,
 			"preferenceMinSessions": 2, // sessions an instruction must recur in, unless you said it as a standing rule
 			"preferenceSelect": true, // a sidecar picks which preferences fit each prompt (else: all, minus keyword matches)
-			"minSimilarity": 0.85, // with embeddings: how close an error must be to a card's to recall it
-			"preferenceSimilarity": 0.8 // with embeddings: how close two preferences must be to count as one
+			"minSimilarity": 0.85 // with embeddings: how close an error must be to a card's to recall it
 		},
 		"compaction": {
 			"enabled": false,

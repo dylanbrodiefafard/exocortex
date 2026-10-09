@@ -70,6 +70,23 @@ function draft(tool: ToolOutcome) {
 
 type Embed = (texts: readonly string[]) => number[][] | undefined;
 
+/** The relation sidecar's prompt (`preference-relate`), as against the one that reads a message. */
+const isRelate = (prompt: string) => prompt.includes("They have just stated one.");
+const UNRELATED = { same: 0, contradicts: [] };
+/** Both of a message's sidecar steps: what it states, and how that stands with what is known. */
+const reads =
+	(statement: SidecarReply, relation: SidecarReply = UNRELATED) =>
+	(prompt: string) =>
+		isRelate(prompt) ? relation : statement;
+/** Background learning is done when a while passes without a new request or record. */
+async function drained(t: { requests: unknown[]; records: unknown[]; logs: unknown[] }): Promise<void> {
+	const size = () => t.requests.length + t.records.length + t.logs.length;
+	for (let seen = -1; seen !== size(); ) {
+		seen = size();
+		await new Promise((r) => setTimeout(r, 25));
+	}
+}
+
 let sessions = 0;
 
 /** One module instance in a harness session of its own, as a later `pi` run would be. */
@@ -483,24 +500,22 @@ describe("preferences (D-060)", () => {
 			{
 				rule: TDD,
 				quote: "",
-				standing: false,
+				holds: "task",
 				applies_to: "any",
 				correction: false,
-				same_as: 0,
-				replaces: 0,
 				...extra,
 			},
 		],
 	});
 	const actions = (t: { records: { data: unknown }[] }) => t.records.map((r) => (r.data as { action: string }).action);
 
-	/** One session: the user says `text`, the agent settles, the sidecar proposes `reply`. */
-	async function session(text: string, reply: object) {
-		const s = setup({ preferences: true }, () => reply);
+	/** One session: the user says `text`, the agent settles, the sidecars answer `reply` and `relation`. */
+	async function session(text: string, reply: SidecarReply, relation?: SidecarReply) {
+		const s = setup({ preferences: true }, reads(reply, relation));
 		s.memory.onUserTurn?.({ text, origin: "user" });
 		await s.memory.onSettle?.(DONE, signal);
 		await until(() => s.t.requests.length > 0);
-		await new Promise((r) => setTimeout(r, 20));
+		await drained(s.t);
 		return s;
 	}
 	const ask = (memory: ReturnType<typeof createMemory>, text: string, origin: "user" | "suggestion" = "user") =>
@@ -509,10 +524,11 @@ describe("preferences (D-060)", () => {
 	it("learns a standing rule from the user's words and adds it to a later prompt that leaves it unsaid", async () => {
 		const first = await session(
 			"Add a parser for dates. And always write the failing test first, please.",
-			proposal({ quote: "always write the failing test first" }),
+			proposal({ quote: "always write the failing test first", holds: "standing" }),
 		);
 		expect(actions(first.t)).toEqual(["preference_learned"]);
-		expect(String(first.t.requests[0]?.messages[0]?.["content"])).toContain("Known preferences:\n(none)");
+		// Nothing is known yet, so there is nothing to relate it to.
+		expect(first.t.requests).toHaveLength(1);
 
 		const { memory, t } = setup({ preferences: true });
 		expect(await ask(memory, "thanks a lot")).toBeUndefined();
@@ -536,51 +552,102 @@ describe("preferences (D-060)", () => {
 		await session(said, proposal({ quote: "Write the tests first" }));
 		expect(await ask(setup({ preferences: true }).memory, "Add a function that parses durations")).toBeUndefined();
 
-		// Said again elsewhere: the sidecar recognises it, or failing that the wording does.
-		const second = await session(said, proposal({ quote: "Write the tests first", same_as: 1 }));
+		// Said again elsewhere, in other words: the relation sidecar recognises it.
+		const reworded = proposal({ rule: "Work test-first.", quote: "Write the tests first" });
+		const second = await session(said, reworded, { same: 1, contradicts: [] });
 		expect(actions(second.t)).toEqual(["preference_seen"]);
-		const third = await session(said, proposal({ rule: `${TDD.slice(0, -1)} code.`, quote: "Write the tests first" }));
-		expect(actions(third.t)).toEqual(["preference_seen"]);
+		const asked = String(second.t.requests[1]?.messages[0]?.["content"]);
+		expect(asked).toContain(`Known preferences:\n1. ${TDD}`);
+		expect(asked).toContain("<<<\nWork test-first.\n>>>");
+		expect(asked).toContain("<<<\nWrite the tests first\n>>>");
+		// With no answer about what it repeats or contradicts, it is not stored on a guess.
+		const unanswered = await session(said, reworded, new Error("down"));
+		expect(unanswered.t.records.map((r) => r.data)).toEqual([
+			{ action: "preference_skipped", reason: "relation_unknown" },
+		]);
+		expect(unanswered.t.logs.some((l) => l.startsWith("preference relation "))).toBe(true);
 		expect(await ask(setup({ preferences: true }).memory, "Add a function that parses durations")).toContain(
-			`- ${TDD} (said in 3 sessions)`,
+			`- ${TDD} (said in 2 sessions)`,
 		);
 	});
 
-	it("admits only what the user said: no invented quotes, one-offs or unknown names", async () => {
+	it("admits only what the user said: no invented quotes, exceptions or unknown names", async () => {
 		const text = "Fix the date parser. Skip the tests this time, and keep the change small.";
-		for (const item of [
-			{ quote: "always write tests before code" },
-			{ quote: "Skip the tests this time", rule: "Do not write tests." },
-			{ quote: "keep the change small", rule: "Keep changes small and update `docs/STYLE.md`." },
-			{ quote: "keep the change small", rule: "x" },
-		]) {
+		for (const [item, reason] of [
+			[{ quote: "always write tests before code" }, "not_said"],
+			[{ quote: "Skip the tests this time", rule: "Do not write tests.", holds: "exception" }, "exception"],
+			[{ quote: "keep the change small", rule: "Keep changes small and update `docs/STYLE.md`." }, "ungrounded"],
+			[{ quote: "keep the change small", rule: "x" }, "rule_length"],
+		] as const) {
 			const s = await session(text, proposal(item));
-			expect(s.t.records).toEqual([]);
+			// Each refusal is traced with its reason, so the gates can be measured.
+			expect(s.t.records.map((r) => r.data)).toEqual([{ action: "preference_skipped", reason }]);
 		}
 		expect(openMemoryStore(dbPath).preferences()).toEqual([]);
 	});
 
-	it("retires a preference the user withdraws, but not for a one-off exception", async () => {
-		await session("From now on write the failing test first.", proposal({ quote: "write the failing test first" }));
-		const oneOff = await session(
-			"Skip the tests this time, just patch the config file quickly.",
-			proposal({ rule: "", quote: "Skip the tests this time", replaces: 1 }),
+	const standingTdd = () =>
+		session(
+			"From now on write the failing test first.",
+			proposal({ quote: "write the failing test first", holds: "standing" }),
 		);
-		expect(oneOff.t.records).toEqual([]);
+	const NO_TDD = "Do not write the tests before the implementation.";
+	const AGAINST_TDD = { same: 0, contradicts: [1] };
+
+	it("retires a preference the user withdraws, but not for an exception", async () => {
+		await standingTdd();
+		const exception = await session(
+			"Skip the tests this time, just patch the config file quickly.",
+			proposal({ rule: "Do not write tests.", quote: "Skip the tests this time", holds: "exception" }),
+			AGAINST_TDD,
+		);
+		expect(actions(exception.t)).toEqual(["preference_skipped"]);
+		// A withdrawal is a statement of what the user wants now, and it contradicts the old rule.
 		const withdrawn = await session(
 			"Stop writing tests first, I do not want that anymore.",
-			proposal({ rule: "", quote: "Stop writing tests first", replaces: 1 }),
+			proposal({ rule: NO_TDD, quote: "Stop writing tests first", holds: "standing" }),
+			AGAINST_TDD,
 		);
-		expect(actions(withdrawn.t)).toEqual(["preference_retired"]);
-		expect(String(withdrawn.t.requests[0]?.messages[0]?.["content"])).toContain(`Known preferences:\n1. ${TDD}`);
-		expect(await ask(setup({ preferences: true }).memory, "Add a function that parses durations")).toBeUndefined();
+		expect(withdrawn.t.records.map((r) => r.data)).toEqual([
+			{ action: "preference_learned", preference: 2, rule: NO_TDD },
+			{ action: "preference_retired", preference: 1, by: "model" },
+		]);
+		const later = await ask(setup({ preferences: true }).memory, "Add a function that parses durations");
+		expect(later).toContain(`- ${NO_TDD}`);
+		expect(later).not.toContain(TDD);
+	});
+
+	it("does not undo a preference for one task's instruction, and does once it is said again", async () => {
+		await standingTdd();
+		const said = "Write the tests after the code for this parser.";
+		const once = () => session(said, proposal({ rule: NO_TDD, quote: "Write the tests after the code" }), AGAINST_TDD);
+		expect((await once()).t.records.map((r) => r.data)).toEqual([
+			{ action: "preference_learned", preference: 2, rule: NO_TDD },
+			{ action: "preference_conflict", preference: 2, with: 1 },
+		]);
+		expect(await ask(setup({ preferences: true }).memory, "Add a function that parses durations")).toContain(TDD);
+		// A second session makes it a preference (D-060): now it replaces the one it contradicts.
+		const again = await session(said, proposal({ rule: NO_TDD, quote: "Write the tests after the code" }), {
+			same: 2,
+			contradicts: [1],
+		});
+		expect(actions(again.t)).toEqual(["preference_seen", "preference_retired"]);
+		expect(
+			openMemoryStore(dbPath)
+				.preferences()
+				.map((p) => p.rule),
+		).toEqual([NO_TDD]);
 	});
 
 	it("lists and forgets preferences on command", async () => {
 		expect(setup().memory.command?.("preferences")).toBe("Preference learning is off (memory.preferences).");
 		const { memory } = await session(
 			"I prefer small commits with one change each.",
-			proposal({ rule: "Keep each commit to one change.", quote: "I prefer small commits with one change each" }),
+			proposal({
+				rule: "Keep each commit to one change.",
+				quote: "I prefer small commits with one change each",
+				holds: "standing",
+			}),
 		);
 		expect(memory.command?.("preferences")).toBe(
 			"1. Keep each commit to one change. (said in 1 session; applies here; added 0×)",
@@ -595,7 +662,7 @@ describe("preferences (D-060)", () => {
 	});
 
 	it("is off by default, skips short messages and survives a failing sidecar", async () => {
-		const off = setup({}, () => proposal({ quote: "always write the failing test first" }));
+		const off = setup({}, () => proposal({ quote: "always write the failing test first", holds: "standing" }));
 		off.memory.onUserTurn?.({ text: "Always write the failing test first, please.", origin: "user" });
 		await off.memory.onSettle?.(DONE, signal);
 		expect(await ask(off.memory, "Add a function that parses durations")).toBeUndefined();
@@ -623,25 +690,27 @@ describe("expectations from corrections (D-064)", () => {
 	const item = (extra: Record<string, unknown> = {}) => ({
 		rule: SCOPE,
 		quote: QUOTE,
-		standing: false,
+		holds: "task",
 		applies_to: "fix",
 		correction: true,
-		same_as: 0,
-		replaces: 0,
 		...extra,
 	});
 	const actions = (t: { records: { data: unknown }[] }) => t.records.map((r) => (r.data as { action: string }).action);
 	const settled = async (s: ReturnType<typeof setup>, requests: number) => {
 		await s.memory.onSettle?.(DONE, signal);
 		await until(() => s.t.requests.length >= requests);
-		await new Promise((r) => setTimeout(r, 20));
+		await drained(s.t);
 	};
+	const SAME = { same: 1, contradicts: [] };
+	/** Proposes `proposed` for the correction and nothing for any other message. */
+	const onCorrection = (proposed: object, relation: object) => (prompt: string) =>
+		isRelate(prompt)
+			? relation
+			: { preferences: prompt.includes(`Developer's message:\n<<<\n${CORRECTION}`) ? [proposed] : [] };
 
 	/** One session: a request, the agent's answer, then the user's correction of it. */
-	async function corrected(proposed: object = item()) {
-		const s = setup({ preferences: true, preferenceSelect: false }, (prompt) => ({
-			preferences: prompt.includes(`Developer's message:\n<<<\n${CORRECTION}`) ? [proposed] : [],
-		}));
+	async function corrected(proposed: object = item(), relation: object = UNRELATED) {
+		const s = setup({ preferences: true, preferenceSelect: false }, onCorrection(proposed, relation));
 		s.memory.onUserTurn?.({ text: "Fix the off-by-one in the date parser.", origin: "user" });
 		await settled(s, 1);
 		s.memory.onUserTurn?.({ text: CORRECTION, origin: "user" });
@@ -663,7 +732,7 @@ describe("expectations from corrections (D-064)", () => {
 		);
 		// One correction is one task's instruction (D-060); the second session makes it an expectation.
 		expect(await ask(setup({ preferences: true }).memory, "Fix the crash on empty input")).toBeUndefined();
-		expect(actions((await corrected(item({ same_as: 1 }))).t)).toEqual(["preference_seen"]);
+		expect(actions((await corrected(item(), SAME)).t)).toEqual(["preference_seen"]);
 		const later = setup({ preferences: true, preferenceSelect: false });
 		expect(await ask(later.memory, "Fix the crash on empty input")).toContain(
 			`- For bug fixes: ${SCOPE} (said in 2 sessions)`,
@@ -681,13 +750,13 @@ describe("expectations from corrections (D-064)", () => {
 
 	it("widens an expectation the user states for a second kind of task", async () => {
 		await corrected();
-		await corrected(item({ same_as: 1, applies_to: "feature" }));
+		await corrected(item({ applies_to: "feature" }), SAME);
 		expect(openMemoryStore(dbPath).preferences()[0]).toMatchObject({ taskKind: "any" });
 	});
 
 	it("counts a correction on a preference that was already in the conversation", async () => {
-		await corrected(item({ standing: true }));
-		const s = setup({ preferences: true, preferenceSelect: false }, () => ({ preferences: [item({ same_as: 1 })] }));
+		await corrected(item({ holds: "standing" }));
+		const s = setup({ preferences: true, preferenceSelect: false }, onCorrection(item(), SAME));
 		expect(await ask(s.memory, "Fix the crash on empty input")).toContain(SCOPE);
 		s.memory.onUserTurn?.({ text: "Fix the crash on empty input", origin: "user" });
 		await settled(s, 1);
@@ -743,35 +812,48 @@ describe("embeddings (D-062)", () => {
 		expect((await recallFor(down, ERROR))?.note).toBe("recalled 1 card(s)");
 	});
 
-	it("recognises a preference said in other words as the one it already knows", async () => {
+	it("shows the relation sidecar the nearest preferences when there are too many to show all", async () => {
 		const prefer: Embed = (texts) => texts.map((t) => (/test|tdd/i.test(t) ? [1, 0] : [0, 1]));
-		const DONE = { outcome: "completed" as const, lastAssistantText: "" };
-		const say = async (text: string, rule: string, quote: string, embedder: Embed | undefined) => {
-			const proposal = {
-				preferences: [{ rule, quote, standing: false, applies_to: "any", correction: false, same_as: 0, replaces: 0 }],
-			};
-			const s = setup({ preferences: true }, () => proposal, embedder);
-			s.memory.onUserTurn?.({ text, origin: "user" });
-			await s.memory.onSettle?.(DONE, signal);
-			await until(() => s.t.records.length > 0);
-			return (s.t.records[0]?.data as { action?: string } | undefined)?.action;
+		const TDD = "Write the failing test before the implementation.";
+		const store = openMemoryStore(dbPath);
+		const tdd = store.addPreference(TDD);
+		for (let i = 0; i < 40; i++) store.addPreference(`Name migration files with prefix number ${i}00${i}.`);
+		const statement = {
+			preferences: [
+				{ rule: "Work in TDD style.", quote: "TDD style", holds: "task", applies_to: "any", correction: false },
+			],
 		};
-		const first = "Write the tests first for the parser, then implement it.";
-		const second = "Do this one TDD style like we usually do in the parser.";
-		expect(await say(first, "Write the failing test before the implementation.", "Write the tests first", prefer)).toBe(
-			"preference_learned",
-		);
-		expect(await say(second, "Work in TDD style.", "TDD style", prefer)).toBe("preference_seen");
-		expect(await say(second, "Keep functions short.", "TDD style", prefer)).toBe("preference_learned");
-		// Without embeddings the reworded rule shares too few words to be recognised.
-		expect(await say(second, "Work in TDD style.", "TDD style", undefined)).toBe("preference_learned");
-		const stored = openMemoryStore(dbPath);
-		expect(stored.preferences().map((p) => p.sightings.length)).toEqual([2, 1, 1]);
-		expect(stored.vectors("preference", "test-embed").size).toBe(2);
+		/** The sidecar says "same" for the known rule when it is shown it, by the number it has in the list. */
+		const say = async (embedder: Embed | undefined) => {
+			let asked = "";
+			const s = setup(
+				{ preferences: true },
+				(prompt) => {
+					if (!isRelate(prompt)) return statement;
+					asked = prompt;
+					return { same: Number(/(\d+)\. Write the failing test/.exec(prompt)?.[1] ?? 0), contradicts: [] };
+				},
+				embedder,
+			);
+			s.memory.onUserTurn?.({ text: "Do this one TDD style like we usually do in the parser.", origin: "user" });
+			await s.memory.onSettle?.({ outcome: "completed", lastAssistantText: "" }, signal);
+			await until(() => s.t.records.length > 0);
+			return { asked, data: s.t.records[0]?.data };
+		};
+		// The rule shares no word with the one it restates: only the embedding model puts it among the nearest.
+		const near = await say(prefer);
+		expect(near.asked).toContain("Known preferences (the 30 nearest to the stated rule, of 41):");
+		expect(near.data).toMatchObject({ action: "preference_seen", preference: tdd });
+		expect(store.vectors("preference", "test-embed").size).toBe(41);
+		// Without one, keywords choose what is shown, and the known rule is not among it.
+		const far = await say(undefined);
+		expect(far.asked).not.toContain(`. ${TDD}\n`);
+		expect(near.asked).toContain(`1. ${TDD}\n`);
+		expect(far.data).toMatchObject({ action: "preference_learned" });
 	});
 });
 
-describe("preference selection and standing rules by sidecar (D-062)", () => {
+describe("preference selection by sidecar (D-062) and how long a rule holds (D-090)", () => {
 	const DONE = { outcome: "completed" as const, lastAssistantText: "" };
 	const RULES = ["Write the failing test before the implementation.", "Keep each commit to one change."];
 
@@ -856,11 +938,9 @@ describe("preference selection and standing rules by sidecar (D-062)", () => {
 					{
 						rule: RULES[0],
 						quote: "always write the failing test first",
-						standing: true,
+						holds: "standing",
 						applies_to: "any",
 						correction: false,
-						same_as: 0,
-						replaces: 0,
 					},
 				],
 			};
@@ -899,34 +979,30 @@ describe("preference selection and standing rules by sidecar (D-062)", () => {
 		expect(off.t.requests).toEqual([]);
 	});
 
-	it("lets the sidecar call a rule standing when the wording has no fixed cue", async () => {
-		const proposal = (standing: boolean) => ({
-			preferences: [
-				{
-					rule: RULES[0],
-					quote: "a TDD person",
-					standing,
-					applies_to: "any",
-					correction: false,
-					same_as: 0,
-					replaces: 0,
-				},
-			],
-		});
-		for (const [standing, applies] of [
-			[false, false],
-			[true, true],
-		] as const) {
-			rmSync(dbPath, { force: true });
-			const s = setup({ preferences: true, preferenceSelect: false }, () => proposal(standing));
-			s.memory.onUserTurn?.({ text: "Fix the date parser. You know me, a TDD person.", origin: "user" });
+	it("takes the sidecar's reading of how long a rule holds, whatever words it is said in", async () => {
+		const TDD_PERSON = "Fix the date parser. You know me, a TDD person.";
+		const cases = [
+			// No word marks it as a rule for the future, and it is one.
+			[TDD_PERSON, "a TDD person", "standing", "Work test-first."],
+			[TDD_PERSON, "a TDD person", "task", "Write a test for each change."],
+			// "I want you to" opens most instructions for one task.
+			["I want you to write the tests first for this parser.", "write the tests first", "task", "Test before coding."],
+			// "today" says nothing about how long it holds.
+			["The way we work today is always test-first.", "always test-first", "standing", "Start from a failing test."],
+		] as const;
+		for (const [text, quote, holds, rule] of cases) {
+			const s = setup(
+				{ preferences: true },
+				reads({ preferences: [{ rule, quote, holds, applies_to: "any", correction: false }] }),
+			);
+			s.memory.onUserTurn?.({ text, origin: "user" });
 			await s.memory.onSettle?.(DONE, signal);
 			await until(() => s.t.records.length > 0);
-			const next = setup({ preferences: true, preferenceSelect: false });
-			const added = await shown(
-				next.memory.contextForUserTurn?.({ text: "Add a parser for durations", origin: "user" }, signal),
-			);
-			expect(added !== undefined).toBe(applies);
 		}
+		const next = setup({ preferences: true, preferenceSelect: false });
+		const added = await shown(
+			next.memory.contextForUserTurn?.({ text: "Add a parser for durations", origin: "user" }, signal),
+		);
+		expect(added?.split("\n").slice(1)).toEqual(["- Start from a failing test.", "- Work test-first."]);
 	});
 });

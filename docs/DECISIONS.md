@@ -1770,6 +1770,50 @@ Open check: Exocortex's injected `custom_message` reaches ninfer as a second con
 
 ---
 
+### D-090 — Preferences: a sidecar reads the language, code checks what is exact · accepted (2026-10-09; owner's call; amends D-060's admission, D-062's preference identity and "standing rules", D-064 and D-081 item 7 (M6, M7))
+- **Context:** three word lists in `preferences.ts` read the user's meaning. Each was wrong in ways that more words would not fix.
+  - **The standing cue** was joined to the sidecar's reading with "or" (D-062), so it could only add. "I want you to" is in it and opens most instructions for one task: "I want you to add tests for this" applied at once.
+  - **The one-off cue** was a veto on single words. "today" refused "the way we work today is always test-first".
+  - **The negation list** stood for a rule's polarity (M7). "Omit comments" and "Never add comments" could never be one preference; "Use no more than 80 columns" read as a prohibition. The check that `replaces` was about the preference (M6) was one shared word stem.
+  - All three read English only.
+- **The rule.** What is a reading of language is a sidecar's. Code decides only what has one answer: the quote is in the message, the rule names nothing the message does not, a number points at something that was shown. No word list reads the user's meaning.
+- **Decision: learning is two sidecar steps, each with a gate in code.**
+  1. **What the message states** (`preferences.v4`, `admitStatement`). The sidecar returns `rule`, `quote`, `applies_to`, `correction` and `holds`: `standing` (a rule for future work), `task` (an instruction for this task, nothing said beyond it) or `exception` (how they normally want things, set aside for this task). It is no longer shown the known preferences: what was said does not depend on them.
+     - Code refuses a proposal whose quote is not in the message (`not_said`), an `exception`, a rule under 8 or over 200 characters (`rule_length`) and a rule naming a file or symbol the message does not (`ungrounded`).
+     - A statement is standing when `holds` is `standing`, and only then. The interview's open answer is still always standing (D-066).
+     - A withdrawal is a statement too: the prompt asks for the rule the user wants now ("Comments in the code are allowed."). The `rule: ""` convention is gone.
+  2. **How the statement stands with what is known** (`preference-relate.v1`, `admitRelation`). One call per statement: the rule, the user's quote and the known preferences, numbered. The sidecar returns `same` (one number or 0) and `contradicts` (numbers).
+     - A number counts only when it points at a preference that was shown. One named in both is neither: a rule and its opposite are never one preference (M7's guarantee, now from the shape of the answer).
+     - `same` merges the sighting into that preference. Otherwise the rule is new.
+     - With nothing known, no call is made.
+     - No answer: the statement is not stored (`relation_unknown`). A rule stored without knowing what it contradicts could stand beside its opposite. The user will say it again.
+- **Retiring.** A contradicted preference is retired only once the rule that contradicts it applies in this repo (`activePreferences`: standing, or said in `preferenceMinSessions` sessions, or in two repos). One task's instruction does not undo a preference; the same instruction in a second session does. Until then the conflict is traced and the question is asked again the next time. Before, any non-one-off `replaces` retired at once.
+  - Unchanged from D-081: traced `by: "model"`, the user is told at the next settle, `/exo memory restore <id>` undoes it.
+- **What the relation sidecar is shown.** Every live preference while there are 30 or fewer. Beyond that the 30 nearest to the rule: by the embeddings server when there is one (D-062), else by shared keywords, the later ones on a tie. The heading then says how many of how many (D-089). This ranking chooses what is shown and decides nothing. Before, the sidecar saw the latest 30 and code compared the rest by word overlap.
+- **Embeddings no longer decide identity.** `preferenceSimilarity` is removed. An embedding model puts a rule and its negation close together, and only the negation list kept a 0.8 match from merging opposites. Preferences are embedded only when there are more than 30, in the ranking call.
+- **`alreadySaid` no longer reads polarity.** It is the fallback for when no sidecar selects preferences (D-062). A prompt carrying 60% of a rule's keywords speaks about it, and the rule is left out whichever way the prompt puts it: said the same way it would repeat the user, said the other way the request wins. That is what `preference-select.v2` is told to do. Before, a prompt saying the opposite got the rule added.
+- **The interview's fixed answers** find an earlier answer by its exact text. They are written in code, so no model is asked and no keyword overlap is needed.
+- **Trace, for measuring this later.**
+  - `preference_skipped` with `reason`: `not_said`, `exception`, `rule_length`, `ungrounded`, `relation_unknown`. Before, a refused proposal left no trace.
+  - `preference_conflict` with `preference` and `with`: a contradiction that did not retire yet.
+  - `preference_learned`, `preference_seen` and `preference_retired` are as before. With a contradiction the new rule is now recorded before the retirement.
+- **Removed:** `STANDING_CUE`, `ONE_OFF_CUE`, `NEGATION`, `NEGATION_WORDS`, `RULE_FILLER`, the stemmer, `sameRule`, `isAbout`, `quotedSentence` (the sentence around a quote was only read for cues; `saidVerbatim` checks the quote), the proposal's `standing`, `same_as` and `replaces`, and `preferences.v3`.
+- **Costs.**
+  - One more background sidecar call for each statement, when anything is known. Most messages state nothing and cost what they did. A message's statements are capped at 3 (was 4) so that one message fits a module's default 4 calls per turn.
+  - The interview's open answer now waits on up to four calls.
+- **Open risks.**
+  - **Precision now rests on the model** for `holds` and for relations; D-062 named an over-read `standing` as a risk and the cue list did not lower it. What stands against a wrong reading: `task` when unsure (prompt), a second session for anything not standing, retirement only by an established rule, the notice and `restore`, `/exo memory forget`.
+  - **M6's check is gone.** A wrong `contradicts` can retire an unrelated preference when the stated rule is standing. The question is now put about one rule against a short list, not as a side field of reading a message, and the user is told.
+  - **A pure withdrawal leaves a permissive rule** ("Comments in the code are allowed.") that may be added to later prompts. It is true and short; `forget` removes it.
+  - **A preference is global and so is its retirement** (D-060). "Tabs here, spaces there" is two repos' conventions, and a standing rule in one retires the other's. Not changed here.
+  - **Past 30 preferences without an embeddings server**, a paraphrase sharing no word with the known rule is not shown and is stored twice.
+  - **`preferences.v4` and `preference-relate.v1` are untested with the real model.** The unit tests script both sidecars.
+- **Not done.**
+  - **A labelled set of messages** (standing, task, exception, reworded pairs, opposites) run through both prompts with the real model. The trace events above are what such a run, or a week of daily use, would be read from.
+  - Relations between interview answers and learned preferences: an interview answer can stand beside a learned rule it contradicts, as before.
+
+---
+
 ## Open questions (carried from brief §10, updated)
 
 1. ~~Resolved by D-029.~~ Exact pi mechanism for injecting into the current user turn without altering prior messages. *(Phase 0)*

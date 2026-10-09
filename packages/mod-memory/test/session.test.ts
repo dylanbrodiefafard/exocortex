@@ -12,11 +12,9 @@ const proposal = {
 		{
 			rule: TDD,
 			quote: "Write the tests first",
-			standing: false,
+			holds: "task",
 			applies_to: "any",
 			correction: false,
-			same_as: 0,
-			replaces: 0,
 		},
 	],
 };
@@ -36,7 +34,9 @@ async function learnCard() {
 
 describe("one harness session is one session, however often the module is rebuilt (M9)", () => {
 	it("does not count a rebuilt module as a second session of evidence", async () => {
-		const options = { reply: () => proposal, sessionId: "pi-session-1" };
+		const relation = { same: 1, contradicts: [] };
+		const reply = (prompt: string) => (prompt.includes("They have just stated one.") ? relation : proposal);
+		const options = { reply, sessionId: "pi-session-1" };
 		for (let i = 0; i < 2; i++) {
 			const s = setup(space, { preferences: true }, options);
 			s.memory.onUserTurn?.({ text: said, origin: "user" });

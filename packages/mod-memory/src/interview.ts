@@ -1,7 +1,6 @@
 import type { Dialog } from "@exocortex/core";
 import type { MemoryDeps } from "./deps.ts";
 import type { PreferenceSession } from "./preference-session.ts";
-import { sameRule } from "./preferences.ts";
 import type { TaskKind } from "./store.ts";
 
 /**
@@ -259,21 +258,18 @@ export async function interview(
 			preferences.retire(earlier.id, "interview");
 		}
 		if (option.rule === undefined) return;
-		const live = store.preferences();
-		const existing = live.find((p) => p.rule === option.rule) ?? sameRule(option.rule, live);
-		preferences.apply(
+		// The rules are written here, so an answer given before is found by its text. No model is asked.
+		const same = store.preferences().find((p) => p.rule === option.rule);
+		preferences.stated(
 			{
-				stated: {
-					existing: existing?.id,
-					rule: existing?.rule ?? option.rule,
-					standing: true,
-					kind: option.kind ?? "any",
-					correction: false,
-					quote: `${question.ask} → ${option.label}`.slice(0, INTERVIEW_QUOTE_CHARS),
-				},
+				rule: option.rule,
+				quote: `${question.ask} → ${option.label}`.slice(0, INTERVIEW_QUOTE_CHARS),
+				standing: true,
+				kind: option.kind ?? "any",
+				correction: false,
 			},
+			{ same, contradicts: [] },
 			repo,
-			undefined,
 			"interview",
 		);
 	}

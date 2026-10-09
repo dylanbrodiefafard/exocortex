@@ -2,10 +2,12 @@ import "./home-guard.ts";
 import { describe, expect, it } from "vitest";
 import {
 	activePreferences,
-	admitPreference,
+	admitRelation,
+	admitStatement,
 	alreadySaid,
-	quotedSentence,
+	nearestPreferences,
 	renderPreferences,
+	saidVerbatim,
 	withKind,
 } from "../src/preferences.ts";
 import type { Sighting, StoredPreference } from "../src/store.ts";
@@ -29,14 +31,13 @@ const preference = (id: number, rule: string, sightings: Sighting[]): StoredPref
 	sightings,
 });
 
-describe("quotedSentence", () => {
-	it("finds the sentence around a verbatim quote, ignoring case and line breaks", () => {
+describe("saidVerbatim", () => {
+	it("finds a quote word for word, ignoring case and line breaks", () => {
 		const message = "Fix the parser.  From now on, run\nthe linter before you commit! Thanks.";
-		expect(quotedSentence(message, "run the LINTER before you commit")).toBe(
-			"From now on, run the linter before you commit!",
-		);
-		expect(quotedSentence(message, "run the formatter")).toBeUndefined();
-		expect(quotedSentence(message, "Fix")).toBeUndefined();
+		expect(saidVerbatim(message, "run the LINTER before you commit")).toBe(true);
+		expect(saidVerbatim(message, "run the formatter")).toBe(false);
+		// Too short to show that anything was said.
+		expect(saidVerbatim(message, "Fix")).toBe(false);
 	});
 });
 
@@ -99,94 +100,101 @@ describe("alreadySaid and renderPreferences", () => {
 	});
 });
 
-describe("admitPreference", () => {
-	const known = [preference(1, "Write the failing test before the implementation.", [sighting("a", "s1", true)])];
-	const message = "Always run the linter before you commit. And stop writing tests first.";
+describe("admitStatement", () => {
+	const message = "Run the linter before you commit. No, don't refactor the code around it when you fix a bug.";
+	const proposal = {
+		rule: "Run the linter before committing.",
+		quote: "Run the  linter before you commit",
+		holds: "task" as const,
+		applies_to: "any" as const,
+		correction: false,
+	};
 
-	it("admits a new standing rule and decides 'standing' from the user's wording", () => {
-		expect(
-			admitPreference(
-				{
-					rule: "Run the linter before committing.",
-					quote: "run the linter before you commit",
-					standing: false,
-					applies_to: "any",
-					correction: false,
-					same_as: 0,
-					replaces: 0,
-				},
-				message,
-				known,
-				known,
-				"/nowhere",
-			),
-		).toEqual({
-			stated: {
-				existing: undefined,
+	it("admits what the user said, with the sidecar's reading of how long it holds", () => {
+		expect(admitStatement(proposal, message, "/nowhere")).toEqual({
+			statement: {
 				rule: "Run the linter before committing.",
-				standing: true,
+				quote: "Run the linter before you commit",
+				standing: false,
 				kind: "any",
 				correction: false,
-				quote: "run the linter before you commit",
 			},
 		});
-	});
-
-	it("retires what the user withdraws, and replaces it when a new rule comes with it", () => {
-		const withdrawal = {
-			rule: "",
-			quote: "stop writing tests first",
-			standing: false,
-			applies_to: "any" as const,
-			correction: false,
-			same_as: 0,
-			replaces: 1,
-		};
-		expect(admitPreference(withdrawal, message, known, known, "/nowhere")).toEqual({ retire: 1 });
-		expect(
-			admitPreference({ ...withdrawal, rule: "Write tests after the code.", same_as: 1 }, message, known, known, "/x"),
-		).toMatchObject({ retire: 1, stated: { existing: undefined, rule: "Write tests after the code." } });
+		expect(admitStatement({ ...proposal, holds: "standing" }, message, "/nowhere")).toMatchObject({
+			statement: { standing: true },
+		});
 	});
 
 	it("carries the kind of task and whether it was a correction (D-064)", () => {
-		const said = "No, don't refactor the code around it when you fix a bug.";
-		const proposal = {
+		const corrected = {
+			...proposal,
 			rule: "Do not refactor nearby code.",
 			quote: "don't refactor the code around it when you fix a bug",
-			standing: false,
 			applies_to: "fix" as const,
 			correction: true,
-			same_as: 0,
-			replaces: 0,
 		};
-		expect(admitPreference(proposal, said, [], [], "/nowhere").stated).toMatchObject({
-			kind: "fix",
-			correction: true,
-			standing: false,
+		expect(admitStatement(corrected, message, "/nowhere")).toMatchObject({
+			statement: { kind: "fix", correction: true, standing: false },
 		});
 	});
 
-	it("ignores references to preferences that were not shown or are no longer live", () => {
-		const proposal = {
-			rule: "Run the linter before committing.",
-			quote: "run the linter",
-			standing: false,
-			applies_to: "any" as const,
-			correction: false,
-			same_as: 9,
-			replaces: 9,
-		};
-		expect(admitPreference(proposal, message, known, known, "/nowhere")).toMatchObject({
-			stated: { existing: undefined },
+	it("refuses what the message does not bear out, and says why", () => {
+		const refused = (extra: object) => admitStatement({ ...proposal, ...extra }, message, "/nowhere");
+		expect(refused({ quote: "always run the formatter" })).toEqual({ refused: "not_said" });
+		expect(refused({ holds: "exception" })).toEqual({ refused: "exception" });
+		expect(refused({ rule: "Lint." })).toEqual({ refused: "rule_length" });
+		expect(refused({ rule: "x".repeat(201) })).toEqual({ refused: "rule_length" });
+		expect(refused({ rule: "Run the linter and update `docs/STYLE.md`." })).toEqual({ refused: "ungrounded" });
+		// An invented quote is refused whatever else the proposal says.
+		expect(refused({ quote: "always run the formatter", holds: "exception" })).toEqual({ refused: "not_said" });
+	});
+});
+
+describe("admitRelation", () => {
+	const shown = [preference(4, "Indent with tabs.", []), preference(9, "Keep commits small.", [])];
+
+	it("reads the sidecar's numbers as the preferences it was shown", () => {
+		expect(admitRelation({ same: 0, contradicts: [] }, shown)).toEqual({ same: undefined, contradicts: [] });
+		expect(admitRelation({ same: 2, contradicts: [1] }, shown)).toEqual({ same: shown[1], contradicts: [shown[0]] });
+		expect(admitRelation({ same: 0, contradicts: [1, 1, 2] }, shown).contradicts).toEqual(shown);
+	});
+
+	it("ignores a number that points at nothing it was shown", () => {
+		expect(admitRelation({ same: 3, contradicts: [7, 2] }, shown)).toEqual({
+			same: undefined,
+			contradicts: [shown[1]],
 		});
-		expect(admitPreference({ ...proposal, same_as: 1, replaces: 0 }, message, [], known, "/x").stated?.existing).toBe(
-			undefined,
-		);
-		expect(admitPreference({ ...proposal, same_as: 1, replaces: 0 }, message, known, known, "/x").stated).toMatchObject(
-			{
-				existing: 1,
-				rule: known[0]?.rule,
-			},
-		);
+		expect(admitRelation({ same: 1, contradicts: [] }, [])).toEqual({ same: undefined, contradicts: [] });
+	});
+
+	it("takes a preference named both the same and contradicted as neither (M7)", () => {
+		expect(admitRelation({ same: 1, contradicts: [1, 2] }, shown)).toEqual({
+			same: undefined,
+			contradicts: [shown[1]],
+		});
+	});
+});
+
+describe("nearestPreferences", () => {
+	const live = [
+		preference(1, "Write the failing test before the implementation.", []),
+		preference(2, "Keep each commit to one change.", []),
+		preference(3, "Indent with tabs.", []),
+		preference(4, "Answer questions briefly.", []),
+	];
+	const ids = (found: readonly StoredPreference[]) => found.map((p) => p.id);
+
+	it("is every preference while they fit", () => {
+		expect(ids(nearestPreferences("Anything at all.", live, 4))).toEqual([1, 2, 3, 4]);
+	});
+
+	it("is the ones sharing most keywords with the rule otherwise, the later ones on a tie, oldest first", () => {
+		expect(ids(nearestPreferences("Write a failing test first.", live, 2))).toEqual([1, 4]);
+		expect(ids(nearestPreferences("Nothing in common.", live, 2))).toEqual([3, 4]);
+	});
+
+	it("goes by an embedding model's similarity when there is one", () => {
+		const similarity = (p: StoredPreference) => (p.id === 2 ? 0.9 : p.id === 3 ? 0.4 : 0.1);
+		expect(ids(nearestPreferences("Write a failing test first.", live, 2, similarity))).toEqual([2, 3]);
 	});
 });
