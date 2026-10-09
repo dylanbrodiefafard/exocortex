@@ -1850,6 +1850,31 @@ Open check: Exocortex's injected `custom_message` reaches ninfer as a second con
 
 ---
 
+### D-092 — No limit on a module's sidecar calls; a refusal the code cannot match runs nothing; quoted text cannot close its block · accepted (2026-10-09; owner's call on the limit; the other two from reading D-090 and D-091 back; amends brief §5.2's `maxCallsPerTurn`, D-090's cap on statements, D-091's `do_not_run` and D-081 M8's `fenced`)
+- **1. `maxCallsPerTurn` is removed.**
+  - **Context:** each module could start 4 sidecar calls per user turn by default. A module's work is as many calls as its design needs: with D-090 memory makes one call to pick preferences, one to read a message, one per statement to relate it, and one per fix for its lesson. The limit refused the last of them, and the statement or the lesson was dropped. D-090 lowered a message's statements from 4 to 3 only to fit under it.
+  - **Decision:** there is no count. The pool option, the per-module setting, the `rejected_turn_cap` outcome and `beginTurn` are gone. A message's statements are 4 again.
+  - **What still bounds sidecar use:** the pool's slots (`maxConcurrent` − `reservedForMain`), each call's deadline, `background` calls waiting for the main agent, and `pool.sessionTokenBudget` (off by default).
+  - A config that still sets `maxCallsPerTurn` is accepted and the key ignored, like any setting a module does not know. A trace written before this may hold `rejected_turn_cap`; the eval now counts it as a failed call.
+  - **Open risk:** a module that loops on sidecar calls is no longer stopped by a count. Nothing does that today; the session budget is the guard for whoever wants one.
+- **2. A `do_not_run` entry that cannot be matched refuses every command** (`standing` in `checks.ts`).
+  - **Context:** D-091 dropped a command only when the sidecar's entry was that command exactly. An entry in other words ("npm run test" for `npm test`, "the test suite") matched nothing, and the command the user refused was run. The mistake fell on the dear side.
+  - **Decision:** each entry is one of three things, all of them exact tests.
+    - One of the commands (proposed from this message, or in use from earlier ones): that one is not run.
+    - Another command the user wrote out in a code span of the message: it refuses nothing here. "Make sure `cargo test` passes, don't run `cargo bench`" keeps `cargo test`.
+    - Neither: the sidecar's own wording. Which command it means cannot be told, so none of this request's commands is run and none in use is kept. The ledger event gives the entry in each refusal's reason.
+  - The same rule reads what the user writes into a suggestion.
+  - **Cost:** a sidecar that paraphrases costs the task its request checks. Configured `checks` are not affected: they are the user's own setting.
+- **3. Text quoted in a sidecar prompt cannot close its block** (`renderPrompt` in core).
+  - **Context:** prompts put session text between a `<<<` line and a `>>>` line. Only memory's lesson prompt, and the relation prompt of D-090, kept that text from closing the block. A user's message, the agent's reply, a tool's output or a diff holding a `>>>` line could end the block early, and what followed read as the prompt's own words.
+  - **Decision:** `renderPrompt` does it for every template. A value that goes inside a `<<<` … `>>>` block has each line that is only a run of `<` or `>` rewritten with look-alike marks (`‹‹‹`, `›››`). No caller has to remember; a new prompt gets it by using a block. `fenced` moved from memory to core for text a module lays out in blocks itself (the lesson's route).
+  - **Changed from M8:** `fenced` rewrote every run of three or more, also inside a line. Now only a line that is nothing else. A block is closed by a line, and the wider rule would rewrite code in every triage and trimmer prompt: `vector<vector<vector<int>>>`, a doctest's `>>> x = 1`, a shell here-string.
+  - **Covers** the thirteen templates with blocks: core's run verdict, memory's three, the supervisor's four, triage's four and the trimmer's one.
+  - **Not covered:** compaction's prompts have no blocks; the conversation they summarize is laid out by its own code. A value placed outside a block (a command line, a list of known preferences) is as before.
+  - **Open risk:** a model may still take `>>>` at the end of a line for the end of the block. This closes the structural case, not every wording.
+
+---
+
 ## Open questions (carried from brief §10, updated)
 
 1. ~~Resolved by D-029.~~ Exact pi mechanism for injecting into the current user turn without altering prior messages. *(Phase 0)*

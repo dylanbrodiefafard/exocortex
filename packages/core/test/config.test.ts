@@ -247,7 +247,7 @@ describe("config validation (D7)", () => {
 
 	it("accepts known modules with valid settings, and leaves the settings as written", () => {
 		const { config, problems } = check(`{ "modules": {
-			"supervisor": { "enabled": true, "maxCallsPerTurn": 2, "mode": "auto", "checks": ["npm test"] },
+			"supervisor": { "enabled": true, "maxTokensPerCall": 2000, "mode": "auto", "checks": ["npm test"] },
 			"strict": { "enabled": true, "maxTokensPerCall": 100 },
 			"anything": { "whatever": 1 }
 		} }`);
@@ -255,7 +255,7 @@ describe("config validation (D7)", () => {
 		expect(config.enabled).toBe(true);
 		expect(config.modules["supervisor"]).toEqual({
 			enabled: true,
-			maxCallsPerTurn: 2,
+			maxTokensPerCall: 2000,
 			mode: "auto",
 			checks: ["npm test"],
 		});

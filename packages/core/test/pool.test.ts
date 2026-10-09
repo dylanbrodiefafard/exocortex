@@ -77,7 +77,7 @@ function makePool(
 		client: client.client,
 		target: TARGET,
 		config: { ...POOL, ...overrides },
-		moduleLimits: () => ({ ...DEFAULT_MODULE_LIMITS, maxCallsPerTurn: 100, ...limits }),
+		moduleLimits: () => ({ ...DEFAULT_MODULE_LIMITS, ...limits }),
 		onRecord: (r) => records.push(r),
 	});
 	return { pool, records, ...client };
@@ -139,7 +139,7 @@ describe("sidecar pool scheduling", () => {
 			client: c.client,
 			target: { ...TARGET, features: { ...TARGET.features, priority: true } },
 			config: POOL,
-			moduleLimits: () => ({ maxCallsPerTurn: 10, maxTokensPerCall: 16 }),
+			moduleLimits: () => ({ maxTokensPerCall: 16 }),
 		});
 		const result = pool.run(call("m", "background"));
 		await flush();
@@ -176,17 +176,6 @@ describe("sidecar pool failure handling (never rejects)", () => {
 		pool.close();
 		expect(await c).toMatchObject({ outcome: "closed" });
 		expect(await pool.run(call("late"))).toMatchObject({ ok: false, outcome: "closed" });
-	});
-
-	it("enforces per-turn call caps and resets them on beginTurn", async () => {
-		const { pool, pending } = makePool({}, { maxCallsPerTurn: 1 });
-		const first = pool.run(call("triage"));
-		expect(await pool.run(call("triage"))).toMatchObject({ outcome: "rejected_turn_cap" });
-		pool.beginTurn();
-		const third = pool.run(call("triage"));
-		await flush();
-		for (const p of pending) p.reply();
-		expect((await first).ok && (await third).ok).toBe(true);
 	});
 
 	it("rejects new calls once the session token budget is spent", async () => {
@@ -383,17 +372,28 @@ describe("pool accounting (D9)", () => {
 	});
 
 	it("records the max_tokens that was sent, after the module's clamp", async () => {
-		const { pool, pending, records } = makePool({}, { maxTokensPerCall: 16, maxCallsPerTurn: 1 });
+		const { pool, pending, records } = makePool({ sessionTokenBudget: 25 }, { maxTokensPerCall: 16 });
 		const first = pool.run(call("m"));
 		await flush();
 		expect(pending[0]?.request.maxTokens).toBe(16);
-		pending[0]?.reply();
+		pending[0]?.reply("x", 30);
 		await first;
-		await pool.run(call("m")); // over the turn cap
+		await pool.run(call("m")); // over the session budget
 		expect(records.map((r) => [r.outcome, r.maxTokens])).toEqual([
 			["ok", 16],
-			["rejected_turn_cap", 16],
+			["rejected_budget", 16],
 		]);
+	});
+
+	it("puts no limit on how many calls a module makes (D-092)", async () => {
+		const { pool, pending } = makePool();
+		const calls = Array.from({ length: 40 }, () => pool.run(call("memory")));
+		for (let answered = 0; answered < calls.length; ) {
+			await flush();
+			for (const p of pending.slice(answered)) p.reply();
+			answered = pending.length;
+		}
+		expect((await Promise.all(calls)).every((result) => result.ok)).toBe(true);
 	});
 
 	it("says when a text reply was cut off at max_tokens", async () => {
@@ -475,7 +475,7 @@ describe("sidecar pool properties", () => {
 						client: c.client,
 						target: TARGET,
 						config: { ...POOL, maxConcurrent, reservedForMain: reserved, backgroundWhenIdleOnly: false },
-						moduleLimits: () => ({ maxCallsPerTurn: 1000, maxTokensPerCall: 64 }),
+						moduleLimits: () => ({ maxTokensPerCall: 64 }),
 					});
 					const results = priorities.map((p, i) => pool.run(call(`${i}`, p, `${p}:${i}`)));
 					const live = new Set<PendingCall>();
@@ -518,7 +518,7 @@ describe("Phase 2 acceptance: 20 queued jobs against an HTTP engine", { timeout:
 				client: createOpenAIClient({ ...TARGET, baseUrl: server.baseUrl }),
 				target: { ...TARGET, baseUrl: server.baseUrl },
 				config: { ...POOL, maxConcurrent: 6, reservedForMain: 2 },
-				moduleLimits: () => ({ maxCallsPerTurn: 100, maxTokensPerCall: 64 }),
+				moduleLimits: () => ({ maxTokensPerCall: 64 }),
 			});
 			const priorities: SidecarPriority[] = ["critical", "interactive", "background"];
 			const results = await Promise.all(

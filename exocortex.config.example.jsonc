@@ -46,8 +46,7 @@
 		"timeoutMs": 2000
 	},
 
-	// Modules are off unless enabled here. Every module also takes "maxCallsPerTurn" (default 4)
-	// and "maxTokensPerCall" (default 4096). Toggle live in pi with /exo on|off and /exo <module> on|off.
+	// Modules are off unless enabled here. Every module also takes "maxTokensPerCall" (default 4096). Toggle live in pi with /exo on|off and /exo <module> on|off.
 	"modules": {
 		"supervisor": {
 			"enabled": false,

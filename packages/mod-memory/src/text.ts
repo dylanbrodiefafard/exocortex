@@ -21,8 +21,3 @@ export function inert(text: string): string {
 		.replace(/\s+/g, " ")
 		.trim();
 }
-
-/** Text quoted inside a `<<<` … `>>>` block of a sidecar prompt: it cannot close the block. */
-export function fenced(text: string): string {
-	return text.replace(/<{3,}/g, (m) => "‹".repeat(m.length)).replace(/>{3,}/g, (m) => "›".repeat(m.length));
-}

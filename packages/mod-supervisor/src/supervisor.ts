@@ -12,7 +12,7 @@ import {
 } from "@exocortex/core";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
-import { acceptRequestCheck, checkOutcome, notRefused, plainTestOrBuild } from "./checks.ts";
+import { acceptRequestCheck, checkOutcome, plainTestOrBuild, standing } from "./checks.ts";
 import { buildEvidence, type CheckResult, diffFingerprint, touchedFiles } from "./evidence.ts";
 import { parseSettings, type SupervisorSettings } from "./settings.ts";
 import {
@@ -443,7 +443,7 @@ async function stillWanted(
 ): Promise<readonly string[]> {
 	if (ledger.checkCommands.length === 0) return ledger.checkCommands;
 	const value = await askLedger(ctx, settings, added, ledger);
-	return value ? notRefused(ledger.checkCommands, value.do_not_run) : ledger.checkCommands;
+	return value ? standing(ledger.checkCommands, value.do_not_run, added).commands : ledger.checkCommands;
 }
 
 /** Brief §6.1 guard: two continuations in a row that leave the diff unchanged stop the supervisor. */
@@ -569,21 +569,29 @@ async function extractLedger(
 	const value = await askLedger(ctx, settings, prompt, previous);
 	if (!value) return undefined;
 	const continued = value.follows_previous ? previous : undefined;
+	// Safety (D-011, D-084): the sidecar proposes commands, `checks.ts` decides which may be run.
+	const proposed = [...new Set(value.check_commands.map((c) => c.trim()).filter(Boolean))];
+	const inUse = continued?.checkCommands ?? [];
+	const left = standing([...inUse, ...proposed], value.do_not_run, prompt);
 	// A message that goes on with the task keeps its check commands, unless it says to stop running one.
-	const carried = continued ? notRefused(continued.checkCommands, value.do_not_run) : [];
-	const stopped = (continued?.checkCommands ?? []).filter((command) => !carried.includes(command));
+	const carried = inUse.filter((command) => left.commands.includes(command));
+	const stopped = inUse.filter((command) => !carried.includes(command));
 	if (!value.is_task) {
 		ctx.record({ kind: "exo.ledger", data: { is_task: false, ...(stopped.length > 0 ? { stopped } : {}) } });
 		return continued && { ledger: { ...continued, checkCommands: carried }, follows: true };
 	}
-	// Safety (D-011, D-084): the sidecar proposes commands, `checks.ts` decides which may be run.
-	const proposed = [...new Set(value.check_commands.map((c) => c.trim()).filter(Boolean))];
+	const refusedByRequest =
+		left.unidentified === undefined
+			? "the request says not to run it"
+			: `the request says not to run "${left.unidentified.slice(0, 80)}", which could not be matched to a command`;
 	const refused: { command: string; reason: string }[] = [];
 	const accepted = proposed.filter((command) => {
 		const verdict =
-			turn.origin === "user"
-				? acceptRequestCheck(command, prompt, value.do_not_run)
-				: { ok: false as const, reason: "the message was not typed by the user" };
+			turn.origin !== "user"
+				? { ok: false as const, reason: "the message was not typed by the user" }
+				: left.commands.includes(command)
+					? acceptRequestCheck(command, prompt)
+					: { ok: false as const, reason: refusedByRequest };
 		if (!verdict.ok) refused.push({ command, reason: verdict.reason });
 		return verdict.ok;
 	});

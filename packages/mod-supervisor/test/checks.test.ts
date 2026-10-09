@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { acceptRequestCheck, checkOutcome, namedInRequest, notRefused, plainTestOrBuild } from "../src/checks.ts";
+import { acceptRequestCheck, checkOutcome, namedInRequest, plainTestOrBuild, standing } from "../src/checks.ts";
 
 /** The rule for running a command the request names (D-084, S3), one clause at a time. */
 
@@ -25,14 +25,34 @@ describe("namedInRequest: is the command a whole code span of the message", () =
 	});
 });
 
-describe("notRefused: the commands a sidecar's 'do not run' leaves standing", () => {
+describe("standing: the commands a sidecar's 'do not run' list leaves to run (D-092)", () => {
+	const commands = ["cargo test", "make check"];
+	const message = "Make sure `cargo test` and `make check` pass. Don't run `cargo bench`.";
+
 	it("drops a command named exactly, a shell prompt and outer spaces aside", () => {
-		const commands = ["cargo test", "make check"];
-		expect(notRefused(commands, [])).toEqual(commands);
-		expect(notRefused(commands, ["cargo test"])).toEqual(["make check"]);
-		expect(notRefused(commands, [" $ make check "])).toEqual(["cargo test"]);
-		// Another command, however close, is not the one that was named.
-		expect(notRefused(commands, ["cargo test --all", "cargo"])).toEqual(commands);
+		expect(standing(commands, [], message)).toEqual({ commands });
+		expect(standing(commands, ["cargo test"], message)).toEqual({ commands: ["make check"] });
+		expect(standing(commands, [" $ make check "], message)).toEqual({ commands: ["cargo test"] });
+		expect(standing(commands, ["cargo test", "make check"], message)).toEqual({ commands: [] });
+	});
+
+	it("is not touched by another command the user wrote out and refused", () => {
+		expect(standing(commands, ["cargo bench"], message)).toEqual({ commands });
+		expect(standing(commands, ["cargo bench", "cargo test"], message)).toEqual({ commands: ["make check"] });
+	});
+
+	it.each([
+		["another spelling of a command", "cargo test --all"],
+		["a description", "the test suite"],
+		["part of a command", "cargo"],
+	])("runs nothing when an entry is %s: what it refuses cannot be told", (_name, entry) => {
+		expect(standing(commands, [entry], message)).toEqual({ commands: [], unidentified: entry });
+		expect(standing(commands, ["make check", entry], message)).toEqual({ commands: [], unidentified: entry });
+	});
+
+	it("has nothing to refuse without commands", () => {
+		expect(standing([], ["the tests"], "Stop running the tests.")).toEqual({ commands: [], unidentified: "the tests" });
+		expect(standing([], [], "")).toEqual({ commands: [] });
 	});
 });
 
@@ -101,19 +121,15 @@ describe("plainTestOrBuild: is the command one a request may have run", () => {
 });
 
 describe("acceptRequestCheck", () => {
-	it("needs all three: named by the request, not refused, and a plain test or build", () => {
+	it("needs both: named by the request, and a plain test or build", () => {
 		expect(acceptRequestCheck("cargo test", "Make sure `cargo test` passes.")).toEqual({ ok: true });
 		expect(acceptRequestCheck(" cargo test ", "Make sure `cargo test` passes.")).toEqual({ ok: true });
 		expect(acceptRequestCheck("cargo test", "Make sure the tests pass.")).toEqual({
 			ok: false,
 			reason: "it is not a whole code span of the request",
 		});
-		// Whether the sentence says no is the sidecar's reading; code only takes its word for it.
-		expect(acceptRequestCheck("cargo test", "Do not run `cargo test`.", ["cargo test"])).toEqual({
-			ok: false,
-			reason: "the request says not to run it",
-		});
-		expect(acceptRequestCheck("cargo test", "Run `cargo test`, not `cargo fmt`.", ["cargo fmt"])).toEqual({ ok: true });
+		// What the sentence says about it is not read here: `standing` takes the sidecar's word for that.
+		expect(acceptRequestCheck("cargo test", "Do not run `cargo test`.")).toEqual({ ok: true });
 		expect(acceptRequestCheck("./deploy.sh", "Make sure `./deploy.sh` passes.")).toEqual({
 			ok: false,
 			reason: "it is not a test or build command",

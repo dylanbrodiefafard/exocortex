@@ -13,8 +13,9 @@ import { type CommandOutput, commandBase, shellCommands, verifyingRun } from "@e
  *    part of a span, and a line of a longer block (a pasted log, a script) are not commands the
  *    user named.
  * 3. **The sidecar does not also list it as one the message says not to run** (D-091). Whether a
- *    sentence says no is a reading of the user's language, so the sidecar is asked outright, and
- *    code takes a command it names both ways as refused.
+ *    sentence says no is a reading of the user's language, so the sidecar is asked outright. Code
+ *    takes a command it names both ways as refused, and runs nothing when the sidecar's list names
+ *    something that cannot be matched to a command (D-092, `standing`).
  * 4. **It is one plain command**: no `;`, `&`, `|`, `<`, `>`, `` ` ``, `$`, parentheses, braces,
  *    backslashes or newlines, anywhere in it, quoted or not.
  * 5. **It stays in the project and runs as the user**: no `sudo`, no word that is an absolute or
@@ -53,10 +54,29 @@ export function namedInRequest(command: string, message: string): boolean {
 	return codeSpans(message).includes(command.trim());
 }
 
-/** The commands of `commands` that `refused` (what a sidecar read as "do not run") leaves standing. */
-export function notRefused(commands: readonly string[], refused: readonly string[]): string[] {
-	const no = new Set(refused.map((command) => unprompted(command)));
-	return commands.filter((command) => !no.has(command.trim()));
+/** What a sidecar's "do not run" list (D-091) leaves of the commands that could be run. */
+export interface Standing {
+	/** The commands still to run. */
+	readonly commands: readonly string[];
+	/** An entry of the list that names no command code can identify, when that emptied `commands`. */
+	readonly unidentified?: string;
+}
+
+/**
+ * The commands of `commands` (those proposed from `message` and those in use from earlier
+ * messages) that the sidecar's list leaves standing (D-092). Each entry is one of:
+ * - **one of the commands**, exactly: that one is not run;
+ * - **another command the user wrote out** in a code span of `message`: it refuses nothing here;
+ * - **neither**: the sidecar's own wording for what the user refused ("npm run test" for
+ *   `npm test`, "the test suite"). Which command it means cannot be told, so none is run. A check
+ *   not run costs one piece of evidence; running what the user refused is the dearer mistake.
+ */
+export function standing(commands: readonly string[], refused: readonly string[], message: string): Standing {
+	const entries = refused.map(unprompted).filter(Boolean);
+	const known = new Set(commands.map((command) => command.trim()));
+	const unidentified = entries.find((entry) => !known.has(entry) && !namedInRequest(entry, message));
+	if (unidentified !== undefined) return { commands: [], unidentified };
+	return { commands: commands.filter((command) => !entries.includes(command.trim())) };
 }
 
 /**
@@ -83,13 +103,12 @@ export function plainTestOrBuild(command: string): CheckAcceptance {
 }
 
 /**
- * Whether a command the sidecar proposed from `message` may be run (rules 2 to 6 above; the
- * caller knows who sent the message). `refused` is what the sidecar read the message as saying not
- * to run; saved state has no such reading and is checked on the rest.
+ * Whether a command the sidecar proposed from `message` may be run, as far as the command and the
+ * message go (rules 2 and 4 to 6 above). The caller knows who sent the message and what the
+ * sidecar read it as refusing ({@link standing}).
  */
-export function acceptRequestCheck(command: string, message: string, refused: readonly string[] = []): CheckAcceptance {
+export function acceptRequestCheck(command: string, message: string): CheckAcceptance {
 	if (!namedInRequest(command, message)) return { ok: false, reason: "it is not a whole code span of the request" };
-	if (notRefused([command], refused).length === 0) return { ok: false, reason: "the request says not to run it" };
 	return plainTestOrBuild(command);
 }
 

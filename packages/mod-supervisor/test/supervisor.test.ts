@@ -73,7 +73,7 @@ function context(script: Script | undefined): ModuleContext {
 					sessionTokenBudget: 0,
 					backgroundWhenIdleOnly: true,
 				},
-				moduleLimits: () => ({ maxCallsPerTurn: 100, maxTokensPerCall: 1024 }),
+				moduleLimits: () => ({ maxTokensPerCall: 1024 }),
 			})
 		: undefined;
 	return {

@@ -77,7 +77,7 @@ export {
 	normalizeErrorLine,
 	ungroundedReferences,
 } from "./modules/output.ts";
-export { loadPrompt, type PromptTemplate, renderPrompt } from "./modules/prompts.ts";
+export { fenced, loadPrompt, type PromptTemplate, renderPrompt } from "./modules/prompts.ts";
 export {
 	BENIGN_EXIT_COMMANDS,
 	type HiddenRunReading,

@@ -230,9 +230,7 @@ export function computeTraceMetrics(
 		sidecarTokensByModule: tokensByModule(sidecarCalls),
 		sidecarCalls: sidecarCalls.length,
 		sidecarTokens: sidecarCalls.reduce((sum, c) => sum + c.usage.promptTokens + c.usage.completionTokens, 0),
-		sidecarFailures: sidecarCalls.filter(
-			(c) => c.outcome !== "ok" && c.outcome !== "rejected_turn_cap" && c.outcome !== "rejected_budget",
-		).length,
+		sidecarFailures: sidecarCalls.filter((c) => c.outcome !== "ok" && c.outcome !== "rejected_budget").length,
 		...shutdownDrains(events),
 	};
 }

@@ -83,7 +83,7 @@ export function createTestModuleContext(options: {
 				sessionTokenBudget: 0,
 				backgroundWhenIdleOnly: true,
 			},
-			moduleLimits: () => ({ maxCallsPerTurn: 100, maxTokensPerCall: SIDECAR_MAX_TOKENS }),
+			moduleLimits: () => ({ maxTokensPerCall: SIDECAR_MAX_TOKENS }),
 		});
 	const { embed } = options;
 	const embedder: Embedder | undefined = embed && {

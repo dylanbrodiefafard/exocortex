@@ -90,7 +90,7 @@ export async function runLoadTest(options: LoadTestOptions): Promise<LoadTestRep
 			sessionTokenBudget: 0,
 			backgroundWhenIdleOnly: true,
 		},
-		moduleLimits: () => ({ maxCallsPerTurn: Number.MAX_SAFE_INTEGER, maxTokensPerCall: options.sidecarMaxTokens }),
+		moduleLimits: () => ({ maxTokensPerCall: options.sidecarMaxTokens }),
 	});
 	pool.setMainActive(true);
 	log(`phase 2/2: ${options.mainRequests} main requests with ${options.sidecarBacklog} sidecars kept in flight`);

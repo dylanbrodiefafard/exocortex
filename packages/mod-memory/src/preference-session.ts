@@ -28,7 +28,6 @@ import {
 	withKind,
 } from "./preferences.ts";
 import { type RetiredBy, type SightingSource, type StoredPreference, TASK_KINDS } from "./store.ts";
-import { fenced } from "./text.ts";
 
 const PREFERENCES_PROMPT = loadPrompt(new URL("../prompts/preferences.v4.md", import.meta.url));
 
@@ -41,8 +40,7 @@ const PreferencesSchema = Type.Object({
 			applies_to: Type.Union(TASK_KINDS.map((kind) => Type.Literal(kind))),
 			correction: Type.Boolean(),
 		}),
-		// With one relation call each, a message stays within a module's default calls per turn.
-		{ maxItems: 3 },
+		{ maxItems: 4 },
 	),
 });
 
@@ -254,7 +252,7 @@ export function createPreferenceSession(
 					{
 						role: "user",
 						content: RELATE_PROMPT.render({
-							quote: fenced(statement.quote),
+							quote: statement.quote,
 							rule: statement.rule,
 							// A sidecar is told what it is not shown (D-089).
 							known_heading:

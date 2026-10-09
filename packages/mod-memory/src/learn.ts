@@ -1,4 +1,4 @@
-import { loadPrompt, SIDECAR_MAX_TOKENS, type ToolOutcome, ungroundedReferences } from "@exocortex/core";
+import { fenced, loadPrompt, SIDECAR_MAX_TOKENS, type ToolOutcome, ungroundedReferences } from "@exocortex/core";
 import { Type } from "typebox";
 import { refusalOf } from "./admission.ts";
 import { MEMORY_ID, type MemoryDeps } from "./deps.ts";
@@ -6,7 +6,7 @@ import { createEpisodeTracker, editsOf, type FixEpisode } from "./episodes.ts";
 import { sameProblem } from "./problem.ts";
 import { embedCards } from "./recall.ts";
 import type { Card } from "./store.ts";
-import { clip, fenced, inert, oneLine } from "./text.ts";
+import { clip, inert, oneLine } from "./text.ts";
 
 const LESSON_PROMPT = loadPrompt(new URL("../prompts/lesson.v3.md", import.meta.url));
 

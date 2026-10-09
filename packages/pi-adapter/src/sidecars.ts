@@ -123,7 +123,6 @@ export function registerSidecars(pi: ExtensionAPI, options: SidecarOptions): voi
 			// Typed while the agent runs, to steer it or to follow up: the turn goes on, and so does
 			// the sidecar work it is waiting on (`streamingBehavior` is set only then, PI_API_NOTES §2).
 			if (event.streamingBehavior !== undefined) return;
-			runtime.pool?.beginTurn();
 			// The user moved on: hot-path work for the previous turn is stale.
 			runtime.pool?.cancel((call) => call.priority !== "background");
 		}),

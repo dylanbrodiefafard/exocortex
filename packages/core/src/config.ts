@@ -18,8 +18,6 @@ const ModuleConfig = Type.Object(
 	{
 		/** Modules are off unless this is true (D-001). */
 		enabled: Type.Optional(Type.Boolean()),
-		/** Sidecar calls this module may start per user turn (brief §5.2). Default 4. */
-		maxCallsPerTurn: Type.Optional(Type.Integer({ minimum: 0 })),
 		/** Upper bound on `max_tokens` for each of this module's sidecar calls. Default 4096. */
 		maxTokensPerCall: Type.Optional(Type.Integer({ minimum: 1 })),
 	},

@@ -37,7 +37,6 @@ const OUTCOMES = [
 	"timeout",
 	"cancelled",
 	"rejected_budget",
-	"rejected_turn_cap",
 	"invalid_output",
 	/** A structured reply was cut off at `max_tokens` before it held a valid answer; no repair turn was made. */
 	"truncated",
@@ -116,8 +115,6 @@ export interface SidecarPool {
 	run<S extends TSchema | undefined = undefined>(call: SidecarCall<S>): Promise<SidecarResult<S>>;
 	/** The main agent is generating; `background` calls wait while this is true (if configured). */
 	setMainActive(active: boolean): void;
-	/** Starts a new user turn: resets per-module call counts. */
-	beginTurn(): void;
 	/** Cancels queued and running calls matching `filter` (all when omitted). */
 	cancel(filter?: (call: { readonly module: string; readonly priority: SidecarPriority }) => boolean): void;
 	stats(): PoolStats;
@@ -133,7 +130,6 @@ export interface SidecarPool {
 }
 
 export interface ModuleLimits {
-	readonly maxCallsPerTurn: number;
 	readonly maxTokensPerCall: number;
 }
 
@@ -153,7 +149,12 @@ export interface SidecarPoolOptions {
  */
 export const SIDECAR_MAX_TOKENS = 4096;
 
-export const DEFAULT_MODULE_LIMITS: ModuleLimits = { maxCallsPerTurn: 4, maxTokensPerCall: SIDECAR_MAX_TOKENS };
+/**
+ * There is no limit on how many calls a module makes (D-092): a module's work is as many calls as
+ * its design needs, and a count cut off the last of them. What bounds sidecar use is the pool's
+ * slots, each call's deadline and `pool.sessionTokenBudget`.
+ */
+export const DEFAULT_MODULE_LIMITS: ModuleLimits = { maxTokensPerCall: SIDECAR_MAX_TOKENS };
 
 /** How long one stretch of holding a `background` call for the main agent may last (`pool.maxHoldMs`). */
 const DEFAULT_MAX_HOLD_MS = 10 * 60_000;
@@ -161,7 +162,6 @@ const DEFAULT_MAX_HOLD_MS = 10 * 60_000;
 /** Per-module limits from config, with defaults for unset fields. */
 export function moduleLimitsFrom(modules: ExoConfig["modules"]): (module: string) => ModuleLimits {
 	return (module) => ({
-		maxCallsPerTurn: modules[module]?.maxCallsPerTurn ?? DEFAULT_MODULE_LIMITS.maxCallsPerTurn,
 		maxTokensPerCall: modules[module]?.maxTokensPerCall ?? DEFAULT_MODULE_LIMITS.maxTokensPerCall,
 	});
 }
@@ -198,7 +198,6 @@ export function createSidecarPool(options: SidecarPoolOptions): SidecarPool {
 	const maxHoldMs = clampTimeoutMs(config.maxHoldMs ?? DEFAULT_MAX_HOLD_MS);
 	const queue: Job[] = [];
 	const running = new Set<Job>();
-	const turnCalls = new Map<string, number>();
 	const outcomes = Object.fromEntries(OUTCOMES.map((o) => [o, 0])) as Record<SidecarOutcome, number>;
 	const drains = new Set<(job: Job) => void>();
 	let mainActive = false;
@@ -268,7 +267,7 @@ export function createSidecarPool(options: SidecarPoolOptions): SidecarPool {
 	function rejectNow<S extends TSchema | undefined>(
 		call: SidecarCall<S>,
 		maxTokens: number,
-		outcome: "rejected_budget" | "rejected_turn_cap" | "closed" | "error",
+		outcome: "rejected_budget" | "closed" | "error",
 		error: string,
 	): SidecarResult<S> {
 		record(
@@ -285,12 +284,6 @@ export function createSidecarPool(options: SidecarPoolOptions): SidecarPool {
 		const request = { ...call.request, maxTokens: Math.min(call.request.maxTokens, limits.maxTokensPerCall) };
 		if (closed) return Promise.resolve(rejectNow(call, request.maxTokens, "closed", "pool is closed"));
 		if (budgetSpent()) return Promise.resolve(rejectNow(call, request.maxTokens, "rejected_budget", BUDGET_SPENT));
-		const callsThisTurn = turnCalls.get(call.module) ?? 0;
-		if (callsThisTurn >= limits.maxCallsPerTurn) {
-			const error = `${call.module}: maxCallsPerTurn reached`;
-			return Promise.resolve(rejectNow(call, request.maxTokens, "rejected_turn_cap", error));
-		}
-		turnCalls.set(call.module, callsThisTurn + 1);
 
 		return new Promise<SidecarResult<S>>((resolve) => {
 			const submittedAt = now();
@@ -407,9 +400,6 @@ export function createSidecarPool(options: SidecarPoolOptions): SidecarPool {
 		setMainActive(active) {
 			mainActive = active;
 			reschedule();
-		},
-		beginTurn() {
-			turnCalls.clear();
 		},
 		cancel(filter) {
 			for (const job of [...queue, ...running]) {

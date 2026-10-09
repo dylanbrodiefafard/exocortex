@@ -166,7 +166,7 @@ describe("computeTraceMetrics", () => {
 			[
 				{ ...base, outcome: "ok" },
 				{ ...base, outcome: "timeout" },
-				{ ...base, outcome: "rejected_turn_cap", usage: { promptTokens: 0, cachedTokens: null, completionTokens: 0 } },
+				{ ...base, outcome: "rejected_budget", usage: { promptTokens: 0, cachedTokens: null, completionTokens: 0 } },
 			],
 		);
 		expect(metrics).toMatchObject({ sidecarCalls: 3, sidecarTokens: 240, sidecarFailures: 1 });
