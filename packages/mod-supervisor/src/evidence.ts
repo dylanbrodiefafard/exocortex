@@ -232,20 +232,3 @@ function tail(text: string, chars: number): string {
 	const trimmed = text.trimEnd();
 	return trimmed.length > chars ? `…${trimmed.slice(-chars)}` : trimmed;
 }
-
-/**
- * Heuristic: does the agent's final message end by asking the user something (brief §6.1
- * guard)? Looks at the last non-empty lines outside code fences.
- */
-export function asksUserQuestion(finalMessage: string): boolean {
-	const withoutCode = finalMessage.replace(/```[\s\S]*?```/g, "");
-	const lines = withoutCode
-		.split("\n")
-		.map((l) => l.trim())
-		.filter((l) => l !== "");
-	const ending = lines.slice(-2).join(" ");
-	if (/\?\s*[*_)"'`]*\s*$/.test(ending)) return true;
-	return /\b(would you like|do you want|should i|shall i|which (option|one) (do|would) you|please (confirm|clarify|choose|let me know which))\b/i.test(
-		ending,
-	);
-}

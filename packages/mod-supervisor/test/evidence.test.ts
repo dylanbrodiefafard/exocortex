@@ -1,21 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { asksUserQuestion, diffFingerprint, fitDiff, formatEvidence, touchedFiles } from "../src/evidence.ts";
+import { diffFingerprint, fitDiff, formatEvidence, touchedFiles } from "../src/evidence.ts";
 
 const ok = { exitCode: 0, timedOut: false, durationMs: 5, outputTail: "all good" };
-
-describe("asksUserQuestion", () => {
-	it.each([
-		["Which approach do you prefer?", true],
-		["Done.\n\nShould I also update the docs", true],
-		["Would you like me to add tests?**", true],
-		["I fixed the bug. All tests pass.", false],
-		["Let me know if anything else is needed.", false],
-		["Done.\n```python\nif x == '?':\n```", false],
-		["", false],
-	])("%j -> %s", (text, expected) => {
-		expect(asksUserQuestion(text)).toBe(expected);
-	});
-});
 
 describe("formatEvidence", () => {
 	it("orders checks, changes, commands, then the diff, within the budget", () => {

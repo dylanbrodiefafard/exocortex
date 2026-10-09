@@ -267,6 +267,7 @@ describe("pi CLI with the Exocortex extension", { timeout: 30_000 }, () => {
 			follows_previous: false,
 			criteria: ["Update greeting", "Add a README"],
 			check_commands: [],
+			do_not_run: [],
 		};
 		const verdicts = [
 			{ verdict: "incomplete", missing: ["Add a README"], asked_user: false, reason: "no README" },

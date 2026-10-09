@@ -1,10 +1,10 @@
-export { asksUserQuestion, diffFingerprint, fitDiff, formatEvidence, touchedFiles } from "./evidence.ts";
+export { diffFingerprint, fitDiff, formatEvidence, touchedFiles } from "./evidence.ts";
 export { parseSettings, SettingsSchema as SupervisorSettingsSchema, type SupervisorSettings } from "./settings.ts";
 export {
+	admitClaims,
 	type Claim,
 	type ClaimKind,
 	type DiffFile,
-	extractClaims,
 	isNarrowTest,
 	lastFullRun,
 	madeNoChanges,

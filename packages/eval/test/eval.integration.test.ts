@@ -236,6 +236,7 @@ describe("runEval with the real pi CLI and a scripted model", { timeout: 60_000 
 			follows_previous: false,
 			criteria: ["Fix paginate", "Fix page_count"],
 			check_commands: [],
+			do_not_run: [],
 		};
 		const verdicts = [
 			{ verdict: "incomplete", missing: ["Fix the bugs in pagination.py"], asked_user: false, reason: "no diff" },

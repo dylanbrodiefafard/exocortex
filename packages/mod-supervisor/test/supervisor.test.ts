@@ -16,7 +16,12 @@ import { createSupervisor } from "../src/supervisor.ts";
 interface Script {
 	ledger: object;
 	verdicts: object[];
+	/** The final-message sidecar's reading of the prompt it is sent (D-091); by default it finds nothing. */
+	reading?: (prompt: string) => object;
 }
+
+const NOTHING_SAID = { asked_user: false, claims: [] };
+const isReadingPrompt = (prompt: string) => prompt.includes("the last message a coding agent wrote");
 
 let repo: string;
 let records: Omit<TraceEventInput, "module" | "synthetic">[];
@@ -42,9 +47,11 @@ function scriptedClient(script: Script): InferenceClient {
 		async chat(request) {
 			requests.push(request);
 			const prompt = String(request.messages[0]?.["content"]);
-			const reply = prompt.includes("acceptance checklist and evidence")
-				? (script.verdicts[Math.min(verdictIndex++, script.verdicts.length - 1)] ?? {})
-				: script.ledger;
+			const reply = isReadingPrompt(prompt)
+				? (script.reading?.(prompt) ?? NOTHING_SAID)
+				: prompt.includes("acceptance checklist and evidence")
+					? (script.verdicts[Math.min(verdictIndex++, script.verdicts.length - 1)] ?? {})
+					: script.ledger;
 			return {
 				text: JSON.stringify(reply),
 				finishReason: "stop",
@@ -88,6 +95,7 @@ const LEDGER = {
 	follows_previous: false,
 	criteria: ["Print v2 from app.py", "Add a README"],
 	check_commands: ["sh ./check.sh", "rm -rf /"],
+	do_not_run: [],
 };
 const INCOMPLETE = { verdict: "incomplete", missing: ["Add a README"], asked_user: false, reason: "no README" };
 const COMPLETE = { verdict: "complete", missing: [], asked_user: false, reason: "all done" };
@@ -193,9 +201,10 @@ describe("supervisor", () => {
 		expect(String(requests.at(-1)?.messages[0]?.["content"])).toContain("An offer of more work after it finished");
 	});
 
-	it("without an LLM verdict, a failing check does not continue an agent that ended on a question", async () => {
+	it("without an LLM verdict, a failing check does not continue an agent a sidecar reads as waiting on the user", async () => {
 		const settings = { mode: "auto", preVerdict: true, checks: ["false"], runPromptChecks: false };
-		const sup = createSupervisor(settings, context({ ledger: LEDGER, verdicts: [COMPLETE] }));
+		const reading = (prompt: string) => ({ asked_user: prompt.includes("Which one do you prefer?"), claims: [] });
+		const sup = createSupervisor(settings, context({ ledger: LEDGER, verdicts: [COMPLETE], reading }));
 		sup.onUserTurn?.({ text: "Make app.py print v2.", origin: "user" });
 		const asked = await sup.onSettle?.(
 			{ outcome: "completed", lastAssistantText: "There are two ways to do this.\n\nWhich one do you prefer?" },
@@ -203,6 +212,18 @@ describe("supervisor", () => {
 		);
 		expect(asked).toMatchObject({ kind: "notify", summary: "supervisor: the agent is waiting for your answer" });
 		expect(await sup.onSettle?.(DONE, signal)).toMatchObject({ kind: "continue" });
+		// The verdict itself was never asked for.
+		expect(requests.some((r) => String(r.messages[0]?.["content"]).includes("acceptance checklist and evidence"))).toBe(
+			false,
+		);
+	});
+
+	it("without an LLM verdict or a reading of the final message, a failing check gives no verdict", async () => {
+		const settings = { mode: "auto", preVerdict: true, checks: ["false"], runPromptChecks: false };
+		const sup = createSupervisor(settings, context({ ledger: LEDGER, verdicts: [COMPLETE], reading: () => ({}) }));
+		sup.onUserTurn?.({ text: "Make app.py print v2.", origin: "user" });
+		expect(await sup.onSettle?.(DONE, signal)).toBeUndefined();
+		expect(records.at(-1)?.data).toEqual({ action: "skipped", reason: "verdict_unavailable" });
 	});
 
 	it("auto mode continues until two continuations make no progress (no runaway loops)", async () => {
@@ -387,7 +408,8 @@ describe("supervisor research options (all off by default)", () => {
 	});
 
 	it("warningSignals: shows tampering and unsupported claims to the verdict", async () => {
-		const sup = createSupervisor({ warningSignals: true }, context({ ledger: LEDGER, verdicts: [COMPLETE] }));
+		const reading = () => ({ asked_user: false, claims: [{ kind: "tests_pass", quote: "All tests pass." }] });
+		const sup = createSupervisor({ warningSignals: true }, context({ ledger: LEDGER, verdicts: [COMPLETE], reading }));
 		sup.onUserTurn?.({ text: "Make app.py print v2.", origin: "user" });
 		writeFileSync(join(repo, "app.py"), "print('v2')  # TODO: real output\n");
 		sup.onToolResult?.({ toolName: "edit", input: { path: "app.py" }, isError: false, exitCode: null, output: "ok" });
@@ -433,6 +455,7 @@ describe("supervisor research options (all off by default)", () => {
 			follows_previous: false,
 			criteria: ["Numbered list of issues ordered by priority", "Severity labels", "A list of positives"],
 			check_commands: [],
+			do_not_run: [],
 		};
 		const issues = Array.from(
 			{ length: 11 },
@@ -474,17 +497,44 @@ describe("supervisor research options (all off by default)", () => {
 	});
 
 	it("finalMessage=claims: the verdict sees unverified claims and the ending, not the narrative", async () => {
-		const sup = createSupervisor({ finalMessage: "claims" }, context({ ledger: LEDGER, verdicts: [COMPLETE] }));
+		const reading = () => ({
+			asked_user: false,
+			claims: [
+				{ kind: "tests_pass", quote: "All tests pass." },
+				// Not a sentence of the message: the sidecar's own words are not the agent's claim.
+				{ kind: "done", quote: "Everything is finished." },
+			],
+		});
+		const sup = createSupervisor(
+			{ finalMessage: "claims" },
+			context({ ledger: LEDGER, verdicts: [COMPLETE], reading }),
+		);
 		sup.onUserTurn?.({ text: "Make app.py print v2.", origin: "user" });
 		editApp(sup);
 		const long = `${"I carefully restructured everything. ".repeat(30)}All tests pass. Let me know.`;
 		await sup.onSettle?.({ outcome: "completed", lastAssistantText: long }, signal);
+		// The sidecar that reads the claims is shown the message; the judge is not.
+		expect(String(requests.at(-2)?.messages[0]?.["content"])).toContain("Agent's final message (all of it):");
 		const prompt = String(requests.at(-1)?.messages[0]?.["content"]);
 		expect(prompt).toContain("- UNVERIFIED CLAIM: All tests pass.");
+		expect(prompt).not.toContain("Everything is finished.");
 		// The heading says the message itself is not there, in the holistic prompt too.
 		expect(prompt).toContain("(the text of the message is not shown):");
 		expect(prompt).not.toContain("Agent's final message (");
 		expect(prompt.split("I carefully restructured").length - 1).toBeLessThan(10);
+	});
+
+	it("finalMessage=claims: says so when the claims could not be read", async () => {
+		const sup = createSupervisor(
+			{ finalMessage: "claims" },
+			context({ ledger: LEDGER, verdicts: [COMPLETE], reading: () => ({}) }),
+		);
+		sup.onUserTurn?.({ text: "Make app.py print v2.", origin: "user" });
+		editApp(sup);
+		await sup.onSettle?.({ outcome: "completed", lastAssistantText: "Done. All tests pass." }, signal);
+		const prompt = String(requests.at(-1)?.messages[0]?.["content"]);
+		expect(prompt).toContain("(the agent's claims could not be read)");
+		expect(prompt).not.toContain("(no success claims)");
 	});
 
 	it("completeVotes: any dissent turns complete into uncertain; unanimity keeps it", async () => {

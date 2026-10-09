@@ -1,7 +1,8 @@
 import { isTestPath, type ToolOutcome } from "@exocortex/core";
 import { describe, expect, it } from "vitest";
 import {
-	extractClaims,
+	admitClaims,
+	type Claim,
 	madeNoChanges,
 	narrowTestSignal,
 	parseDiff,
@@ -101,19 +102,28 @@ describe("tamperSignals and stubSignals", () => {
 });
 
 describe("claims", () => {
-	const message = "I fixed the parser. All tests pass now!\nThe build compiles cleanly. ```\ntests pass\n```";
-	it("extracts one claim per kind, outside code fences", () => {
-		expect(extractClaims(message)).toEqual([
+	const message = "I fixed the parser. All tests pass now!\nThe build compiles\ncleanly. Next I will add docs.";
+	const TESTS = { kind: "tests_pass" as const, quote: "All tests pass now!" };
+	const BUILDS = { kind: "builds" as const, quote: "The build compiles cleanly." };
+
+	it("keeps the claims a sidecar read that are sentences of the message, one per kind", () => {
+		expect(admitClaims([TESTS, BUILDS], message)).toEqual([
 			{ kind: "tests_pass", sentence: "All tests pass now!" },
 			{ kind: "builds", sentence: "The build compiles cleanly." },
 		]);
-		expect(extractClaims("I have implemented everything.")).toEqual([
-			{ kind: "done", sentence: "I have implemented everything." },
-		]);
+		expect(admitClaims([TESTS, { kind: "tests_pass", quote: "I fixed the parser." }], message)).toHaveLength(1);
+		expect(admitClaims([], message)).toEqual([]);
+	});
+
+	it("drops a claim the agent did not write", () => {
+		expect(admitClaims([{ kind: "done", quote: "Everything is finished." }], message)).toEqual([]);
+		// Too short to show that anything was claimed.
+		expect(admitClaims([{ kind: "done", quote: "I fixed" }], message)).toEqual([]);
+		expect(admitClaims([TESTS], "")).toEqual([]);
 	});
 
 	it("flags claims with no successful matching command after the last edit", () => {
-		const claims = extractClaims(message);
+		const claims = admitClaims([TESTS, BUILDS], message);
 		expect(unsupportedClaims(claims, [bash("pytest -q"), edit]).map((c) => c.kind)).toEqual(["tests_pass", "builds"]);
 		expect(unsupportedClaims(claims, [edit, bash("pytest -q", 1)]).map((c) => c.kind)).toEqual([
 			"tests_pass",
@@ -121,7 +131,7 @@ describe("claims", () => {
 		]);
 		expect(unsupportedClaims(claims, [edit, bash("cargo test")])).toEqual([]);
 		expect(unsupportedClaims(claims, [edit, bash("cargo build")]).map((c) => c.kind)).toEqual(["tests_pass"]);
-		expect(unsupportedClaims(extractClaims("All done."), [])).toEqual([]);
+		expect(unsupportedClaims([{ kind: "done", sentence: "All done." }], [])).toEqual([]);
 	});
 });
 
@@ -187,7 +197,7 @@ describe("testRunNotes", () => {
 
 describe("one reading of 'is this a test run' (D-084, S6 and S7)", () => {
 	const piped = (command: string, output: string): ToolOutcome => ({ ...bash(command), output });
-	const claims = extractClaims("All tests pass now.");
+	const claims: Claim[] = [{ kind: "tests_pass", sentence: "All tests pass now." }];
 
 	it("does not take a command that only mentions the tests for a test run", () => {
 		expect(unsupportedClaims(claims, [edit, bash("git commit -m 'make pytest pass'")])).toHaveLength(1);

@@ -59,7 +59,7 @@
 			"maxEvidenceChars": 40000, // what the verdict reads of the diff and command output (~4 chars per token)
 			"thinking": false, // sidecar reasoning for the ledger/verdict calls
 			// Research options (docs/RESEARCH.md §1), off until A/B'd: see packages/eval/configs/supervisor-*.jsonc
-			"preVerdict": false, // a failing check = incomplete with no LLM call
+			"preVerdict": false, // a failing check = incomplete without asking for a verdict
 			"warningSignals": false, // flag skipped/deleted tests, stubs, unsupported "tests pass" claims
 			"verdictStyle": "holistic", // or "per-criterion": each item judged with a quoted evidence line
 			"finalMessage": "message", // or "claims": show only the agent's success claims, marked unverified

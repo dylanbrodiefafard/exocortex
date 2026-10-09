@@ -39,7 +39,7 @@ export interface TraceMetrics {
 	readonly verdicts: Readonly<Record<"complete" | "incomplete" | "failed" | "uncertain", number>>;
 	/** The run's last supervisor verdict: what it believed when the agent finally stopped. */
 	readonly lastVerdict: "complete" | "incomplete" | "failed" | "uncertain" | null;
-	/** Verdicts reached without an LLM call (supervisor preVerdict, D-046). */
+	/** Verdicts reached without a verdict call (supervisor preVerdict, D-046). */
 	readonly deterministicVerdicts: number;
 	/**
 	 * Whether a test or build run passed after the agent's last change to the workspace; null when

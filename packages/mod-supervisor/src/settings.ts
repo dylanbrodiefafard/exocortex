@@ -23,15 +23,22 @@ export const SettingsSchema = Type.Object(
 		 */
 		maxEvidenceChars: Type.Integer({ minimum: 1000, default: 40_000 }),
 		// Research options (docs/RESEARCH.md §1), all off by default so each can be A/B'd (D-046).
-		/** R1.1: a failing check means `incomplete` with no LLM call; no change at all means `uncertain`. */
+		/**
+		 * R1.1: a failing check means `incomplete` and no change at all means `uncertain`, without a
+		 * verdict call. After a failing check a small sidecar call still reads whether the agent is
+		 * waiting on the user (D-091).
+		 */
 		preVerdict: Type.Boolean({ default: false }),
-		/** R1.2 #4–#7: add test-tampering, stub, unsupported-claim and narrow-test warnings to the evidence. */
+		/**
+		 * R1.2 #4–#7: add test-tampering, stub, unsupported-claim and narrow-test warnings to the
+		 * evidence. The claims are read from the agent's final message by a sidecar (D-091).
+		 */
 		warningSignals: Type.Boolean({ default: false }),
 		/** R1.4: judge each checklist item with a quoted evidence line, and derive the verdict in code. */
 		verdictStyle: Type.Union([Type.Literal("holistic"), Type.Literal("per-criterion")], { default: "holistic" }),
 		/**
 		 * What the verdict reads of the agent's final message. `message`: the message itself, the start
-		 * and end of a very long one (D-089). `claims` (R1.3): only its extracted, unverified claims.
+		 * and end of a very long one (D-089). `claims` (R1.3): only its unverified claims, as a sidecar read them (D-091).
 		 */
 		finalMessage: Type.Union([Type.Literal("message"), Type.Literal("claims")], { default: "message" }),
 		/** R1.5: re-ask this many times in total when the verdict is `complete`; any dissent → `uncertain`. */

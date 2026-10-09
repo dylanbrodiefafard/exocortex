@@ -185,39 +185,37 @@ export function runnerConfigSignals(files: readonly DiffFile[]): string[] {
 	return signals;
 }
 
-export type ClaimKind = "tests_pass" | "builds" | "done";
+export const CLAIM_KINDS = ["tests_pass", "builds", "done"] as const;
+export type ClaimKind = (typeof CLAIM_KINDS)[number];
 
+/** Something the agent's final message says succeeded, in the sentence that says it. */
 export interface Claim {
 	readonly kind: ClaimKind;
 	readonly sentence: string;
 }
 
-const CLAIM_PATTERNS: readonly [ClaimKind, RegExp][] = [
-	[
-		"tests_pass",
-		/\b(all )?(the )?tests? (now )?(pass|passes|passed|passing|are green|succeed)\b|\btests? (are )?(all )?green\b/i,
-	],
-	[
-		"builds",
-		/\b(builds?|compiles?|compiled) (successfully|cleanly|without (errors|warnings))\b|\bbuild (passes|succeeds|is green)\b/i,
-	],
-	[
-		"done",
-		/\b(task is|everything is|all|i('ve| have)) (now )?(done|complete|completed|finished|implemented)\b|\bfully (implemented|working)\b/i,
-	],
-];
+const CLAIM_CHARS = 200;
+/** Shorter than this, a quote does not show that anything was claimed. */
+const MIN_CLAIM_CHARS = 8;
+const squash = (text: string) => text.replace(/\s+/g, " ").trim();
 
-/** Success claims in the agent's final message, one per kind, with the sentence they appear in. */
-export function extractClaims(finalMessage: string): Claim[] {
-	const sentences = finalMessage
-		.replace(/```[\s\S]*?```/g, " ")
-		.split(/(?<=[.!?])\s+|\n+/)
-		.map((s) => s.trim())
-		.filter(Boolean);
+/**
+ * The success claims a sidecar read in the agent's final message (D-091), kept when the message
+ * bears them out: the quote is in the message word for word, and there is one claim per kind, the
+ * first. Whether a sentence claims success is the sidecar's reading; that the agent wrote the
+ * sentence is checked here.
+ */
+export function admitClaims(
+	proposed: readonly { readonly kind: ClaimKind; readonly quote: string }[],
+	finalMessage: string,
+): Claim[] {
+	const message = squash(finalMessage);
 	const claims: Claim[] = [];
-	for (const [kind, pattern] of CLAIM_PATTERNS) {
-		const sentence = sentences.find((s) => pattern.test(s));
-		if (sentence) claims.push({ kind, sentence: sentence.slice(0, 200) });
+	for (const { kind, quote } of proposed) {
+		const sentence = squash(quote);
+		if (sentence.length < MIN_CLAIM_CHARS || !message.includes(sentence)) continue;
+		if (claims.some((claim) => claim.kind === kind)) continue;
+		claims.push({ kind, sentence: sentence.slice(0, CLAIM_CHARS) });
 	}
 	return claims;
 }

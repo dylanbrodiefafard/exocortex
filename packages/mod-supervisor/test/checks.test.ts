@@ -1,46 +1,38 @@
 import { describe, expect, it } from "vitest";
-import { acceptRequestCheck, checkOutcome, namedInRequest, plainTestOrBuild } from "../src/checks.ts";
+import { acceptRequestCheck, checkOutcome, namedInRequest, notRefused, plainTestOrBuild } from "../src/checks.ts";
 
 /** The rule for running a command the request names (D-084, S3), one clause at a time. */
 
-describe("namedInRequest: is the command a code span the user wants run", () => {
+describe("namedInRequest: is the command a whole code span of the message", () => {
 	it.each([
-		["Make sure `cargo test` passes.", "named"],
-		["Make sure `$ cargo test` passes.", "named"],
-		["Run this:\n```bash\ncargo test\n```", "named"],
-		["Run this:\n~~~\n$ cargo test\n~~~\n", "named"],
-		// The negative sentence ended before this one began.
-		["Don't refactor. Make sure `cargo test` passes.", "named"],
-		["Don't run the linter; `cargo test` must pass.", "named"],
-		["Don't run the linter but do run `cargo test`.", "named"],
-		["Rules:\n- don't touch the docs\n- `cargo test` must pass", "named"],
-		["Rules:\n1. never push\n2. `cargo test` must pass", "named"],
-		["Don't touch the docs.\n\n`cargo test` must pass.", "named"],
-		// Said not to run.
-		["Don't run `cargo test`.", "negated"],
-		["Do not, under any circumstances, run `cargo test`.", "negated"],
-		["Never run `cargo test` here", "negated"],
-		["Fix it without running `cargo test`.", "negated"],
-		["Use `make check` instead of `cargo test`.", "negated"],
-		["There is no need to run `cargo test`.", "negated"],
-		["You can skip `cargo test`.", "negated"],
-		["Stop running `cargo test`.", "negated"],
-		["Please don’t run `cargo test`.", "negated"],
-		["Do not run this:\n```\ncargo test\n```", "negated"],
-		["Don't run: `cargo test`", "negated"],
-		// Named once to run and once not to: not run.
-		["Make sure `cargo test` passes. Actually, don't run `cargo test`.", "negated"],
+		["Make sure `cargo test` passes.", true],
+		["Make sure `$ cargo test` passes.", true],
+		["Run this:\n```bash\ncargo test\n```", true],
+		["Run this:\n~~~\n$ cargo test\n~~~\n", true],
+		// What the sentence says about it is not read here (D-091).
+		["Don't run `cargo test`.", true],
 		// Not a whole code span.
-		["Make sure cargo test passes.", "absent"],
-		["Make sure `cargo test --all` passes.", "absent"],
-		["Make sure `cd core && cargo test` passes.", "absent"],
-		["Log:\n```\n$ cargo test\nerror[E0425]: cannot find value\n```", "absent"],
-		["Log:\n```\nrunning 3 tests\ncargo test\n```", "absent"],
-		["    cargo test\n", "absent"],
-		["> cargo test", "absent"],
-		["", "absent"],
+		["Make sure cargo test passes.", false],
+		["Make sure `cargo test --all` passes.", false],
+		["Make sure `cd core && cargo test` passes.", false],
+		["Log:\n```\n$ cargo test\nerror[E0425]: cannot find value\n```", false],
+		["Log:\n```\nrunning 3 tests\ncargo test\n```", false],
+		["    cargo test\n", false],
+		["> cargo test", false],
+		["", false],
 	])("%j → %s", (message, expected) => {
 		expect(namedInRequest("cargo test", message)).toBe(expected);
+	});
+});
+
+describe("notRefused: the commands a sidecar's 'do not run' leaves standing", () => {
+	it("drops a command named exactly, a shell prompt and outer spaces aside", () => {
+		const commands = ["cargo test", "make check"];
+		expect(notRefused(commands, [])).toEqual(commands);
+		expect(notRefused(commands, ["cargo test"])).toEqual(["make check"]);
+		expect(notRefused(commands, [" $ make check "])).toEqual(["cargo test"]);
+		// Another command, however close, is not the one that was named.
+		expect(notRefused(commands, ["cargo test --all", "cargo"])).toEqual(commands);
 	});
 });
 
@@ -109,17 +101,19 @@ describe("plainTestOrBuild: is the command one a request may have run", () => {
 });
 
 describe("acceptRequestCheck", () => {
-	it("needs both: named by the request, and a plain test or build", () => {
+	it("needs all three: named by the request, not refused, and a plain test or build", () => {
 		expect(acceptRequestCheck("cargo test", "Make sure `cargo test` passes.")).toEqual({ ok: true });
 		expect(acceptRequestCheck(" cargo test ", "Make sure `cargo test` passes.")).toEqual({ ok: true });
 		expect(acceptRequestCheck("cargo test", "Make sure the tests pass.")).toEqual({
 			ok: false,
 			reason: "it is not a whole code span of the request",
 		});
-		expect(acceptRequestCheck("cargo test", "Do not run `cargo test`.")).toEqual({
+		// Whether the sentence says no is the sidecar's reading; code only takes its word for it.
+		expect(acceptRequestCheck("cargo test", "Do not run `cargo test`.", ["cargo test"])).toEqual({
 			ok: false,
 			reason: "the request says not to run it",
 		});
+		expect(acceptRequestCheck("cargo test", "Run `cargo test`, not `cargo fmt`.", ["cargo fmt"])).toEqual({ ok: true });
 		expect(acceptRequestCheck("./deploy.sh", "Make sure `./deploy.sh` passes.")).toEqual({
 			ok: false,
 			reason: "it is not a test or build command",

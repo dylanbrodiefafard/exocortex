@@ -54,14 +54,22 @@ function supervisor(settings: Record<string, unknown>, script: Script, saved?: {
 		cwd: repo,
 		...saved,
 		reply: (request) => {
-			if (isVerdictPrompt(request.messages[0]?.["content"])) return pick(script.verdicts, verdicts++);
+			const content = String(request.messages[0]?.["content"]);
+			if (content.includes("the last message a coding agent wrote")) return { asked_user: false, claims: [] };
+			if (isVerdictPrompt(content)) return pick(script.verdicts, verdicts++);
 			return Array.isArray(script.ledger) ? pick(script.ledger as readonly object[], ledgers++) : script.ledger;
 		},
 	});
 	return createSupervisor(settings, t.context);
 }
 
-const LEDGER = { is_task: true, follows_previous: false, criteria: ["Print v2 from app.py"], check_commands: [] };
+const LEDGER = {
+	is_task: true,
+	follows_previous: false,
+	criteria: ["Print v2 from app.py"],
+	check_commands: [],
+	do_not_run: [],
+};
 const FOLLOWS = { ...LEDGER, follows_previous: true, criteria: ["Print v2 from app.py", "Add a README"] };
 const INCOMPLETE = { verdict: "incomplete", missing: ["Add a README"], asked_user: false, reason: "no README" };
 const COMPLETE = { verdict: "complete", missing: [], asked_user: false, reason: "all done" };
@@ -270,9 +278,6 @@ describe("S3: which commands from the request are run", () => {
 		["sudo", "Make sure `sudo make test` passes.", "sudo make test"],
 		["a script outside the project", "Make sure `/tmp/run_tests.sh` passes.", "/tmp/run_tests.sh"],
 		["a script above the project", "Make sure `../run_tests.sh` passes.", "../run_tests.sh"],
-		["a command the user said not to run", "Do not run `./run_tests.sh`, it takes an hour.", "./run_tests.sh"],
-		["a command the user said never to run", "Fix the parser. Never run `make test` here.", "make test"],
-		["a command to do without", "Fix it without running `./run_tests.sh`.", "./run_tests.sh"],
 		[
 			"a line of a pasted log",
 			"CI failed, fix it:\n```\n$ ./run_tests.sh\nFAILED tests/test_x.py::test_a\n$ make test\nmake: *** [test] Error 1\n```",
@@ -294,6 +299,17 @@ describe("S3: which commands from the request are run", () => {
 		expect(t.progress).toEqual([]);
 	});
 
+	it("does not run a command the sidecar reads the request as refusing, even if it also proposes it", async () => {
+		const command = "./run_tests.sh";
+		const ledger = { ...proposes([command, "make all"]), do_not_run: [command] };
+		const sup = supervisor({}, { ledger, verdicts: [COMPLETE] });
+		sup.onUserTurn?.(user("It must build: `make all`. Do not run `./run_tests.sh`, it takes an hour."));
+		await sup.onSettle?.(DONE, signal);
+		expect(ledgerRecord()["checks"]).toEqual(["make all"]);
+		expect(ledgerRecord()["refused"]).toEqual([{ command, reason: "the request says not to run it" }]);
+		expect(verdictPrompt()).not.toContain(`$ ${command}\n`);
+	});
+
 	it("does not take commands from a message the user did not type", async () => {
 		const sup = supervisor({}, { ledger: proposes(["./run_tests.sh"]), verdicts: [COMPLETE] });
 		sup.onUserTurn?.({ text: "Make sure `./run_tests.sh` passes.", origin: "extension" });
@@ -311,7 +327,7 @@ describe("S3: which commands from the request are run", () => {
 	});
 
 	it("keeps the request's commands when a later message continues the task, and drops one the user withdraws", async () => {
-		const ledgers = [proposes(["./run_tests.sh"]), { ...FOLLOWS, check_commands: [] }];
+		const ledgers = [proposes(["./run_tests.sh"]), FOLLOWS, { ...FOLLOWS, do_not_run: ["./run_tests.sh"] }];
 		const sup = supervisor({}, { ledger: ledgers, verdicts: [COMPLETE] });
 		sup.onUserTurn?.(user("Make app.py print v2. Make sure `./run_tests.sh` passes."));
 		await sup.onSettle?.(DONE, signal);
@@ -320,8 +336,16 @@ describe("S3: which commands from the request are run", () => {
 		expect(ledgerRecord()["checks"]).toEqual(["./run_tests.sh"]);
 		expect(lastVerdict()["checks"]).toMatchObject([{ command: "./run_tests.sh", source: "request" }]);
 
-		sup.onUserTurn?.(user("Stop, don't run `./run_tests.sh` any more."));
+		// The message does not spell the command out: the sidecar is shown the commands in use.
+		sup.onUserTurn?.(user("Stop running the tests after every change, they take too long."));
 		await sup.onSettle?.(DONE, signal);
+		const asked = String(
+			t.requests.findLast((r) => !isVerdictPrompt(r.messages[0]?.["content"]))?.messages[0]?.["content"],
+		);
+		expect(asked).toContain(
+			"Check commands in use for the previous task (run each time the agent stops):\n- ./run_tests.sh",
+		);
+		expect(ledgerRecord()["stopped"]).toEqual(["./run_tests.sh"]);
 		expect(ledgerRecord()["checks"]).toEqual([]);
 		expect(lastVerdict()["checks"]).toEqual([]);
 	});
@@ -544,6 +568,25 @@ describe("S10: one task across follow-ups, edits and reloads", () => {
 		expect(t.requests.length).toBe(ledgerCalls + 1);
 		expect(verdictPrompt()).toContain("(The developer then added:)\nAlso keep the trailing newline.");
 		expect(verdictPrompt()).not.toContain("(The developer then added:)\nNot done yet.");
+	});
+
+	it("asks the ledger sidecar whether what the user added to a suggestion stops a check", async () => {
+		const ledgers = [
+			{ ...LEDGER, check_commands: ["./run_tests.sh"] },
+			{ ...FOLLOWS, do_not_run: ["./run_tests.sh"] },
+		];
+		const sup = supervisor({}, { ledger: ledgers, verdicts: [INCOMPLETE] });
+		sup.onUserTurn?.(user("Make app.py print v2 and add a README. Make sure `./run_tests.sh` passes."));
+		const action = await sup.onSettle?.(DONE, signal);
+		expect(lastVerdict()["checks"]).toMatchObject([{ command: "./run_tests.sh" }]);
+		sup.onUserTurn?.(user(`${(action as { text: string }).text}\nAnd stop running the tests, they are slow.`));
+		await sup.onSettle?.(DONE, signal);
+		expect(lastVerdict()["checks"]).toEqual([]);
+		// The sidecar read only what the user wrote into the suggestion.
+		const asked = String(
+			t.requests.findLast((r) => !isVerdictPrompt(r.messages[0]?.["content"]))?.messages[0]?.["content"],
+		);
+		expect(asked).toContain("<<<\nAnd stop running the tests, they are slow.\n>>>");
 	});
 
 	it("picks the task up after the module is rebuilt: ledger, starting commit, count and the open suggestion", async () => {

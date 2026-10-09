@@ -12,11 +12,13 @@ import {
 } from "@exocortex/core";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
-import { acceptRequestCheck, checkOutcome, namedInRequest, plainTestOrBuild } from "./checks.ts";
-import { asksUserQuestion, buildEvidence, type CheckResult, diffFingerprint, touchedFiles } from "./evidence.ts";
+import { acceptRequestCheck, checkOutcome, notRefused, plainTestOrBuild } from "./checks.ts";
+import { buildEvidence, type CheckResult, diffFingerprint, touchedFiles } from "./evidence.ts";
 import { parseSettings, type SupervisorSettings } from "./settings.ts";
 import {
-	extractClaims,
+	admitClaims,
+	CLAIM_KINDS,
+	type Claim,
 	lastFullRun,
 	madeNoChanges,
 	narrowTestSignal,
@@ -30,16 +32,36 @@ import { isCommitId, newFileDiffs, untrackedFiles, workspaceFingerprint } from "
 
 export const SUPERVISOR_ID = "supervisor";
 
-const LEDGER_PROMPT = loadPrompt(new URL("../prompts/ledger.v3.md", import.meta.url));
+const LEDGER_PROMPT = loadPrompt(new URL("../prompts/ledger.v4.md", import.meta.url));
 const VERDICT_PROMPT = loadPrompt(new URL("../prompts/verdict.v7.md", import.meta.url));
 const ITEM_VERDICT_PROMPT = loadPrompt(new URL("../prompts/verdict-items.v7.md", import.meta.url));
+const FINAL_MESSAGE_PROMPT = loadPrompt(new URL("../prompts/final-message.v1.md", import.meta.url));
 
 const LedgerSchema = Type.Object({
 	is_task: Type.Boolean(),
 	follows_previous: Type.Boolean(),
 	criteria: Type.Array(Type.String(), { maxItems: 16 }),
 	check_commands: Type.Array(Type.String(), { maxItems: 10 }),
+	/** Commands the message says not to run, or to stop running (D-091). */
+	do_not_run: Type.Array(Type.String(), { maxItems: 10 }),
 });
+
+const ReadingSchema = Type.Object({
+	asked_user: Type.Boolean(),
+	claims: Type.Array(
+		Type.Object({ kind: Type.Union(CLAIM_KINDS.map((kind) => Type.Literal(kind))), quote: Type.String() }),
+		{ maxItems: 6 },
+	),
+});
+
+/**
+ * What the agent's final message says, as a sidecar that judges nothing reads it (D-091): whether
+ * the agent is waiting on the user, and its success claims, each one a sentence of the message.
+ */
+interface Reading {
+	readonly asked_user: boolean;
+	readonly claims: readonly Claim[];
+}
 
 const VerdictSchema = Type.Object({
 	verdict: Type.Union([
@@ -223,11 +245,11 @@ export function createSupervisor(raw: Readonly<Record<string, unknown>>, ctx: Mo
 				if (added !== "") {
 					// What the user wrote into the suggestion is theirs, and part of the request.
 					current.ledger = current.ledger.then(
-						(ledger) =>
+						async (ledger) =>
 							ledger && {
 								...ledger,
 								requests: [...ledger.requests, added],
-								checkCommands: stillWanted(ledger.checkCommands, added),
+								checkCommands: await stillWanted(ctx, settings, ledger, added),
 							},
 					);
 				}
@@ -306,13 +328,19 @@ export function createSupervisor(raw: Readonly<Record<string, unknown>>, ctx: Mo
 			if (!ledger || ledger.criteria.length === 0) return skip("no_ledger");
 			if (current.continuations >= settings.maxContinuations) return skip("max_continuations");
 
-			const evidence = await gatherEvidence(ctx, settings, current, ledger, info.lastAssistantText, signal);
+			// Asked at most once per settle, and only if something needs it.
+			let asked: Promise<Reading | undefined> | undefined;
+			const reading = () => {
+				asked ??= readFinalMessage(ctx, settings, info.lastAssistantText, signal);
+				return asked;
+			};
+			const evidence = await gatherEvidence(ctx, settings, current, ledger, reading, signal);
 			if (stalled(current, evidence.diffHash)) {
 				await persist(current);
 				return skip("no_progress");
 			}
 
-			const verdict = await decide(ctx, settings, ledger, evidence, info.lastAssistantText, signal);
+			const verdict = await decide(ctx, settings, ledger, evidence, info.lastAssistantText, reading, signal);
 			if (!verdict) return skip("verdict_unavailable");
 			lastVerdict = verdict.verdict;
 			ctx.record({
@@ -402,9 +430,20 @@ function acceptance(
 	return { edited: true, added: theirs.filter((line) => !ours.includes(line)).join("\n") };
 }
 
-/** The check commands a later message leaves standing: all but those it says not to run. */
-function stillWanted(commands: readonly string[], message: string): string[] {
-	return commands.filter((command) => namedInRequest(command, message) !== "negated");
+/**
+ * The check commands that what the user wrote into a suggestion leaves standing: all but those the
+ * ledger sidecar reads it as saying not to run. With no answer they all stand: the user asked for
+ * them, and nothing has been read that takes that back.
+ */
+async function stillWanted(
+	ctx: ModuleContext,
+	settings: SupervisorSettings,
+	ledger: Ledger,
+	added: string,
+): Promise<readonly string[]> {
+	if (ledger.checkCommands.length === 0) return ledger.checkCommands;
+	const value = await askLedger(ctx, settings, added, ledger);
+	return value ? notRefused(ledger.checkCommands, value.do_not_run) : ledger.checkCommands;
 }
 
 /** Brief §6.1 guard: two continuations in a row that leave the diff unchanged stop the supervisor. */
@@ -420,6 +459,8 @@ interface Gathered {
 	readonly diffHash: string;
 	readonly checks: readonly CheckResult[];
 	readonly noChanges: boolean;
+	/** The agent's success claims, when a setting needs them and the sidecar read them. */
+	readonly claims: readonly Claim[] | undefined;
 }
 
 /** The deterministic pre-verdict when enabled and decisive, else the (voted) LLM verdict. */
@@ -429,12 +470,18 @@ async function decide(
 	ledger: Ledger,
 	evidence: Gathered,
 	finalMessage: string,
+	reading: () => Promise<Reading | undefined>,
 	signal: AbortSignal,
 ): Promise<Judgement | undefined> {
-	// Without an LLM verdict to read the final message, the question heuristic stands in for it.
 	const pre = settings.preVerdict ? preVerdict(evidence.checks, evidence.noChanges) : undefined;
-	const deterministic = pre && { ...pre, asked_user: asksUserQuestion(finalMessage) };
-	return deterministic ?? (await judgeWithVotes(ctx, settings, ledger, evidence, finalMessage, signal));
+	if (!pre) return judgeWithVotes(ctx, settings, ledger, evidence, finalMessage, signal);
+	// `asked_user` only changes what follows an `incomplete` (see `act`).
+	if (pre.verdict !== "incomplete") return pre;
+	// The failing check gives the verdict. Whether the agent is waiting on the user is a reading of
+	// its message, so a sidecar is asked (D-091). With no answer there is no verdict: following up on
+	// an agent that may be waiting for the user is the dearer mistake.
+	const read = await reading();
+	return read && { ...pre, asked_user: read.asked_user };
 }
 
 /** A verdict's list as it is used: trimmed, without empty or repeated items, at most one per criterion. */
@@ -518,40 +565,15 @@ async function extractLedger(
 	turn: UserTurn,
 	previous: Ledger | undefined,
 ): Promise<{ readonly ledger: Ledger; readonly follows: boolean } | undefined> {
-	const pool = ctx.pool();
-	if (!pool) return undefined;
 	const prompt = turn.text;
-	const result = await pool.run({
-		module: SUPERVISOR_ID,
-		priority: "interactive",
-		timeoutMs: settings.ledgerTimeoutMs,
-		schema: LedgerSchema,
-		schemaName: "goal_ledger",
-		request: {
-			messages: [
-				{
-					role: "user",
-					content: LEDGER_PROMPT.render({
-						prompt,
-						previous: previous ? previous.criteria.map((c) => `- ${c}`).join("\n") : "(none)",
-					}),
-				},
-			],
-			maxTokens: SIDECAR_MAX_TOKENS,
-			temperature: 0.2,
-			thinking: settings.thinking,
-		},
-	});
-	if (!result.ok) {
-		ctx.log(`ledger ${result.outcome}: ${result.error}`);
-		return undefined;
-	}
-	const value = result.value;
+	const value = await askLedger(ctx, settings, prompt, previous);
+	if (!value) return undefined;
 	const continued = value.follows_previous ? previous : undefined;
 	// A message that goes on with the task keeps its check commands, unless it says to stop running one.
-	const carried = continued ? stillWanted(continued.checkCommands, prompt) : [];
+	const carried = continued ? notRefused(continued.checkCommands, value.do_not_run) : [];
+	const stopped = (continued?.checkCommands ?? []).filter((command) => !carried.includes(command));
 	if (!value.is_task) {
-		ctx.record({ kind: "exo.ledger", data: { is_task: false } });
+		ctx.record({ kind: "exo.ledger", data: { is_task: false, ...(stopped.length > 0 ? { stopped } : {}) } });
 		return continued && { ledger: { ...continued, checkCommands: carried }, follows: true };
 	}
 	// Safety (D-011, D-084): the sidecar proposes commands, `checks.ts` decides which may be run.
@@ -560,7 +582,7 @@ async function extractLedger(
 	const accepted = proposed.filter((command) => {
 		const verdict =
 			turn.origin === "user"
-				? acceptRequestCheck(command, prompt)
+				? acceptRequestCheck(command, prompt, value.do_not_run)
 				: { ok: false as const, reason: "the message was not typed by the user" };
 		if (!verdict.ok) refused.push({ command, reason: verdict.reason });
 		return verdict.ok;
@@ -581,9 +603,76 @@ async function extractLedger(
 			criteria: [...ledger.criteria],
 			checks: [...ledger.checkCommands],
 			refused,
+			...(stopped.length > 0 ? { stopped } : {}),
 		},
 	});
 	return { ledger, follows: continued !== undefined };
+}
+
+/** What the ledger sidecar reads in one message; undefined when there is no sidecar or it failed. */
+async function askLedger(
+	ctx: ModuleContext,
+	settings: SupervisorSettings,
+	prompt: string,
+	previous: Ledger | undefined,
+): Promise<Static<typeof LedgerSchema> | undefined> {
+	const list = (items: readonly string[] | undefined) =>
+		items?.length ? items.map((c) => `- ${c}`).join("\n") : "(none)";
+	const result = await ctx.pool()?.run({
+		module: SUPERVISOR_ID,
+		priority: "interactive",
+		timeoutMs: settings.ledgerTimeoutMs,
+		schema: LedgerSchema,
+		schemaName: "goal_ledger",
+		request: {
+			messages: [
+				{
+					role: "user",
+					content: LEDGER_PROMPT.render({
+						prompt,
+						previous: list(previous?.criteria),
+						previous_checks: list(previous?.checkCommands),
+					}),
+				},
+			],
+			maxTokens: SIDECAR_MAX_TOKENS,
+			temperature: 0.2,
+			thinking: settings.thinking,
+		},
+	});
+	if (result && !result.ok) ctx.log(`ledger ${result.outcome}: ${result.error}`);
+	return result?.ok ? result.value : undefined;
+}
+
+/**
+ * The final-message sidecar's reading (D-091), or undefined when it did not answer. Its claims are
+ * kept only when each is a sentence of the message (`admitClaims`). An empty message says nothing.
+ */
+async function readFinalMessage(
+	ctx: ModuleContext,
+	settings: SupervisorSettings,
+	finalMessage: string,
+	signal: AbortSignal,
+): Promise<Reading | undefined> {
+	if (finalMessage.trim() === "") return { asked_user: false, claims: [] };
+	const result = await ctx.pool()?.run({
+		module: SUPERVISOR_ID,
+		priority: "critical",
+		timeoutMs: settings.verdictTimeoutMs,
+		signal,
+		schema: ReadingSchema,
+		schemaName: "final_message",
+		request: {
+			messages: [{ role: "user", content: FINAL_MESSAGE_PROMPT.render(finalMessageView(finalMessage, "message")) }],
+			maxTokens: SIDECAR_MAX_TOKENS,
+			temperature: 0.2,
+			thinking: settings.thinking,
+		},
+	});
+	if (result && !result.ok) ctx.log(`final message ${result.outcome}: ${result.error}`);
+	return result?.ok
+		? { asked_user: result.value.asked_user, claims: admitClaims(result.value.claims, finalMessage) }
+		: undefined;
 }
 
 async function gatherEvidence(
@@ -591,9 +680,11 @@ async function gatherEvidence(
 	settings: SupervisorSettings,
 	task: Task,
 	ledger: Ledger,
-	finalMessage: string,
+	reading: () => Promise<Reading | undefined>,
 	signal: AbortSignal,
 ): Promise<Gathered> {
+	// Asked now, so the sidecar reads the message while git and the checks run.
+	const claimed = settings.warningSignals || settings.finalMessage === "claims" ? reading() : undefined;
 	const [startRef, ownRef] = await Promise.all([task.startRef, task.ownRef]);
 	const base = isCommitId(startRef) ? startRef : "HEAD";
 	const [stat, tracked, untracked] = await Promise.all([
@@ -621,6 +712,7 @@ async function gatherEvidence(
 	// Progress is measured on the files themselves, shown to the judge or not: the text of the
 	// evidence leaves out what does not fit.
 	const state = now !== undefined && startRef === ownRef ? now : await workspaceFingerprint(ctx, startRef);
+	const claims = (await claimed)?.claims;
 	const evidence = buildEvidence({
 		diffStat: stat,
 		diff: diffWithNew,
@@ -629,7 +721,7 @@ async function gatherEvidence(
 		tools: task.tools,
 		...(changedSinceTests === undefined ? {} : { changedSinceTests }),
 		checks,
-		...(settings.warningSignals ? { warnings: warningsFor(diffWithNew, task.tools, finalMessage, runs) } : {}),
+		...(settings.warningSignals ? { warnings: warningsFor(diffWithNew, task.tools, claims ?? [], runs) } : {}),
 		runs,
 		maxChars: settings.maxEvidenceChars,
 	});
@@ -638,6 +730,7 @@ async function gatherEvidence(
 		diffHash: state ?? diffFingerprint(diffWithNew, newFiles),
 		checks,
 		noChanges: madeNoChanges(tracked, newFiles, task.tools),
+		claims,
 	};
 }
 
@@ -674,12 +767,12 @@ async function runChecks(
 export function warningsFor(
 	diff: string | undefined,
 	tools: readonly ToolOutcome[],
-	finalMessage: string,
+	claimed: readonly Claim[],
 	runs: RunOptions = {},
 ): string[] {
 	const files = parseDiff(diff ?? "");
 	const narrow = narrowTestSignal(tools, runs);
-	const claims = unsupportedClaims(extractClaims(finalMessage), tools, runs).map(
+	const claims = unsupportedClaims(claimed, tools, runs).map(
 		(c) => `the agent claims "${c.sentence}" but ran no matching command that passed after its last edit`,
 	);
 	return [
@@ -796,7 +889,7 @@ async function judge(
 	if (!pool) return undefined;
 	const criteria = ledger.criteria.map((c, i) => `${i + 1}. ${c}`).join("\n");
 	const userRequest = requestView(ledger.requests);
-	const final = finalMessageView(finalMessage, settings.finalMessage);
+	const final = finalMessageView(finalMessage, settings.finalMessage, evidence.claims);
 	const common = { module: SUPERVISOR_ID, priority: "critical" as const, timeoutMs: settings.verdictTimeoutMs, signal };
 	const request = (content: string) => ({
 		messages: [{ role: "user" as const, content }],
@@ -842,9 +935,10 @@ function requestView(requests: readonly string[]): string {
  * The agent's final message as the verdict reads it, under a heading that says how much of it that
  * is (D-089): the judge takes what it is not shown for absent unless it is told.
  * - `message`: all of it, or the start and the end of a long one with the gap marked.
- * - `claims` (research R1.3): only its success claims, labelled unverified, and its last words.
+ * - `claims` (research R1.3): only its success claims as a sidecar read them (D-091), labelled
+ *   unverified, and its last words. `claims` is undefined when that sidecar did not answer.
  */
-function finalMessageView(finalMessage: string, mode: SupervisorSettings["finalMessage"]) {
+function finalMessageView(finalMessage: string, mode: SupervisorSettings["finalMessage"], claims?: readonly Claim[]) {
 	const message = finalMessage.trim();
 	if (mode === "message") {
 		const leftOut = message.length - FINAL_MESSAGE_CHARS;
@@ -857,11 +951,14 @@ function finalMessageView(finalMessage: string, mode: SupervisorSettings["finalM
 			}),
 		};
 	}
-	const claims = extractClaims(message).map((c) => `- UNVERIFIED CLAIM: ${c.sentence}`);
+	const listed =
+		claims === undefined
+			? "(the agent's claims could not be read)"
+			: claims.map((c) => `- UNVERIFIED CLAIM: ${c.sentence}`).join("\n") || "(no success claims)";
 	return {
 		final_label:
 			"The agent's unverified claims, then the last words of its final message (the text of the message is not shown)",
-		final_message: `${claims.length > 0 ? claims.join("\n") : "(no success claims)"}\n…\n${message.slice(-CLAIMS_TAIL_CHARS)}`,
+		final_message: `${listed}\n…\n${message.slice(-CLAIMS_TAIL_CHARS)}`,
 	};
 }
 

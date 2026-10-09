@@ -1814,6 +1814,42 @@ Open check: Exocortex's injected `custom_message` reaches ninfer as a second con
 
 ---
 
+### D-091 — Supervisor: a sidecar reads what the user and the agent say; the patterns that did are removed · accepted (2026-10-09; owner's call; D-090's rule applied to the other modules; amends D-084's rule for request checks, D-062's "the agent is waiting on the user", D-046's `preVerdict`, `warningSignals` and `finalMessage: "claims"`)
+- **Context:** D-090 set the rule for memory: a reading of language is a sidecar's, and code decides only what has one answer. The other modules were read for the same fault, a word list or pattern that reads what a person or the agent meant. The supervisor had three.
+  1. **"The request says not to run it"** (`checks.ts`, D-084 rule 3): a list of negations, tested on the sentence leading up to a code span, with a second pattern for where a sentence ends.
+  2. **"The agent ended on a question"** (`asksUserQuestion`): a `?` in the last two lines, or "would you like", "should I", "please confirm". D-062 had already moved this to the verdict, because the pattern could not tell a blocking question from an offer, and kept it for the deterministic pre-verdict.
+  3. **"The agent claims success"** (`extractClaims`): three patterns for "tests pass", "builds cleanly" and "done", used by the unsupported-claim warning and by `finalMessage: "claims"`.
+- **Decision.**
+  1. **Check commands: the ledger sidecar says what not to run** (`ledger.v4`).
+     - New field `do_not_run`: the commands the message says not to run, to avoid, to skip or to stop running. The prompt now shows the check commands in use for the previous task, so "stop running the tests" can name one without spelling it out.
+     - Code still decides which commands may run: typed by the user, a whole code span of the message, one plain test or build command that stays in the project (D-084 rules 1, 2, 4, 5, 6). Rule 3 is now: not in `do_not_run`. A command the sidecar names both ways is refused.
+     - A message that continues a task drops the carried commands in `do_not_run` (traced as `stopped` on the ledger event). Before, a later message could only stop a command it wrote out again in a code span.
+     - What the user writes into a suggestion is read by the same sidecar when the task has check commands. With no answer the commands stand.
+     - Saved state is checked on the exact rules only: no reading of it exists to check against.
+  2. **One sidecar reads the agent's final message** (`final-message.v1`). It returns `asked_user` and `claims`, and it judges nothing: it sees the message and not the work. It is asked at most once per settle, and only when something needs it.
+     - **`preVerdict`.** A failing check still gives `incomplete` without a verdict call. `asked_user` then comes from this reading. With no answer there is no verdict (`verdict_unavailable`): following up on an agent that may be waiting for the user is the dearer mistake. `uncertain` (no changes) needs no reading: nothing acts on `asked_user` there.
+     - **Claims.** Each claim is a kind (`tests_pass`, `builds`, `done`) and a quote. Code keeps a claim only when the quote is in the message word for word, one per kind (`admitClaims`). `unsupportedClaims` is unchanged: whether a matching run passed after the last edit is read from the tool calls.
+     - **`warningSignals`** uses these claims for its unsupported-claim warning. With no answer that warning is left out; the others do not depend on it.
+     - **`finalMessage: "claims"`** shows the judge these claims. The judge still does not see the narrative (R1.3); the sidecar that does cannot give a verdict. With no answer the view says the claims could not be read.
+- **Removed:** `NEGATION`, `BOUNDARY`, `sentenceBefore`, `lastSentence`, the three-valued `namedInRequest` (it now says only whether the command is a whole code span), `asksUserQuestion`, `CLAIM_PATTERNS`, `extractClaims`, `ledger.v3`.
+- **Read and left alone: patterns that read formats, not meaning.**
+  - **Core** (`output.ts`, `runs.ts`, `shell.ts`, `loops.ts`): error lines in tool output, which command line is a test run, shell syntax. They run on every tool result, where no model is asked.
+  - **Triage, trimmer, compaction:** compiler, test-runner and sanitizer output; this module's own summary lines read back.
+  - **Supervisor** (`signals.ts`): skip markers, assertions and stub markers in a diff are code, not prose.
+  - **Memory:** `admission.ts` reads the same code markers; `keywords` ranks error lines for recall and decides nothing a person said.
+- **Costs.**
+  - No new call by default: `do_not_run` is one more field of the ledger call.
+  - With `warningSignals` or `finalMessage: "claims"`: one more call per settle, made while git and the checks run.
+  - With `preVerdict`: one small call after a failing check. `deterministicVerdicts` in the eval now counts verdicts reached without a verdict call, not without any call.
+- **Open risks.**
+  - **A command the user said not to run is now kept out by the model alone.** D-084 chose the pattern because a wrong acceptance runs what the user refused. What bounds the harm is unchanged: only a test or build command, written by the user in that message, inside the project, under `checkTimeoutMs`. The sidecar has two places to keep it out (`check_commands` and `do_not_run`).
+  - **`supervisor-pre`, `supervisor-claims` and `supervisor-research` change what they measure**: the claims and the question are a model's reading now. Their earlier runs are not a baseline for the next ones.
+  - **A claim quoted loosely is dropped**: a sidecar that tidies the sentence loses it at the verbatim check, and the warning with it.
+  - **`ledger.v4` and `final-message.v1` are untested with the real model.** The unit tests script the sidecars.
+- **Not done.** A labelled set for the two readings (requests that refuse a command in many wordings; final messages that ask, offer, claim and hedge). The trace has what such a run reads: `refused` and `stopped` on `exo.ledger`, `asked_user` on `exo.verdict`.
+
+---
+
 ## Open questions (carried from brief §10, updated)
 
 1. ~~Resolved by D-029.~~ Exact pi mechanism for injecting into the current user turn without altering prior messages. *(Phase 0)*
