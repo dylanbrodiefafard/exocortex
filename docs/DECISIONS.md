@@ -1909,6 +1909,71 @@ Open check: Exocortex's injected `custom_message` reaches ninfer as a second con
   - **Room in the context.** The fork needs the main agent's context plus the instruction and the summary to fit. Pi's `reserveTokens` (16,384) leaves that on a threshold compaction; a manual `/compact` at the very end may not, and the engine's refusal sends it to the transcript prompt.
   - **The model may answer the conversation** or call a tool despite the instruction. `parseSummary` rejects both.
 
+### D-094 — A `tools` module makes pi's own read, edit and write results more useful, and modules may look before a tool runs · accepted (2026-10-17; owner's request after a survey of pi extensions and coding-agent research; amends brief §5.4's hooks)
+- **Context:** a survey of popular pi extensions (pi-lens, oh-my-pi, pi-advisor-flow and others) and of coding-agent research found that the cheapest gains left sit at the tool interface:
+  - **Post-edit lint guard:** SWE-agent's ablation scored 18.0% with it and 15.0% without (arXiv 2405.15793, Table 3).
+  - **Edit formats:** they move weak models a lot. Search-replace beat unified diff for Qwen2.5-Coder-32B, 0.68 to 0.23 exact match (Diff-XYZ, arXiv 2510.12487, Table 5).
+  - **Hashline:** its edits gain −8 to +11 points over str_replace, the format pi already uses ("The harness problem", Can Bölük, 2026-02-12).
+  - **Pi's own feedback is thin:** a failed edit says only "must match exactly", or gives a count of duplicates without line numbers, and `read` shows no line numbers (PI_API_NOTES "What `read` and `edit` return").
+- **Decision:** a new module, `@exocortex/mod-tools` (id `tools`), off by default like the others. It adds no tool and changes no tool's arguments. It only rewrites the result that just came in (D-029).
+  1. **Edit hints** (`edit-hints.ts`). Pi's error text says which edit failed and how. For a failed `edit`, it adds what the file holds now, quoted:
+     - **Text not found:**
+       - the `newText` already in the file (the edit was made before);
+       - line numbers copied into `oldText` from a numbered read, with the line it matches without them;
+       - else the closest lines by trimmed text and character pairs, at least 50% alike, with two lines either side and whether only indentation differs.
+     - **Text not unique:** each place it matches, with a line either side.
+     - **The same old and new text:** says so.
+     - **No such file** (`edit` and `read`): existing paths with the same name, or a near name in the nearest directory that exists.
+     - Other errors get nothing. Quoted lines are not numbered, so they can be copied into `oldText` as they are.
+  2. **Read view** (`read-view.ts`):
+     - Text reads get `cat -n` numbering from the read's `offset`; pi's continue note is kept.
+     - When a read stops early, the declaration lines in the rest of the file are listed with their numbers, quoted (up to `outlineMaxEntries`, default 60). Declarations are found by per-language line patterns (Rust, Go, Python, C/C++, JS/TS, Markdown headings). A line that matches but is not a declaration costs a line of outline, never a wrong claim.
+     - Images, the long-line note and empty files are left alone.
+  3. **Checks after edits** (`diagnostics.ts`):
+     - **Which check:** the first of the user's `checks` (`{files, command}`, `USER_ONLY` per D-087) whose glob matches the file. Otherwise a built-in syntax check: an `ast.parse` for Python, `gofmt -e`, `bash -n`, `node --check`. There is none for Rust or C++ (D-016): a single file cannot be checked alone, so `cargo check` and the like are the user's to configure.
+     - **Before a call:** before an `edit` or `write`, the check runs on the file as it is, unless its last result still holds. A per-file check's result holds while the file's hash is unchanged. A project-wide check's (no `{file}`) holds until something other than a checked edit may have changed the tree: a shell command, an unchecked file.
+     - **After it:** the check runs again, and only errors beyond those before are shown, up to `maxDiagnosticLines`. Errors are compared by their text with every number taken out, so an old error whose line moved is not new.
+     - **Several edits in one turn:** each compares with the result after the edit before it.
+     - **Says nothing** when there is no result from before (the hook ran out of time), when a change since was not checked, on a timeout (`checkTimeoutMs`, default 4 s), or when the checker is missing (exit 127; it is not tried again that session).
+- **A new hook, `beforeToolCall(call, signal)`.**
+  - **What it gets:** a JSON copy of the call; it may not block or change it.
+  - **Wiring:** pi's `tool_call`, which pi awaits (PI_API_NOTES "`tool_call` as a place to look").
+  - **Budget:** 5 s across all modules, each with an equal share of what is left. The handler always returns `undefined`, so an Exocortex failure never blocks a tool. A throw from a handler would block it (PI_API_NOTES §2).
+  - Calls made by another tool (`parentToolCallId`) are not offered.
+- **Not done:**
+  - **Hashline edits:** they would replace a tool, changing the tool set and its description. That needs its own A/B, and the evidence over str_replace is mixed.
+  - **Repairing an edit (stripping copied line numbers and retrying):** that would have Exocortex write files the model did not ask for. The hint costs one turn instead.
+  - **LSP navigation:** it saved tokens only for the weakest model tested (arXiv 2608.13568).
+- **Cost:** numbered reads cost a few tokens a line. The new eval config `tools` and the report's *Failed edits* table (`failedEdits` metric) are there to weigh that against fewer failed edits.
+
+### D-095 — Prompt-cache stats for the main agent and the sidecars · accepted (2026-10-17; owner's request, after pi-cache-optimizer's footer stats)
+- **Context:** the prompt cache is a hard constraint (brief §1.3, D-029), but nothing showed whether it held in a live session. The eval measures it after the fact (`prefixKeptRate`, cached tokens).
+- **Decision:** the adapter keeps per-session counts (`cache-stats.ts`).
+  - **Main agent:** each `turn_end`'s assistant `usage`. Prompt tokens are `input + cacheRead + cacheWrite`, since pi's `input` leaves the cached part out.
+  - **Sidecars:** each pool call's `promptTokens`/`cachedTokens`, per module.
+  - **Where they show:**
+    - `/exo cache` prints the last main request, the session's main total and each module's sidecars.
+    - `/exo status` gets one line.
+    - A status-line slot of its own (`exo.cache`) shows `cache N% · session M%` after each turn while Exocortex is on.
+  - **No figure is made up:**
+    - A sidecar call whose engine gave no cached count is left out of the rate and counted as "did not report".
+    - The main agent is shown as "not reported" after 2 requests with no cached token at all, because pi turns a missing count into 0.
+- **Open:** whether ninfer reports `cached_tokens` is still unverified (PI_API_NOTES §10).
+
+### D-096 — Memory: a lesson names the edits the error came back after, and a lesson whose files are gone is not shown · accepted (2026-10-17; owner's request, after pi-hermes-memory's failure memory)
+- **Dead ends:**
+  - **Tracked:** an episode tracks the files edited after which the same error came back. Files edited again after the error's last return are dropped, since a later edit to one may be what fixed it.
+  - **Stored:** as `deadEnds` in the card's evidence JSON. D-088 would set the user's store aside, preferences included, for a new column. Merged fixes add theirs.
+  - **Read back:** tolerantly, at most 4, so evidence from an older version shows none.
+  - **Shown:** for same-repo matches only, as "the error came back after the edits to `a.rs`". That is what was seen. The card does not claim those edits were useless: the file may still have been part of the fix.
+- **Stale lessons:**
+  - A same-repo card whose named files all no longer exist is not recalled, checked under `cwd` and each directory above it.
+  - It is not retired, since a branch switch can bring the files back.
+  - Each skip is traced as `exo.memory` `skipped_stale`.
+- **Already covered, so not added:**
+  - Confidence that rises and decays with use: `helped`/`hurt` credit and `retireUnhelpful` (D-072).
+  - Saving on a correction: D-064 learns from corrections, at two sessions unless said as a standing rule. That threshold is a precision choice and was left as it is.
+
 ---
 
 ## Open questions (carried from brief §10, updated)

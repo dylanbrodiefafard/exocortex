@@ -23,12 +23,12 @@
 
 ---
 
-Exocortex is an extension for the [pi](https://github.com/badlogic/pi-mono) coding agent. It watches a session from the outside and helps in the places where a ~27B local model usually falls down: it checks whether the work is really finished, cuts noisy build output down to the errors, notices when the agent is going in circles, writes better handovers at compaction, and remembers fixes and your preferences across sessions.
+Exocortex is an extension for the [pi](https://github.com/badlogic/pi-mono) coding agent. It watches a session from the outside and helps in the places where a ~27B local model usually falls down: it checks whether the work is really finished, shows the agent why an edit failed and what each edit broke, cuts noisy build output down to the errors, notices when the agent is going in circles, writes better handovers at compaction, and remembers fixes and your preferences across sessions.
 
 The main model does none of this work. Exocortex gives it no new tools and no extra instructions. The help comes from short side calls ("sidecars") to the same local server, using GPU slots the main agent isn't using.
 
 > [!NOTE]
-> **Status: experimental.** All five modules are built and tested, but every one ships **off by default**: the runs that would show how much each one helps have not been done yet, so there are no measured results to quote. You choose which to turn on. See the [roadmap](#roadmap).
+> **Status: experimental.** All six modules are built and tested, but every one ships **off by default**: the runs that would show how much each one helps have not been done yet, so there are no measured results to quote. You choose which to turn on. See the [roadmap](#roadmap).
 
 ## Why
 
@@ -38,6 +38,7 @@ A small local model running a coding agent is already at its limit on the task i
 |---|---|---|
 | The agent says "done" when it isn't, or when the tests it ran prove nothing | Compares your request with evidence from the workspace and drafts a follow-up listing what is missing | [Supervisor](#supervisor) |
 | Hundreds of lines of build and test output bury the one error that matters | Shortens the output to the errors and their context, verbatim | [Trimmer](#trimmer) |
+| An edit fails because its text doesn't match the file, and the agent guesses again; or an edit breaks the syntax and nobody notices until the build | Quotes what the file holds where the edit was aimed, numbers the lines of reads, and runs a quick check after each edit to show any error it introduced | [Tools](#tools) |
 | The agent retries the same failing fix, or loops with no error at all | Says the failure is a repeat, names the edits that didn't change it, and adds a short hint | [Triage](#triage) |
 | After compaction the agent forgets what it was doing | Writes a structured handover and lists your requests verbatim under it | [Compaction](#compaction) |
 | Every session starts from zero: the same bug gets rediscovered, the same preference gets repeated | Saves fixes that worked and how you like work done, and brings them back when they apply | [Memory](#memory) |
@@ -53,8 +54,9 @@ A small local model running a coding agent is already at its limit on the task i
 
 ## Features
 
-- **Five independent modules:** supervisor, trimmer, triage, compaction and memory, each off until you enable it.
+- **Six independent modules:** supervisor, tools, trimmer, triage, compaction and memory, each off until you enable it.
 - **Sidecar pool:** a scheduler with priorities, per-call timeouts, token budgets and slots reserved for the main agent.
+- **Prompt-cache stats:** how much of each prompt the engine served from its cache, for the main agent and for each module's sidecars (`/exo cache`).
 - **Session traces:** every session is recorded to SQLite, with a CLI to inspect events, sidecar calls and what each module did.
 - **Engine profiles:** works with any OpenAI-compatible server, with fallbacks for features an engine lacks.
 - **Kill switches:** `/exo off` disables everything for the session; `/exo <module> off` disables one module.
@@ -64,6 +66,20 @@ A small local model running a coding agent is already at its limit on the task i
 When the agent stops, the supervisor compares what you asked for (your message, and a checklist extracted from it) with evidence from the workspace: the diff, the commands the agent ran and their exit codes, and check commands: the ones in your config, and a test or build command your message names in backticks ("make sure `cargo test` passes"). It notes when the agent's last test run came before its last edit, or was piped so that its exit code proves nothing.
 
 If something is missing, it puts a follow-up listing it in your editor. Press Enter to send it, or edit it first. `/exo supervisor auto` lets it send the follow-up itself, at most 3 times per task.
+
+### Tools
+
+Makes pi's own `read`, `edit` and `write` more useful to the model. It adds no tool: it adds to the result that just came back.
+
+- **Failed edits.** When an edit's text isn't in the file, it quotes the closest lines from the file, with their line numbers, and says when only the indentation differs. It also notices when:
+  - the change was already made;
+  - the text carries line numbers copied from a read;
+  - the text matches several places (it lists each one);
+  - the file doesn't exist (it suggests paths that do).
+- **Reads.** Read output gets line numbers (`cat -n` style). When a read stops before the end of a long file, it lists the functions, types and headings in the rest of it, with their line numbers.
+- **Checks after edits.** After an edit or write, it runs a quick check on the file and shows only the errors that weren't there before the change. Syntax checks for Python, Go, shell and JavaScript work with nothing to set up. Add your own in `checks`, for example `cargo check` for `*.rs`. A check that covers the whole project only reports errors that are new, wherever they are.
+
+Everything it shows is quoted from the file or the check's output. When it has nothing exact to say, it says nothing.
 
 ### Trimmer
 
@@ -94,7 +110,7 @@ When pi compacts the conversation, a sidecar writes a structured handover (objec
 
 Memory learns two kinds of things, and neither needs the agent to do anything.
 
-**Fixes.** When a build or test command fails, the agent edits files and the same command then passes, memory saves a short lesson about that fix for this repo. It saves nothing when the edits cannot be the fix: only tests were changed, a test was skipped or lost an assertion, or a shell command changed files on the way (a checkout, an install, a formatter). With a sidecar model, the sidecar must also find that the edits explain the pass. The next time the same problem appears (the same kind of error naming the same tests or symbols), even in a later session, the lesson is added to the failing output as a past fix to check against the current code. Lessons that keep failing to help are retired automatically, and a lesson is replaced when its problem is later fixed through other files. `/exo memory cards` lists this repo's lessons and `/exo memory forget card <id>` removes one.
+**Fixes.** When a build or test command fails, the agent edits files and the same command then passes, memory saves a short lesson about that fix for this repo. It saves nothing when the edits cannot be the fix: only tests were changed, a test was skipped or lost an assertion, or a shell command changed files on the way (a checkout, an install, a formatter). With a sidecar model, the sidecar must also find that the edits explain the pass. The next time the same problem appears (the same kind of error naming the same tests or symbols), even in a later session, the lesson is added to the failing output as a past fix to check against the current code. Lessons that keep failing to help are retired automatically, and a lesson is replaced when its problem is later fixed through other files. A lesson also says which files were edited without the error going away the first time, so the agent can skip those dead ends. A lesson whose files are all gone (deleted, or not on this branch) is not shown, but it is kept in case they come back. `/exo memory cards` lists this repo's lessons and `/exo memory forget card <id>` removes one.
 
 **Preferences** (`"preferences": true`). It reads only what you type. Say something as a standing rule ("always write the failing test first"), or give the same instruction in two sessions, and it becomes a preference. Later prompts that leave it unsaid get it added as a short visible note; your prompt wins on any conflict. It also learns what you expect of one kind of task from your corrections: tell the agent "don't refactor the code around it when you fix a bug" in two sessions, and later bug-fix prompts get "For bug fixes: Do not refactor nearby code."
 
@@ -162,9 +178,10 @@ Everything is controlled from pi with the `/exo` command. Toggles last for the c
 | Command | What it does |
 |---|---|
 | `/exo` | Show status: config, active modules and sidecar pool statistics |
+| `/exo cache` | Show how much of each prompt the engine served from its cache: main agent and sidecars |
 | `/exo ping` | Make one sidecar call (and one embedding, if configured) to check the servers |
 | `/exo off` · `/exo on` | Turn every module off, or back on |
-| `/exo <module> on\|off` | Toggle one module: `supervisor`, `trimmer`, `triage`, `memory`, `compaction` |
+| `/exo <module> on\|off` | Toggle one module: `supervisor`, `tools`, `trimmer`, `triage`, `memory`, `compaction` |
 | `/exo supervisor suggest\|auto` | Draft the follow-up in your editor, or send it automatically |
 | `/exo memory preferences` | List learned preferences |
 | `/exo memory forget <id>` | Remove a preference |
@@ -183,7 +200,7 @@ Config is JSONC, read from three places:
 | `EXO_CONFIG=<path>` | Replaces that file |
 | `<repo>/.exocortex/config.jsonc` | Per project: switches modules on or off and tunes them |
 
-A project's file comes with the repository, so it is not yours until you have read it. It can switch Exocortex and its modules on or off and tune them. It cannot say where anything goes, what is run or where files are written: `engine`, `embeddings`, `pool`, `trace`, the supervisor's `checks`, memory's `dbPath` and the trimmer's `saveDir` count only in your own file. If a project's file sets one of them, Exocortex leaves it out, tells you which, and carries on.
+A project's file comes with the repository, so it is not yours until you have read it. It can switch Exocortex and its modules on or off and tune them. It cannot say where anything goes, what is run or where files are written: `engine`, `embeddings`, `pool`, `trace`, the supervisor's and the tools module's `checks`, memory's `dbPath` and the trimmer's `saveDir` count only in your own file. If a project's file sets one of them, Exocortex leaves it out, tells you which, and carries on.
 
 When you quit pi, Exocortex waits up to 2 seconds for background work to finish (a lesson memory is still writing). `EXO_SHUTDOWN_DRAIN_MS=<ms>` changes that; `0` turns the wait off.
 
@@ -217,7 +234,7 @@ Exocortex uses only the standard Chat Completions API. An engine profile records
             │   ├─ trace store (SQLite)                                  │
             │   ├─ sidecar pool (concurrency, priority, budgets)         │
             │   ├─ config, module registry, kill switches                │
-            │   └─ modules: supervisor · trimmer · triage ·              │
+            │   └─ modules: supervisor · tools · trimmer · triage ·      │
             │               compaction · memory                          │
             └────────────────────────────────────────────────────────────┘
                          │ OpenAI-compatible HTTP
@@ -247,6 +264,10 @@ npm run trace -- stats --since 7d         # what the modules did across your ses
 
 Add `--json` for machine-readable output, and `--db <path>` to read a store other than the configured one.
 
+### Prompt cache
+
+`/exo cache` shows how much of each prompt the engine served from its prefix cache, for the main agent's last request, the session so far and each module's sidecar calls. The status line shows the main agent's rate after each turn (`cache 93% · session 90%`). A sudden drop means something changed the start of the conversation and the server had to read it all again. If the engine doesn't report cached tokens, it says so instead of showing 0%.
+
 ### Debug output
 
 ```sh
@@ -264,6 +285,7 @@ Set `EXO_DEBUG=verbose` to also log per-token events. The `--exo-debug=1` flag w
 | 3 | Supervisor | Built, off by default; measurement pending |
 | 4 | Trimmer, triage, compaction | Built, off by default; measurement pending |
 | 5 | Memory (fixes and preferences) | Built, off by default; measurement pending |
+| — | Tools: edit hints, numbered reads, checks after edits | Built, off by default; measurement pending |
 | 6 | Reasoning-only parallelism: several sidecars diagnose a hard step in parallel and a judge picks one | Planned |
 
 A module becomes on by default only after measurement shows it helps.

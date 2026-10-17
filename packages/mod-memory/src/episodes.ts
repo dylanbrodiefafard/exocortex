@@ -32,6 +32,11 @@ export interface FixEpisode {
 	readonly shell: readonly string[];
 	/** A shell command run on the way that changed files: the pass may be its doing, not the edits'. */
 	readonly changedBy?: string;
+	/**
+	 * Files edited on the way after which the same error came back, and not edited again after
+	 * that. They may still be part of the fix, but they did not fix it on their own.
+	 */
+	readonly deadEnds: readonly string[];
 }
 
 /** One error on the way to the pass, and what was edited while the command failed with it. */
@@ -57,6 +62,10 @@ interface Stage {
 	edited: number;
 	retries: number;
 	editedAtLastFailure: number;
+	/** Files edited since this error was last seen. */
+	readonly sinceFailure: Set<string>;
+	/** Files edited before this same error came back. */
+	readonly deadEnds: Set<string>;
 	readonly shell: string[];
 	changedBy: string | undefined;
 }
@@ -116,6 +125,8 @@ export function createEpisodeTracker(options: TrackerOptions): {
 			// The same problem again: keep collecting edits.
 			if (last.edited > last.editedAtLastFailure) last.retries += 1;
 			last.editedAtLastFailure = last.edited;
+			for (const path of last.sinceFailure) last.deadEnds.add(path);
+			last.sinceFailure.clear();
 			return;
 		}
 		const first = firstErrorLine(tool.output);
@@ -135,6 +146,8 @@ export function createEpisodeTracker(options: TrackerOptions): {
 			edited: 0,
 			retries: 0,
 			editedAtLastFailure: 0,
+			sinceFailure: new Set(),
+			deadEnds: new Set(),
 			shell: [],
 			changedBy: undefined,
 		});
@@ -148,7 +161,8 @@ export function createEpisodeTracker(options: TrackerOptions): {
 		return starts.flatMap((start) => {
 			const stage = stages[start];
 			if (!stage) return [];
-			const steps = stages.slice(start).map(({ errorLine, excerpt, edits, retries }) => ({
+			const route = stages.slice(start);
+			const steps = route.map(({ errorLine, excerpt, edits, retries }) => ({
 				errorLine,
 				excerpt,
 				edits: [...edits],
@@ -163,6 +177,7 @@ export function createEpisodeTracker(options: TrackerOptions): {
 					steps,
 					// What ran since this stage opened ran on the way from its error to the pass.
 					shell: [...stage.shell],
+					deadEnds: deadEndsOf(route),
 					...(stage.changedBy === undefined ? {} : { changedBy: stage.changedBy }),
 				},
 			];
@@ -233,6 +248,7 @@ function editsInside(tool: ToolOutcome, cwd: string): Edit[] | undefined {
  */
 function addEdits(stage: Stage, edits: readonly Edit[]): void {
 	stage.edits.push(...edits);
+	for (const edit of edits) stage.sinceFailure.add(edit.path);
 	stage.edited += edits.length;
 	while (stage.edits.length > MAX_EDITS_PER_STAGE) {
 		const superseded = stage.edits.findIndex((edit, i) =>
@@ -240,6 +256,15 @@ function addEdits(stage: Stage, edits: readonly Edit[]): void {
 		);
 		stage.edits.splice(Math.max(superseded, 0), 1);
 	}
+}
+
+/**
+ * Files edited before the same error came back, less those edited again after its last return:
+ * a later edit to one may be what fixed it.
+ */
+function deadEndsOf(route: readonly Stage[]): string[] {
+	const fixed = new Set(route.flatMap((stage) => [...stage.sinceFailure]));
+	return [...new Set(route.flatMap((stage) => [...stage.deadEnds]))].filter((path) => !fixed.has(path));
 }
 
 /** Every edit on the route, in order. */

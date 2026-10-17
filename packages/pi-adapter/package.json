@@ -16,6 +16,7 @@
 		"@exocortex/core": "*",
 		"@exocortex/mod-supervisor": "*",
 		"@exocortex/mod-trimmer": "*",
+		"@exocortex/mod-tools": "*",
 		"@exocortex/mod-triage": "*",
 		"@exocortex/mod-compaction": "*",
 		"@exocortex/mod-memory": "*"

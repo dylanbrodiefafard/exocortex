@@ -4,6 +4,7 @@ import type {
 	ExtensionAPI,
 	ExtensionContext,
 	SessionBeforeCompactEvent,
+	ToolCallEvent,
 	ToolResultEvent,
 } from "@earendil-works/pi-coding-agent";
 import {
@@ -20,6 +21,7 @@ import {
 	readHiddenRun,
 	runShellCommand,
 	type SettleAction,
+	type ToolCall,
 	type ToolOutcome,
 	type ToolResultDraft,
 	toJsonValue,
@@ -29,6 +31,7 @@ import {
 import { COMPACTION_ID, createCompaction } from "@exocortex/mod-compaction";
 import { createMemory, MEMORY_ID } from "@exocortex/mod-memory";
 import { createSupervisor, SUPERVISOR_ID } from "@exocortex/mod-supervisor";
+import { createTools, TOOLS_ID } from "@exocortex/mod-tools";
 import { createTriage, TRIAGE_ID } from "@exocortex/mod-triage";
 import { createTrimmer, TRIMMER_ID } from "@exocortex/mod-trimmer";
 import { remainingMs, withBudget } from "./budget.ts";
@@ -59,6 +62,7 @@ import type { Runtime } from "./runtime.ts";
  */
 const MODULES: Readonly<Record<string, ModuleFactory>> = {
 	[TRIMMER_ID]: createTrimmer,
+	[TOOLS_ID]: createTools,
 	[TRIAGE_ID]: createTriage,
 	[MEMORY_ID]: createMemory,
 	[SUPERVISOR_ID]: createSupervisor,
@@ -69,6 +73,8 @@ const MODULES: Readonly<Record<string, ModuleFactory>> = {
 const SETTLE_BUDGET_MS = 5 * 60_000;
 /** Hard cap on how long tool-result rewrites may hold the agent loop, across all modules. */
 const REWRITE_BUDGET_MS = 20_000;
+/** Hard cap on how long modules may look before a tool runs, across all modules: the tool waits (D-094). */
+const TOOL_CALL_BUDGET_MS = 5_000;
 /** A sidecar reading a piped test run's output holds the tool result: a short reply to a short prompt. */
 const HIDDEN_RUN_BUDGET_MS = 4_000;
 /** The name the reading's sidecar call and trace event go under: it serves every module. */
@@ -102,6 +108,7 @@ export interface ModuleHostOptions {
 	/** Overrides the hold-the-loop budgets (tests). */
 	readonly budgetsMs?: {
 		readonly rewrite?: number;
+		readonly toolCall?: number;
 		readonly hiddenRun?: number;
 		readonly settle?: number;
 		readonly compact?: number;
@@ -138,6 +145,7 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 	const { runtime, onError } = options;
 	const factories = options.modules ?? MODULES;
 	const rewriteBudgetMs = options.budgetsMs?.rewrite ?? REWRITE_BUDGET_MS;
+	const toolCallBudgetMs = options.budgetsMs?.toolCall ?? TOOL_CALL_BUDGET_MS;
 	const hiddenRunBudgetMs = options.budgetsMs?.hiddenRun ?? HIDDEN_RUN_BUDGET_MS;
 	const settleBudgetMs = options.budgetsMs?.settle ?? SETTLE_BUDGET_MS;
 	const compactBudgetMs = options.budgetsMs?.compact ?? COMPACT_BUDGET_MS;
@@ -381,6 +389,15 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 		}),
 	);
 
+	// Never returns a result: a module may look before a tool runs, never block or change it.
+	pi.on(
+		"tool_call",
+		guarded("tool_call", async (event: ToolCallEvent, ctx) => {
+			await hold.whileHolding(ctx, () => beforeToolCall(event, signalOf(ctx)));
+			return undefined;
+		}),
+	);
+
 	pi.on(
 		"tool_result",
 		guarded("tool_result", (event, ctx) =>
@@ -421,6 +438,26 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 		const run = toolResults.then(fn, fn);
 		toolResults = run.catch(() => undefined);
 		return run;
+	}
+
+	/**
+	 * Lets modules look before a tool runs (D-094), each with an equal share of what is left of the
+	 * budget. A call another tool made (`parentToolCallId`) is not offered: it has no result of its
+	 * own in the conversation.
+	 */
+	async function beforeToolCall(event: ToolCallEvent, parent: AbortSignal | undefined): Promise<void> {
+		const lookers = modules().filter((m) => m.beforeToolCall);
+		if (lookers.length === 0 || event.parentToolCallId !== undefined) return;
+		const call: ToolCall = { toolName: event.toolName, toolCallId: event.toolCallId, input: toObject(event.input) };
+		const deadline = Date.now() + toolCallBudgetMs;
+		for (const [index, module] of lookers.entries()) {
+			await withBudget(
+				remainingMs(deadline) / (lookers.length - index),
+				parent,
+				(signal) => module.beforeToolCall?.(call, signal),
+				reporter(`${module.id}.beforeToolCall`),
+			);
+		}
 	}
 
 	/**

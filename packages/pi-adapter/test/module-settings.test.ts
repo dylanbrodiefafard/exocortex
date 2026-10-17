@@ -28,8 +28,15 @@ describe("module settings in config (D7)", () => {
 		expect(problems).toEqual([]);
 	});
 
-	it("knows the five modules", () => {
-		expect(Object.keys(MODULE_SETTINGS).sort()).toEqual(["compaction", "memory", "supervisor", "triage", "trimmer"]);
+	it("knows the six modules", () => {
+		expect(Object.keys(MODULE_SETTINGS).sort()).toEqual([
+			"compaction",
+			"memory",
+			"supervisor",
+			"tools",
+			"triage",
+			"trimmer",
+		]);
 	});
 });
 

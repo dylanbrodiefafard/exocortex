@@ -1,17 +1,20 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import type { Dialog } from "@exocortex/core";
+import { cacheReport, cacheSummary } from "./cache-stats.ts";
 import { OVERRIDES_ENTRY } from "./modules.ts";
 import type { Runtime } from "./runtime.ts";
 
 const PING_TIMEOUT_MS = 30_000;
 
-const COMMANDS = ["status", "ping", "on", "off"];
+const COMMANDS = ["status", "cache", "ping", "on", "off"];
 /** Modes some modules accept besides on/off. */
 const MODULE_MODES: Readonly<Record<string, readonly string[]>> = { supervisor: ["suggest", "auto"] };
 
 /**
  * `/exo` slash command:
  * - `/exo` or `/exo status`: config state, modules and sidecar pool statistics;
+ * - `/exo cache`: how much of each prompt the engine served from its prefix cache, for the main
+ *   agent and each module's sidecar calls (D-095);
  * - `/exo ping`: one tiny sidecar call (and one embedding, if configured), to check the servers are reachable;
  * - `/exo off` / `/exo on`: kill switch for every module (brief §5.3), this session only;
  *   toggles are kept in the session (an `exo.overrides` entry), so `/reload` and `/resume` keep them;
@@ -25,7 +28,7 @@ const MODULE_MODES: Readonly<Record<string, readonly string[]>> = { supervisor: 
 export function registerExoCommand(pi: ExtensionAPI, runtime: Runtime): void {
 	const subcommands = () => [...COMMANDS, ...runtime.moduleIds()];
 	pi.registerCommand("exo", {
-		description: "Exocortex: status | ping | on | off | <module> on|off | supervisor suggest|auto",
+		description: "Exocortex: status | cache | ping | on | off | <module> on|off | supervisor suggest|auto",
 		getArgumentCompletions: (prefix) =>
 			subcommands()
 				.filter((name) => name.startsWith(prefix.trim()))
@@ -35,6 +38,8 @@ export function registerExoCommand(pi: ExtensionAPI, runtime: Runtime): void {
 				const [sub = "status", arg, ...rest] = args.trim().split(/\s+/).filter(Boolean);
 				if (sub === "ping") await ping(runtime, ctx);
 				else if (sub === "status") say(ctx, status(runtime));
+				else if (sub === "cache")
+					say(ctx, runtime.config?.enabled ? cacheReport(runtime.cacheStats) : "Exocortex: disabled");
 				else if (sub === "on" || sub === "off") {
 					runtime.overrides.allOff = sub === "off";
 					runtime.rebuildModules();
@@ -128,6 +133,7 @@ function status(runtime: Runtime): string {
 			`sidecars: ${s.running} running · queued ${s.queued.critical}/${s.queued.interactive}/${s.queued.background} (crit/int/bg) · ${s.sessionTokensUsed} tokens · ${outcomes || "no calls yet"}`,
 		);
 	}
+	lines.push(cacheSummary(runtime.cacheStats));
 	return lines.join("\n");
 }
 

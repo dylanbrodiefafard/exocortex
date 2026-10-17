@@ -181,6 +181,35 @@ export interface BoundaryResult { entries?: SessionBoundaryDraft[]; continue?: b
 
 ---
 
+### `tool_call` as a place to look, not to change (D-094)
+Checked against the installed `@earendil-works/pi-coding-agent` 1.0.2 (`dist/`):
+- **Awaited, one handler at a time:** `emitToolCall` awaits each handler in turn and stops at the first `{block: true}` (`core/extensions/runner.js:957-972`). The tool waits for every handler, so a slow one delays the tool. The module host gives all modules one 5 s budget together.
+- **`event.input` is mutable** and later handlers see the change, with no re-validation (`core/extensions/types.d.ts:942-946`). Exocortex never changes it: the host hands modules a JSON copy (`toObject`). The arguments are also part of the assistant message the model already produced, so changing them is outside D-029's rules.
+- **Nested calls:** a call made by another tool has `parentToolCallId` and an id `<parent id>/<n>`. Such calls never appear as tool calls or results in the transcript (`types.d.ts:894-904`). The host does not offer them to modules.
+- **Parallel batches:** every `tool_call` of a batch runs before any of its tools execute (§2 "Event order", step 8). A module that looks at a file before an edit sees it as it was before the whole batch.
+
+### What `read` and `edit` return (D-094)
+- **`read`, text file:** the lines as they are, with no line numbers. A read that stops early ends with one of these notes:
+  - `\n\n[Showing lines A-B of N. Use offset=M to continue.]`, with ` (50KB limit)` after `N` when the byte limit stopped it;
+  - `\n\n[K more lines in file. Use offset=M to continue.]` when a `limit` stopped it.
+  - Sources: `core/tools/read.js:125-146`. The limits are 2000 lines and 50 KB (`core/tools/truncate.js:10-11`).
+- **`read`, other cases:** an image gives `Read image file [<mime>]` plus an image part. A first line over the byte limit gives `[Line N is <size>, exceeds 50KB limit. Use bash: …]` (`read.js:66-123`).
+- **`edit` errors** (`core/tools/edit-diff.js:184-204`, `:251`; `core/tools/edit.js:112`):
+  - `Could not find the exact text in <path>. …`, or `Could not find edits[i] in <path>. …` when there are several edits;
+  - `Found N occurrences of the text in <path>. …`, or `… of edits[i] in <path>. …`;
+  - `No changes made to <path>. …`;
+  - `edits[i] and edits[j] overlap in <path>. …`;
+  - `Could not edit file: <path>. Error code: ENOENT.`
+  - An edit that fails writes nothing.
+  - Matching tries the exact text first, then a normalized form: NFKC, trailing spaces dropped from each line, Unicode quotes, dashes and spaces made ASCII (`edit-diff.js:31-50`, `:141-176`). Duplicates are counted in the normalized form.
+- **`edit` success:** `details` holds `{diff, patch, firstChangedLine}` (`edit.js:128-137`).
+
+### Status line and turn usage (D-095)
+- `ctx.ui.setStatus(key: string, text: string | undefined)` (`core/extensions/types.d.ts:84`).
+  - Each key is its own slot in the footer.
+  - In RPC mode every call emits an `extension_ui_request` with `method: "setStatus"`, `statusKey` and `statusText` (`modes/rpc/rpc-mode.js:101-109`).
+- `turn_end` carries `{turnIndex, message, toolResults, messageEntryId, toolResultEntryIds}` (`types.d.ts:793-800`). `message.usage` is the turn's assistant usage (§10 "Usage and cache telemetry").
+
 ## 3. Injecting into the current user turn without mutating prior messages
 
 ### How request context is built

@@ -71,6 +71,8 @@ export interface TraceMetrics {
 	readonly compactionTokens?: number;
 	/** Compactions after which one of the agent's next two commands re-ran one that had already passed (R4.4). */
 	readonly compactionReplays?: number;
+	/** Edit-tool calls that failed (text not found, not unique, no such file): what the tools module's hints aim to cut (D-094). */
+	readonly failedEdits?: number;
 	/** Tool outputs the trimmer shortened, and how many of their saved full outputs the agent read back (R2.1). */
 	readonly trimmedOutputs?: number;
 	readonly trimmedRereads?: number;
@@ -224,6 +226,7 @@ export function computeTraceMetrics(
 		lastStopReason,
 		compactionTokens,
 		compactionReplays: compactionReplays(events),
+		failedEdits: errors.filter((r) => r["toolName"] === "edit").length,
 		...trimmerRereads(events),
 		...stuckLoops(events),
 		recurringErrors: recurringErrors(events),

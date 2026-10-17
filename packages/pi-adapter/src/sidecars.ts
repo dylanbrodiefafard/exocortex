@@ -78,7 +78,10 @@ export function registerSidecars(pi: ExtensionAPI, options: SidecarOptions): voi
 				target,
 				config: config.pool,
 				moduleLimits: moduleLimitsFrom(config.modules),
-				onRecord: (record) => runtime.traceSession?.recordSidecarCall(record),
+				onRecord: (record) => {
+					runtime.cacheStats.addSidecar(record);
+					runtime.traceSession?.recordSidecarCall(record);
+				},
 			});
 		pool?.setMainActive(mainActive);
 		const previous = runtime.pool;

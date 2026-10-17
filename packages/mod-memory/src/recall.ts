@@ -1,3 +1,5 @@
+import { existsSync } from "node:fs";
+import { dirname, join } from "node:path";
 import {
 	cosineSimilarity,
 	errorSignature,
@@ -10,6 +12,7 @@ import {
 	type ToolResultDraft,
 	type ToolRewrite,
 } from "@exocortex/core";
+import { deadEndsIn } from "./dead-ends.ts";
 import type { MemoryDeps } from "./deps.ts";
 import { FAILURE_DETAIL_LINES, failureDetail } from "./detail.ts";
 import { commandKey } from "./episodes.ts";
@@ -158,6 +161,18 @@ export function createRecaller({ ctx, settings, store, scope, changed }: MemoryD
 		return known.filter((c) => cosineSimilarity(query, vectors.get(c.id) as Float32Array) >= settings.minSimilarity);
 	}
 
+	/**
+	 * A card of this repo whose files are all gone points at code that is no longer there: it is
+	 * not shown, but kept, since a branch switch can bring the files back. Another repo's card names
+	 * no files here.
+	 */
+	function stale({ card, match }: Recalled): boolean {
+		if (match === "elsewhere" || card.files.length === 0) return false;
+		if (card.files.some((file) => existsNear(ctx.cwd, file))) return false;
+		ctx.record({ kind: "exo.memory", data: { action: "skipped_stale", card: card.id } });
+		return true;
+	}
+
 	/** Whether the pass came after the agent went where the card pointed. */
 	function follows(shown: Shown): boolean {
 		// Another repo's files are not this repo's: any edit before the pass counts.
@@ -238,7 +253,7 @@ export function createRecaller({ ctx, settings, store, scope, changed }: MemoryD
 			const repo = await scope;
 			if (!signature || !repo.known) return undefined;
 			const cards = (await recallCards(repo.id, signature, draft.output, signal)).filter(
-				(r) => !injected.has(r.card.id) && !done.has(r.card.id),
+				(r) => !injected.has(r.card.id) && !done.has(r.card.id) && !stale(r),
 			);
 			if (cards.length === 0) return undefined;
 			return {
@@ -420,9 +435,29 @@ const CARDS_HEADER =
 function renderCards(cards: readonly Recalled[], maxChars: number): string {
 	const lines = cards.map(({ card, match }) => {
 		const files = card.files.length > 0 ? `; the fix edited ${card.files.map(inert).join(", ")}` : "";
-		return `- (${MATCH_LABEL[match]}${files}) ${inert(card.lesson)}${card.seen > 1 ? ` (seen ${card.seen}×)` : ""}`;
+		// Another repo's files mean nothing here.
+		const deadEnds = match === "elsewhere" ? [] : deadEndsIn(card);
+		const tried =
+			deadEnds.length > 0 ? `; the error came back after the edits to ${deadEnds.map(inert).join(", ")}` : "";
+		return `- (${MATCH_LABEL[match]}${files}${tried}) ${inert(card.lesson)}${card.seen > 1 ? ` (seen ${card.seen}×)` : ""}`;
 	});
 	return clip(`${CARDS_HEADER}\n${lines.join("\n")}`, maxChars);
+}
+
+/**
+ * Whether a card's repo-relative file exists under `cwd` or a directory above it: a session started
+ * in a subdirectory of the repo still finds files learned from its root. Erring toward "exists"
+ * only keeps a card that may be stale.
+ */
+function existsNear(cwd: string, file: string): boolean {
+	for (let dir = cwd; ; dir = dirname(dir)) {
+		try {
+			if (existsSync(join(dir, file))) return true;
+		} catch {
+			return true;
+		}
+		if (dirname(dir) === dir) return false;
+	}
 }
 
 function failureSignature(tool: ToolOutcome): string | undefined {

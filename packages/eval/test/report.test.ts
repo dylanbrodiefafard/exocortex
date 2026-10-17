@@ -367,6 +367,16 @@ describe("report", () => {
 		expect(renderMarkdown([trimmed("all-off", 0, 0)], "t")).not.toContain("## Trimmed outputs");
 	});
 
+	it("shows failed edits per config, for every config once any run has one (D-094)", () => {
+		const edits = (taskId: string, config: string, failedEdits: number) =>
+			run(taskId, config, true, { metrics: { ...computeTraceMetrics([]), failedEdits } });
+		const markdown = renderMarkdown([edits("a", "all-off", 3), edits("b", "all-off", 2), edits("a", "tools", 1)], "t");
+		expect(markdown).toContain("## Failed edits");
+		expect(markdown).toContain("| all-off | 5 | 2.50 |");
+		expect(markdown).toContain("| tools | 1 | 1.00 |");
+		expect(renderMarkdown([edits("a", "all-off", 0)], "t")).not.toContain("## Failed edits");
+	});
+
 	it("shows background sidecar work that was finished or cut off when the session ended (E2)", () => {
 		const ended = (taskId: string, config: string, finished: number, cutOff: number, extra: Partial<RunRecord> = {}) =>
 			run(taskId, config, true, {

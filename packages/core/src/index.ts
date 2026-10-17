@@ -105,6 +105,7 @@ export type {
 	ModuleFactory,
 	SettleAction,
 	SettleInfo,
+	ToolCall,
 	ToolOutcome,
 	ToolResultDraft,
 	ToolRewrite,

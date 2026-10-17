@@ -11,6 +11,7 @@ import {
 	type TraceSession,
 	type TraceStore,
 } from "@exocortex/core";
+import { type CacheStats, createCacheStats } from "./cache-stats.ts";
 
 export interface Runtime {
 	/**
@@ -30,6 +31,8 @@ export interface Runtime {
 	pool: SidecarPool | undefined;
 	/** Set with the pool when an embeddings server is configured. */
 	embedder: Embedder | undefined;
+	/** Prompt-cache use of the main agent and the sidecars this session (D-095). */
+	readonly cacheStats: CacheStats;
 	/** Live `/exo` toggles layered over config (brief §5.3 kill switches). */
 	readonly overrides: { allOff: boolean; modules: Record<string, Record<string, unknown>> };
 	/** Rebuilds the module instances whose settings a toggle changed (set by the module host). */
@@ -111,6 +114,7 @@ export function createRuntime(options: RuntimeOptions): Runtime {
 		},
 		pool: undefined,
 		embedder: undefined,
+		cacheStats: createCacheStats(),
 		overrides: { allOff: false, modules: {} },
 		rebuildModules: () => {},
 		disposeModules: async () => {},

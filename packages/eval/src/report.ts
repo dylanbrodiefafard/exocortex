@@ -184,6 +184,7 @@ export function renderMarkdown(records: readonly RunRecord[], title: string, ord
 		...recurringSection(valid, configs),
 		...loopSection(valid, configs),
 		...trimmerSection(valid, configs),
+		...failedEditSection(valid, configs),
 		...contextSection(valid, configs),
 		...shutdownSection(valid, configs),
 		...repeatSection(records, valid, summaries),
@@ -332,6 +333,25 @@ function trimmerSection(records: readonly RunRecord[], configs: readonly string[
 			.map((r) => `| ${r.config} | ${r.trimmed} | ${r.reread} (${pct(r.reread / r.trimmed)}) |`),
 		"",
 		"*Read back* counts trimmed outputs whose saved full copy the agent later opened (its path appears in a later tool call). Each one is a sign the trimmer cut something the agent needed: token savings that come with many read-backs are not savings (research R2.1, R2.4).",
+	];
+}
+
+/** Failed edits per config (D-094): what the tools module's hints are there to cut. */
+function failedEditSection(records: readonly RunRecord[], configs: readonly string[]): string[] {
+	const rows = configs.map((config) => {
+		const metrics = metricsOf(records, config);
+		return { config, runs: metrics.length, failed: sum(metrics.map((m) => m.failedEdits ?? 0)) };
+	});
+	if (rows.every((r) => r.failed === 0)) return [];
+	return [
+		"",
+		"## Failed edits",
+		"",
+		"| config | failed edits | per run |",
+		"|---|---|---|",
+		...rows.map((r) => `| ${r.config} | ${r.failed} | ${r.runs > 0 ? (r.failed / r.runs).toFixed(2) : "–"} |`),
+		"",
+		"Edit calls pi refused: text not found, not unique, or no such file. Each one costs the agent a turn; the `tools` config's hints should lower the count against the baseline without lowering success (D-094).",
 	];
 }
 

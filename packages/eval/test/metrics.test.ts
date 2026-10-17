@@ -89,6 +89,7 @@ describe("computeTraceMetrics", () => {
 			lastStopReason: null,
 			compactionTokens: 0,
 			compactionReplays: 0,
+			failedEdits: 0,
 			trimmedOutputs: 0,
 			trimmedRereads: 0,
 			stuckLoops: 0,
@@ -489,6 +490,17 @@ describe("computeTraceMetrics", () => {
 			call("read", { path: "src/lib.rs" }),
 		]);
 		expect(metrics).toMatchObject({ trimmedOutputs: 3, trimmedRereads: 1 });
+	});
+
+	it("counts failed edits, not failed reads or successful edits (D-094)", () => {
+		const result = (toolName: string, isError: boolean) => event("tool.result", { toolCallId: "x", toolName, isError });
+		const metrics = computeTraceMetrics([
+			result("edit", true),
+			result("edit", false),
+			result("read", true),
+			result("edit", true),
+		]);
+		expect(metrics.failedEdits).toBe(2);
 	});
 
 	it("adds pi's own compaction calls to the main tokens, which no turn carries (D-079)", () => {

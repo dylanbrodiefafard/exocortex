@@ -483,6 +483,7 @@ describe("deterministicLesson", () => {
 				errorLine: "e",
 				detail: [],
 				shell: [],
+				deadEnds: [],
 				steps: [
 					{ ...step, edits: [{ path: "a.cpp", before: "int y", after: "short y" }] },
 					{ ...step, edits: [{ path: "b.cpp", before: "int x", after: "long x" }] },

@@ -75,7 +75,7 @@ function setup(
 	enabled: Record<string, Record<string, unknown>>,
 	options: {
 		hasUI?: boolean;
-		budgetsMs?: { rewrite?: number; settle?: number; compact?: number; userTurn?: number };
+		budgetsMs?: { rewrite?: number; toolCall?: number; settle?: number; compact?: number; userTurn?: number };
 	} = {},
 ) {
 	harness = createAdapterHarness({ modules: enabled }, options);
@@ -485,6 +485,44 @@ describe("tool-result rewrites", () => {
 		expect(await h.pi.emit("tool_result", bashResult("x"))).toMatchObject({ content: [{ type: "text", text: "x!" }] });
 		expect(Date.now() - started).toBeLessThan(2_000);
 		expect(h.errors.map((e) => e.where)).toEqual(["throws.rewriteToolResult"]);
+	});
+});
+
+describe("looking before a tool runs (D-094)", () => {
+	function looker(id: string, seen: unknown[], look: () => Promise<void> = async () => {}): ModuleFactory {
+		return () => ({
+			id,
+			beforeToolCall: async (call) => {
+				seen.push(call);
+				await look();
+			},
+		});
+	}
+
+	it("offers a copy of each call, never blocks it, and skips calls another tool made", async () => {
+		const seen: unknown[] = [];
+		const { h } = setup(
+			{
+				throws: looker("throws", [], async () => {
+					throw new Error("bad");
+				}),
+				hangs: looker("hangs", [], () => new Promise(() => {})),
+				sees: looker("sees", seen),
+			},
+			{ throws: { enabled: true }, hangs: { enabled: true }, sees: { enabled: true } },
+			{ budgetsMs: { toolCall: 60 } },
+		);
+		await h.pi.emit("session_start");
+		const input = { path: "a.rs", edits: [{ oldText: "a", newText: "b" }] };
+		const started = Date.now();
+		expect(await h.pi.emit("tool_call", { toolName: "edit", toolCallId: "c1", input })).toBeUndefined();
+		expect(Date.now() - started).toBeLessThan(2_000);
+		expect(seen).toEqual([{ toolName: "edit", toolCallId: "c1", input }]);
+		// A module's copy is not pi's input: changing it changes nothing pi runs.
+		expect((seen[0] as { input: unknown }).input).not.toBe(input);
+		expect(h.errors.map((e) => e.where)).toEqual(["throws.beforeToolCall"]);
+		await h.pi.emit("tool_call", { toolName: "edit", toolCallId: "c1/1", parentToolCallId: "c1", input });
+		expect(seen).toHaveLength(1);
 	});
 });
 

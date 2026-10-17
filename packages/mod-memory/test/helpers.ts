@@ -1,16 +1,31 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { JsonValue, ToolOutcome, ToolResultDraft } from "@exocortex/core";
 import { createTestModuleContext, type SidecarReply } from "@exocortex/testkit";
 import { afterEach, beforeEach } from "vitest";
 import { createMemory } from "../src/memory.ts";
 
-/** A fresh directory (not a git repo: the scope is its path) and a store inside it, per test. */
+/** The files the tests edit: a card whose files are all missing is not recalled. */
+const REPO_FILES = [
+	"lib.rs",
+	"src/lib.rs",
+	"src/a.rs",
+	"src/parser.rs",
+	"src/render.rs",
+	"src/stack.rs",
+	"tests/stack.rs",
+];
+
+/** A fresh directory (not a git repo: the scope is its path) holding the files the tests edit, and a store inside it, per test. */
 export function workspace(): { readonly dir: () => string; readonly dbPath: () => string } {
 	let dir = "";
 	beforeEach(() => {
 		dir = mkdtempSync(join(tmpdir(), "exo-mem-"));
+		for (const file of REPO_FILES) {
+			mkdirSync(dirname(join(dir, file)), { recursive: true });
+			writeFileSync(join(dir, file), "");
+		}
 	});
 	afterEach(() => rmSync(dir, { recursive: true, force: true }));
 	return { dir: () => dir, dbPath: () => join(dir, "memory", "cards.db") };

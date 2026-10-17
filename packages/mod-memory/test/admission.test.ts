@@ -362,6 +362,7 @@ function episodeWith(edits: FixEpisode["steps"][number]["edits"]): FixEpisode {
 		signature: "s",
 		errorLine: "e",
 		detail: [],
+		deadEnds: [],
 		shell: [],
 		steps: [{ errorLine: "e", excerpt: "", retries: 0, edits }],
 	};

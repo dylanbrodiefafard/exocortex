@@ -2,6 +2,7 @@ import type { ModuleSettingsSchemas } from "@exocortex/core";
 import { COMPACTION_ID, CompactionSettingsSchema } from "@exocortex/mod-compaction";
 import { MEMORY_ID, MemorySettingsSchema } from "@exocortex/mod-memory";
 import { SUPERVISOR_ID, SupervisorSettingsSchema } from "@exocortex/mod-supervisor";
+import { TOOLS_ID, ToolsSettingsSchema } from "@exocortex/mod-tools";
 import { TRIAGE_ID, TriageSettingsSchema } from "@exocortex/mod-triage";
 import { TRIMMER_ID, TrimmerSettingsSchema } from "@exocortex/mod-trimmer";
 
@@ -13,6 +14,7 @@ import { TRIMMER_ID, TrimmerSettingsSchema } from "@exocortex/mod-trimmer";
  */
 export const MODULE_SETTINGS: ModuleSettingsSchemas = {
 	[TRIMMER_ID]: TrimmerSettingsSchema,
+	[TOOLS_ID]: ToolsSettingsSchema,
 	[TRIAGE_ID]: TriageSettingsSchema,
 	[MEMORY_ID]: MemorySettingsSchema,
 	[SUPERVISOR_ID]: SupervisorSettingsSchema,

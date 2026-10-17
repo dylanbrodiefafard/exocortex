@@ -82,6 +82,13 @@ export interface UserTurn {
 	readonly origin: "user" | "extension" | "suggestion";
 }
 
+/** A tool call the model made, about to run. */
+export interface ToolCall {
+	readonly toolName: string;
+	readonly toolCallId: string;
+	readonly input: { readonly [key: string]: JsonValue };
+}
+
 /** A finished tool call, as the harness reported it (original output, before any rewrite). */
 export interface ToolOutcome {
 	readonly toolName: string;
@@ -222,6 +229,12 @@ export interface ExoModule {
 	 * short budget shared by the modules; the agent waits on it.
 	 */
 	contextForUserTurn?(turn: UserTurn, signal: AbortSignal): Promise<UserTurnContext | undefined>;
+	/**
+	 * Called before a tool runs, to look at what it is about to change (the file before an edit).
+	 * It cannot change or stop the call. Awaited within a short budget shared by the modules, since
+	 * the tool waits on it; a hook that runs out of time simply has nothing (D-094).
+	 */
+	beforeToolCall?(call: ToolCall, signal: AbortSignal): Promise<void>;
 	/** Called for every finished tool call, one at a time, in the order the results came in. */
 	onToolResult?(tool: ToolOutcome): void;
 	/**

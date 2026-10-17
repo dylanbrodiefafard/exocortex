@@ -1,0 +1,8 @@
+// Tools module (D-094): hints on failed edits, numbered reads with an outline, and new errors
+// after each edit from the built-in syntax checks. Acceptance: fewer failed edits retried and no
+// drop in success; tokens should not rise by more than the numbered reads cost.
+{
+	"modules": {
+		"tools": { "enabled": true }
+	}
+}

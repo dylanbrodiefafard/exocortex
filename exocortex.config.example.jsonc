@@ -79,6 +79,17 @@
 			"sidecar": false, // let a sidecar pick the lines to keep (verbatim) for still-long outputs
 			"sidecarTimeoutMs": 6000 // it holds the agent loop; on timeout the deterministic result is used
 		},
+		"tools": {
+			"enabled": false,
+			// Makes pi's own read, edit and write results more useful; adds no tool (D-094).
+			"editHints": true, // a failed edit shows what the file holds where it was aimed, quoted from the file
+			"readLineNumbers": true, // number read results, cat -n style
+			"outline": true, // when a read stops early, list the declarations in the rest of the file
+			"diagnostics": true, // after an edit, show errors a check finds that were not there before it
+			"builtinChecks": true, // syntax checks for Python, Go, shell and JavaScript; nothing to install
+			"checks": [], // your own, tried first; your file only, e.g. [{ "files": "*.rs", "command": "cargo check --quiet --message-format short" }]
+			"checkTimeoutMs": 4000 // a slower check shows nothing
+		},
 		"triage": {
 			"enabled": false,
 			// A failure repeats when it reports the same errors again; fewer failing tests is a new failure (D-073).

@@ -226,7 +226,12 @@ export function deterministicLesson(episode: FixEpisode): string {
 const REWRITTEN = "(file rewritten)";
 
 function evidenceOf(episode: FixEpisode): string {
-	return JSON.stringify({ command: episode.command, error: episode.errorLine, edits: editsOf(episode).slice(-3) });
+	return JSON.stringify({
+		command: episode.command,
+		error: episode.errorLine,
+		edits: editsOf(episode).slice(-3),
+		deadEnds: episode.deadEnds,
+	});
 }
 
 /**
