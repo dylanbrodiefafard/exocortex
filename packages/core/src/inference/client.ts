@@ -6,7 +6,17 @@ export type JsonObject = { readonly [key: string]: JsonValue };
 /** An OpenAI chat message. Kept loose so fork-prefix calls can reuse the main agent's messages verbatim. */
 export type ChatMessage = JsonObject & { readonly role: string };
 
+/**
+ * The main agent's context as a request body (D-093): its last request, with the conversation
+ * since then appended to `messages`. A call that carries one sends its own messages after these,
+ * so the engine's prefix cache serves everything the main agent has already paid for.
+ */
+export interface ForkPrefix {
+	readonly body: JsonObject;
+}
+
 export interface ChatRequest {
+	/** With `fork`, the messages that follow the main agent's. */
 	readonly messages: readonly ChatMessage[];
 	readonly maxTokens: number;
 	readonly temperature?: number;
@@ -16,6 +26,17 @@ export interface ChatRequest {
 	readonly priority?: number;
 	/** Grammar-constrained JSON output; sent only when the engine supports `json_schema`. */
 	readonly jsonSchema?: { readonly name: string; readonly schema: JsonValue };
+	/**
+	 * `false` asks the engine to read its prefix cache and leave it as it was (F10); sent only when
+	 * the engine supports it.
+	 */
+	readonly cacheWrite?: false;
+	/**
+	 * Continue from the main agent's context. The tools, sampling and thinking settings are the
+	 * main agent's, since changing them changes the prompt before the fork; `thinking` applies
+	 * only on an engine where it changes the generation suffix alone (F4).
+	 */
+	readonly fork?: ForkPrefix;
 }
 
 export interface ChatUsage {
@@ -51,14 +72,15 @@ export class InferenceError extends Error {
 
 /** Builds the request body, using only fields the engine profile says it supports (D-032). */
 export function buildChatBody(target: EngineTarget, request: ChatRequest): JsonObject {
+	const base = request.fork ? forkBase(target, request, request.fork) : undefined;
 	return {
-		model: target.model,
-		messages: request.messages,
+		...(base ?? { model: target.model, messages: request.messages }),
 		max_tokens: request.maxTokens,
 		stream: false,
 		...(request.temperature === undefined ? {} : { temperature: request.temperature }),
-		...(request.thinking === undefined ? {} : { chat_template_kwargs: { enable_thinking: request.thinking } }),
+		...(request.thinking === undefined || base ? {} : { chat_template_kwargs: { enable_thinking: request.thinking } }),
 		...(request.priority !== undefined && target.features.priority ? { priority: request.priority } : {}),
+		...(request.cacheWrite === false && target.features.cacheReadOnly ? { ninfer: { cache_write: false } } : {}),
 		...(request.jsonSchema && target.features.jsonSchema
 			? {
 					response_format: {
@@ -66,6 +88,32 @@ export function buildChatBody(target: EngineTarget, request: ChatRequest): JsonO
 						json_schema: { name: request.jsonSchema.name, schema: request.jsonSchema.schema, strict: true },
 					},
 				}
+			: {}),
+	};
+}
+
+/** Fields of the main agent's request that belong to how it is answered, not to its prompt. */
+const NOT_FORKED = new Set([
+	"stream",
+	"stream_options",
+	"max_tokens",
+	"max_completion_tokens",
+	"n",
+	"logprobs",
+	"top_logprobs",
+	"response_format",
+]);
+
+/** The main agent's request with this call's messages after its own. */
+function forkBase(target: EngineTarget, request: ChatRequest, fork: ForkPrefix): JsonObject {
+	const kept = Object.fromEntries(Object.entries(fork.body).filter(([key]) => !NOT_FORKED.has(key)));
+	const messages = Array.isArray(kept["messages"]) ? kept["messages"] : [];
+	const kwargs = record(kept["chat_template_kwargs"]) as JsonObject;
+	return {
+		...kept,
+		messages: [...messages, ...request.messages],
+		...(request.thinking !== undefined && target.features.thinkingToggle
+			? { chat_template_kwargs: { ...kwargs, enable_thinking: request.thinking } }
 			: {}),
 	};
 }

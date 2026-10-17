@@ -3,6 +3,7 @@ import {
 	createSidecarPool,
 	type Embedder,
 	ENGINE_PROFILES,
+	type EngineFeatures,
 	type InferenceClient,
 	InferenceError,
 	type JsonValue,
@@ -45,6 +46,10 @@ export function createTestModuleContext(options: {
 	readonly sessionId?: string;
 	/** What an earlier instance of the module saved in this session (`ModuleContext.savedState`). */
 	readonly savedState?: JsonValue;
+	/** What the engine supports beyond the `generic` profile. */
+	readonly features?: Partial<EngineFeatures>;
+	/** Cached prompt tokens each reply reports, of 100; not reported when left out. */
+	readonly cachedTokens?: number;
 }): TestModuleContext {
 	const requests: ChatRequest[] = [];
 	const records: Omit<TraceEventInput, "module" | "synthetic">[] = [];
@@ -67,7 +72,7 @@ export function createTestModuleContext(options: {
 			return {
 				text: typeof value === "string" ? value : JSON.stringify(value),
 				finishReason: "stop",
-				usage: { promptTokens: 100, completionTokens: 20, cachedTokens: null },
+				usage: { promptTokens: 100, completionTokens: 20, cachedTokens: options.cachedTokens ?? null },
 			};
 		},
 	};
@@ -75,7 +80,12 @@ export function createTestModuleContext(options: {
 		client &&
 		createSidecarPool({
 			client,
-			target: { baseUrl: "http://sidecar.test/v1", model: "m", apiKey: undefined, features: ENGINE_PROFILES.generic },
+			target: {
+				baseUrl: "http://sidecar.test/v1",
+				model: "m",
+				apiKey: undefined,
+				features: { ...ENGINE_PROFILES.generic, ...options.features },
+			},
 			config: {
 				maxConcurrent: 3,
 				reservedForMain: 1,

@@ -455,6 +455,8 @@ The schema is at `ce/src/core/model-config.ts:195-256`; docs at `models.md:45-66
   - Usage pattern: `custom-compaction.ts:79-88` calls `ctx.modelRegistry.complete(model, {messages}, {maxTokens, signal, cacheRetention: "none", sessionId})`.
   - These calls **do not** pass through `before_provider_request` or the other hooks, because those are wired only into the agent `streamFn`. So sidecar traffic never pollutes the main trace hooks.
   - Pass `signal` for cancellation. `samplingParams` and `onPayload` in options can add body fields such as `id_slot` (`OpenAICompletionsOptions`).
+  - **`onPayload` runs before anything is sent** (pi-ai 1.0.2, `dist/api/openai-completions.js:187-197`): `buildParams`, then `await options.onPayload(params, model)`, then `client.chat.completions.create`. An `onPayload` that throws ends the call inside the provider's `try`, with no HTTP request. The adapter's fork tracker (D-093) uses this to have pi serialize messages exactly as the main agent's next request would (`convertMessages`, `:869`), without re-implementing the provider's compat rules.
+  - With no `systemPrompt` in the context, the serialized `messages` hold no system message.
 - **Raw fetch** is also reasonable for llama.cpp-specific endpoints such as `/completion`, grammar, `n_probs` or slot control. Built-in classification through `ctx.modelRegistry.classify()` exists for llama.cpp models (`llama-cpp.md:89-98`).
 - **Concurrency:** pi has no concurrency limiter for these calls. Exocortex's pool owns that.
 

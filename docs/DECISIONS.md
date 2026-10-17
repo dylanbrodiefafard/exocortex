@@ -1873,6 +1873,42 @@ Open check: Exocortex's injected `custom_message` reaches ninfer as a second con
   - **Not covered:** compaction's prompts have no blocks; the conversation they summarize is laid out by its own code. A value placed outside a block (a command line, a list of known preferences) is as before.
   - **Open risk:** a model may still take `>>>` at the end of a line for the end of the block. This closes the structural case, not every wording.
 
+### D-093 — Sidecars leave the engine's cache as they found it, and compaction continues from the main agent's context · accepted (2026-10-09; owner's call; amends D-032's "no `ninfer` body fields", D-024, D-036's profiles and D-067's summary call)
+- **Context:** the owner is adding read-only cache requests to their ninfer fork: `ninfer.cache_write: false` reads the prefix cache, saves nothing, and restores the entry it read. The fork also has `json_schema` and `logprobs` now, which upstream ninfer does not.
+  - Until now every finished sidecar prompt became a cache entry and could push the main agent's prefix out.
+  - D-024 and D-032 parked fork-prefix sidecars: on ninfer a request that reads the main agent's prefix takes it, and the main agent then loses its cache. A read-only request gives it back.
+- **1. The profile is `dylanbrodiefafard/ninfer`**, not `ninfer`: it describes the fork. It has `cachedTokens`, `jsonSchema` and `logprobs`. Upstream ninfer is `generic` with `cachedTokens` overridden. Nothing is released, so the old name is not kept as an alias.
+- **2. A new feature flag, F10 `cacheReadOnly`** (`docs/INFERENCE_ENGINES.md` has what the server must do).
+  - The pool sets `cacheWrite: false` on every sidecar call; the client sends `ninfer: { cache_write: false }` only when the flag is on. No call can opt out.
+  - **This is the one `ninfer` body field**, against D-032. It is behind a profile flag like every other feature, and every module works without it.
+  - **The flag is on in the profile** since the field reached the fork's `experimental` branch (`17c504c`, 2026-10-10). ninfer rejects unknown parameters, so a server built without it fails every sidecar call: set `engine.features.cacheReadOnly: false` for one.
+  - **Cost:** two sidecar calls with the same prompt no longer share it through the cache (the supervisor's `completeVotes` re-asks, D-046). The owner's call: read-only for all, and look at the trace's `cached_tokens` before giving any call an exception.
+- **3. A sidecar call can be a fork** (`ChatRequest.fork`, core).
+  - A fork is the main agent's last request body, taken as pi sent it, with the messages since appended and the call's own messages after those. The system prompt, tools, sampling and thinking settings are the main agent's: on ninfer each of them is part of the prompt before the fork (D-023), so `thinking` is applied only where the profile has F4. Fields about the answer (`stream`, `max_tokens`, `response_format` and the like) are the call's.
+  - **The pool refuses a fork at once**, as outcome `error`, unless the profile has F10 and F2 and the fork's model is the engine's. The caller keeps a prompt that stands alone.
+  - **One fork runs at a time.** A cached prefix has one reader on ninfer; a second fork would wait in the engine with its deadline running.
+  - **A fork that misses stops forking.** A fork whose reply reports less than half its prompt cached, or reports nothing, computed the main agent's whole context again. Every later fork from that pool is refused. There is one pool per session and model, so the next session tries again.
+- **4. The adapter gives the fork** (`fork.ts`).
+  - It keeps the body from `before_provider_request` and every `message_end` after it. There is a fork only once the request was answered with `stop` or `toolUse`, and none after a compaction, a tree move, a model change, or when sidecar calls go to another server or model than the main agent's.
+  - **Pi serializes the messages since the request.** The adapter calls `modelRegistry.complete` with those messages and an `onPayload` that takes the built request and throws; nothing is sent (PI_API_NOTES §11). The provider's compat rules are therefore pi's own.
+  - Core gets a JSON body and knows nothing of pi (`CompactionRequest.fork`).
+- **5. Compaction writes its summary from a fork first** (`summarize-fork.v1`, setting `fork`, default on).
+  - The call is the main agent's context and one user message: stop working, write the summary from everything above, using the template. The sidecar reads the conversation as the agent did, with whole tool outputs, where the transcript prompt has pi's serialization with each tool result cut (`serializeConversation`, PI_API_NOTES §1). The engine has all of it cached, so the cost is the instruction and the summary.
+  - It also reads the recent messages pi keeps after the summary. The prompt says so; a name from those messages counts as evidence for the gate (D-061).
+  - **The transcript prompt (D-067) is used** when the pool refuses the fork, the call fails, or the reply does not follow the template (a tool call, an answer to the conversation). After an overflow there is no fork: the last request was never answered.
+  - Both attempts share `timeoutMs` each and the host's 120 s.
+- **Not done.**
+  - **The supervisor's verdict and triage as forks.** A verdict written as a continuation of the agent's own context is the agent grading itself with its reasoning in view, which D-039 and D-071 kept from the judge. It needs an A/B first.
+  - **Memory, the trimmer and the ledger** run while the main agent generates, or read what is not in its context yet. They keep their own prompts.
+  - **No fork while the main agent is generating.** The adapter gives none then. A fork that starts just before a main request makes that request wait in the engine until the fork ends; compaction holds the agent, so it cannot happen there.
+  - **Request priority (F5)** is written up for ninfer and not built.
+- **Open risks.**
+  - **None of this has run against the real server.** The checks are `cached_tokens` on the compaction call in `sidecar_calls` (near its whole prompt), and the main agent's `cacheRead` on the request after a read-only call (unchanged).
+  - **Whether the fork lands on the cached prefix** depends on pi serializing the last reply as it will in the next request, and on ninfer rendering a `user` message after it without touching earlier turns (`preserve_thinking: true`, D-031). A miss costs one full prefill, then forks are off.
+  - **Thinking is the main agent's setting.** With it on, the summary shares `maxSummaryTokens` with the reasoning before it; a summary cut off is not used and the transcript prompt runs.
+  - **Room in the context.** The fork needs the main agent's context plus the instruction and the summary to fit. Pi's `reserveTokens` (16,384) leaves that on a threshold compaction; a manual `/compact` at the very end may not, and the engine's refusal sends it to the transcript prompt.
+  - **The model may answer the conversation** or call a tool despite the instruction. `parseSummary` rejects both.
+
 ---
 
 ## Open questions (carried from brief §10, updated)

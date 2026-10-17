@@ -14,6 +14,12 @@ export const SettingsSchema = Type.Object(
 		maxSummaryTokens: Type.Integer({ minimum: 200, default: 4_096 }),
 		thinking: Type.Boolean({ default: false }),
 		/**
+		 * Write the summary as a continuation of the main agent's context when the engine can serve
+		 * that from its cache (D-093). The transcript prompt is used when it cannot, and after a
+		 * fork that fails.
+		 */
+		fork: Type.Boolean({ default: true }),
+		/**
 		 * Without a sidecar summary: `harness` leaves compaction to the harness's default; `deterministic`
 		 * still writes the summary from tracked facts alone.
 		 */

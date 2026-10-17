@@ -72,6 +72,56 @@ describe("buildChatBody", () => {
 		});
 	});
 
+	it("asks for a read-only cache only where the engine has it", () => {
+		const readOnly = { ...request, cacheWrite: false as const };
+		expect(buildChatBody(target(), readOnly)).not.toHaveProperty("ninfer");
+		expect(buildChatBody(target({ cacheReadOnly: true }), readOnly)).toMatchObject({ ninfer: { cache_write: false } });
+		expect(buildChatBody(target({ cacheReadOnly: true }), request)).not.toHaveProperty("ninfer");
+	});
+
+	it("reads the cache without writing it on the owner's ninfer fork, unless overridden (D-093)", () => {
+		const readOnly = { ...request, cacheWrite: false as const };
+		const fork = (engine: Parameters<typeof resolveEngine>[0]) =>
+			resolveEngine({ ...engine, baseUrl: "u", model: "m" }, {}) as EngineTarget;
+		const profile = "dylanbrodiefafard/ninfer" as const;
+		expect(buildChatBody(fork({ profile }), readOnly)).toMatchObject({ ninfer: { cache_write: false } });
+		expect(buildChatBody(fork({ profile, features: { cacheReadOnly: false } }), readOnly)).not.toHaveProperty("ninfer");
+		expect(buildChatBody(fork({ profile: "generic" }), readOnly)).not.toHaveProperty("ninfer");
+	});
+
+	it("continues the main agent's request: its prompt fields kept, its answer fields replaced", () => {
+		const main = {
+			model: "m",
+			messages: [
+				{ role: "system", content: "sys" },
+				{ role: "user", content: "task" },
+			],
+			tools: [{ type: "function", function: { name: "bash" } }],
+			chat_template_kwargs: { enable_thinking: true, preserve_thinking: true },
+			temperature: 0.6,
+			stream: true,
+			stream_options: { include_usage: true },
+			max_completion_tokens: 32_000,
+			response_format: { type: "text" },
+		};
+		const fork = { ...request, fork: { body: main }, cacheWrite: false as const };
+		expect(buildChatBody(target({ cacheReadOnly: true }), fork)).toEqual({
+			model: "m",
+			messages: [...main.messages, ...request.messages],
+			tools: main.tools,
+			// Turning thinking off would change the prompt before the fork on this engine.
+			chat_template_kwargs: main.chat_template_kwargs,
+			temperature: 0.6,
+			max_tokens: 64,
+			stream: false,
+			ninfer: { cache_write: false },
+		});
+		expect(buildChatBody(target({ thinkingToggle: true }), { ...fork, temperature: 0 })).toMatchObject({
+			chat_template_kwargs: { enable_thinking: false, preserve_thinking: true },
+			temperature: 0,
+		});
+	});
+
 	it("sends priority and json_schema when supported", () => {
 		const body = buildChatBody(target({ priority: true, jsonSchema: true }), request);
 		expect(body["priority"]).toBe(2);

@@ -33,6 +33,7 @@ const FeatureFlags = Type.Object(
 		priority: Type.Optional(Type.Boolean()),
 		logprobs: Type.Optional(Type.Boolean()),
 		n: Type.Optional(Type.Boolean()),
+		cacheReadOnly: Type.Optional(Type.Boolean()),
 	},
 	{ additionalProperties: false },
 );
@@ -51,11 +52,11 @@ const EngineConfig = Type.Object(
 				Type.Literal("vllm"),
 				Type.Literal("sglang"),
 				Type.Literal("llamacpp"),
-				Type.Literal("ninfer"),
+				Type.Literal("dylanbrodiefafard/ninfer"),
 			],
 			{ default: "generic" },
 		),
-		/** Per-feature overrides of the profile (F1–F7). */
+		/** Per-feature overrides of the profile (F1–F7, F10). */
 		features: Type.Optional(FeatureFlags),
 	},
 	{ default: {}, additionalProperties: false },

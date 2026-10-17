@@ -32,6 +32,7 @@ import { createSupervisor, SUPERVISOR_ID } from "@exocortex/mod-supervisor";
 import { createTriage, TRIAGE_ID } from "@exocortex/mod-triage";
 import { createTrimmer, TRIMMER_ID } from "@exocortex/mod-trimmer";
 import { remainingMs, withBudget } from "./budget.ts";
+import type { ForkTracker } from "./fork.ts";
 import { createHoldUi } from "./hold.ts";
 import {
 	exitCodeOf,
@@ -109,6 +110,8 @@ export interface ModuleHostOptions {
 	};
 	/** Overrides {@link MAX_CONSECUTIVE_CONTINUATIONS} (tests). */
 	readonly maxContinuations?: number;
+	/** Gives a compaction the main agent's context to continue from (D-093); none without it. */
+	readonly fork?: ForkTracker;
 }
 
 /** A module instance, the settings it was built from, and the switch that turns its context off. */
@@ -392,7 +395,7 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 
 	pi.on(
 		"session_before_compact",
-		guarded("session_before_compact", (event, ctx) => hold.whileHolding(ctx, () => compact(event))),
+		guarded("session_before_compact", (event, ctx) => hold.whileHolding(ctx, () => compact(event, ctx))),
 	);
 
 	// The user is leaving the session: pi waits for a running settle hook before it switches
@@ -560,7 +563,7 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 	 * Offers compaction to modules (D-017): the first summary wins and is traced as
 	 * `exo.compaction`; otherwise (or on any failure) pi compacts as usual.
 	 */
-	async function compact(event: SessionBeforeCompactEvent) {
+	async function compact(event: SessionBeforeCompactEvent, ctx: ExtensionContext) {
 		const compactors = modules().filter((m) => m.compact);
 		if (compactors.length === 0) return undefined;
 		const { preparation } = event;
@@ -575,6 +578,8 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 			filesModified: [...modified],
 			tokensBefore: preparation.tokensBefore,
 			customInstructions: event.customInstructions ?? null,
+			// After an overflow the last request was never answered: there is nothing to continue from.
+			fork: (event.reason === "overflow" ? undefined : await options.fork?.prefix(ctx)) ?? null,
 		};
 		const deadline = Date.now() + compactBudgetMs;
 		for (const module of compactors) {

@@ -2,6 +2,7 @@ import { appendFileSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createDebugLog, type DebugFields, type DebugLog } from "@exocortex/core";
 import { registerExoCommand } from "./command.ts";
+import { registerForkTracker } from "./fork.ts";
 import { MODULE_SETTINGS } from "./module-settings.ts";
 import { registerModuleHost } from "./modules.ts";
 import { HIGH_FREQUENCY_EVENTS, PI_EVENT_NAMES, type PiEventName } from "./pi-events.ts";
@@ -70,6 +71,7 @@ export default function exocortex(pi: ExtensionAPI): void {
 	registerModuleHost(pi, {
 		runtime,
 		onError,
+		fork: registerForkTracker(pi, { runtime, onError }),
 		log: (message) => emit("exo.log", () => ({ message })),
 	});
 	registerExoCommand(pi, runtime);

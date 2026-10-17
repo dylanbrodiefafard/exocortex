@@ -21,10 +21,11 @@
 		// "baseUrl": "http://127.0.0.1:8080/v1",
 		// "model": "qwen3.8-27b",
 		// "apiKey": "$NINFER_KEY",
-		// What the engine supports (docs/INFERENCE_ENGINES.md): generic | vllm | sglang | llamacpp | ninfer.
-		"profile": "ninfer"
-		// Per-feature overrides, e.g. after adding json_schema support to your engine:
-		// "features": { "jsonSchema": true }
+		// What the engine supports (docs/INFERENCE_ENGINES.md): generic | vllm | sglang | llamacpp |
+		// dylanbrodiefafard/ninfer (the fork; upstream ninfer is "generic" with "cachedTokens": true).
+		"profile": "dylanbrodiefafard/ninfer"
+		// Per-feature overrides, e.g. for a build of the fork without read-only cache requests (D-093):
+		// "features": { "cacheReadOnly": false }
 	},
 
 	// The sidecar scheduler (brief §5.2).

@@ -3,7 +3,7 @@ import type { Static, TSchema } from "typebox";
 import { clampTimeoutMs, type ExoConfig } from "../config.ts";
 import { canonicalJson } from "../fingerprint.ts";
 import type { JsonValue } from "../trace/store.ts";
-import type { ChatRequest, ChatResponse, InferenceClient } from "./client.ts";
+import type { ChatRequest, ChatResponse, ForkPrefix, InferenceClient } from "./client.ts";
 import type { EngineTarget } from "./engine.ts";
 import { completeStructured, StructuredOutputError } from "./structured.ts";
 
@@ -18,7 +18,12 @@ export interface SidecarCall<S extends TSchema | undefined = undefined> {
 	/** Module id: used for per-module limits and recorded with the call. */
 	readonly module: string;
 	readonly priority: SidecarPriority;
-	readonly request: Omit<ChatRequest, "jsonSchema" | "priority">;
+	/**
+	 * With `fork`, the call continues from the main agent's context (D-093). It is refused at once,
+	 * as `error`, when the engine cannot do that for free or an earlier fork missed the cache: have
+	 * a prompt that stands alone ready. One fork runs at a time.
+	 */
+	readonly request: Omit<ChatRequest, "jsonSchema" | "priority" | "cacheWrite">;
 	/** When set, the reply must be JSON matching this schema (one repair attempt). */
 	readonly schema?: S;
 	readonly schemaName?: string;
@@ -177,6 +182,9 @@ interface Job {
 	readonly setHeld: (held: boolean) => void;
 }
 
+/** A fork that found less than this share of its prompt in the cache paid for the main agent's context again. */
+const FORK_MIN_CACHED_SHARE = 0.5;
+
 const ZERO_USAGE: SidecarUsage = { promptTokens: 0, cachedTokens: null, completionTokens: 0 };
 const BUDGET_SPENT = "session sidecar token budget exhausted";
 
@@ -204,6 +212,23 @@ export function createSidecarPool(options: SidecarPoolOptions): SidecarPool {
 	let closed = false;
 	let tokensUsed = 0;
 	let maxRunningObserved = 0;
+	/** Why forks are off for the rest of this pool's life: one missed the cache (D-093). */
+	let forkOff: string | undefined;
+
+	/** Why a fork cannot be had from this engine now; undefined when it can. */
+	function forkRefusal(fork: ForkPrefix): string | undefined {
+		if (!target.features.cacheReadOnly || !target.features.cachedTokens) {
+			return "fork refused: the engine profile lacks cacheReadOnly or cachedTokens";
+		}
+		if (fork.body["model"] !== target.model) return "fork refused: the main agent runs on another model";
+		return forkOff;
+	}
+
+	/** One fork at a time: a cached prefix has one reader (D-023). */
+	function startable(job: Job): boolean {
+		if (!eligible(job)) return false;
+		return !job.call.request.fork || ![...running].some((other) => other.call.request.fork);
+	}
 
 	function eligible(job: Job): boolean {
 		return !(job.call.priority === "background" && config.backgroundWhenIdleOnly && mainActive && drains.size === 0);
@@ -215,7 +240,7 @@ export function createSidecarPool(options: SidecarPoolOptions): SidecarPool {
 
 	function pump(): void {
 		while (running.size < slots) {
-			const next = PRIORITY_ORDER.map((p) => queue.find((j) => j.call.priority === p && eligible(j))).find(
+			const next = PRIORITY_ORDER.map((p) => queue.find((j) => j.call.priority === p && startable(j))).find(
 				(j) => j !== undefined,
 			);
 			if (!next) return;
@@ -284,6 +309,8 @@ export function createSidecarPool(options: SidecarPoolOptions): SidecarPool {
 		const request = { ...call.request, maxTokens: Math.min(call.request.maxTokens, limits.maxTokensPerCall) };
 		if (closed) return Promise.resolve(rejectNow(call, request.maxTokens, "closed", "pool is closed"));
 		if (budgetSpent()) return Promise.resolve(rejectNow(call, request.maxTokens, "rejected_budget", BUDGET_SPENT));
+		const refusal = request.fork && forkRefusal(request.fork);
+		if (refusal) return Promise.resolve(rejectNow(call, request.maxTokens, "error", refusal));
 
 		return new Promise<SidecarResult<S>>((resolve) => {
 			const submittedAt = now();
@@ -351,6 +378,7 @@ export function createSidecarPool(options: SidecarPoolOptions): SidecarPool {
 					// Counted as each response arrives, so a call that fails later (a repair turn that
 					// times out) still reports what it used, and the budget sees it at once.
 					tokensUsed += (response.usage?.promptTokens ?? 0) + (response.usage?.completionTokens ?? 0);
+					if (request.fork) forkOff ??= forkMiss(response);
 					if (settled) return;
 					attempts += 1;
 					usage = addUsage(usage, response);
@@ -459,7 +487,7 @@ async function execute(
 	signal: AbortSignal,
 	onResponse: (response: ChatResponse) => void,
 ): Promise<{ value: unknown; finishReason: string | null }> {
-	const withPriority = { ...request, priority: ENGINE_PRIORITY[call.priority] };
+	const withPriority = { ...request, priority: ENGINE_PRIORITY[call.priority], cacheWrite: false as const };
 	if (call.schema === undefined) {
 		const response = await client.chat(withPriority, signal);
 		onResponse(response);
@@ -475,6 +503,15 @@ async function execute(
 		onResponse,
 	);
 	return { value: result.value, finishReason: result.responses.at(-1)?.finishReason ?? null };
+}
+
+/** Why a fork's response shows it did not get the main agent's context from the cache; undefined when it did. */
+function forkMiss(response: ChatResponse): string | undefined {
+	const usage = response.usage;
+	if (usage && usage.cachedTokens !== null && usage.cachedTokens >= usage.promptTokens * FORK_MIN_CACHED_SHARE) {
+		return undefined;
+	}
+	return `fork refused: an earlier one missed the cache (${usage?.cachedTokens ?? "?"} of ${usage?.promptTokens ?? "?"} prompt tokens cached)`;
 }
 
 function addUsage(total: SidecarUsage, response: ChatResponse): SidecarUsage {

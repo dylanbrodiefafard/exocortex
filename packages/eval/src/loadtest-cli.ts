@@ -16,7 +16,7 @@ Options:
   --base-url <url>         OpenAI-compatible base URL incl. /v1 (default: config engine.baseUrl)
   --model <id>             Model id (default: config engine.model)
   --api-key <key>          API key (default: config engine.apiKey)
-  --profile <name>         generic | vllm | sglang | llamacpp | ninfer (default: config)
+  --profile <name>         generic | vllm | sglang | llamacpp | dylanbrodiefafard/ninfer (default: config)
   --max-concurrent <n>     Engine slots (default: config pool.maxConcurrent)
   --reserved <n>           Slots reserved for main (default: config pool.reservedForMain)
   --main-requests <n>      Main requests per phase (default 8)

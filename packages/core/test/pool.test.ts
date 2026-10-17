@@ -533,3 +533,89 @@ describe("Phase 2 acceptance: 20 queued jobs against an HTTP engine", { timeout:
 		}
 	});
 });
+
+describe("forks of the main agent's context (D-093)", () => {
+	const FORK = { body: { model: "m", messages: [{ role: "user", content: "task" }] } };
+	const forkCall = (text: string, fork = FORK) =>
+		({
+			module: text,
+			priority: "critical",
+			request: { fork, messages: [{ role: "user", content: text }], maxTokens: 64 },
+		}) as const;
+
+	/** A pool over an engine with a read-only cache; each reply reports `cached` of 100 prompt tokens. */
+	function forkPool(features: Partial<EngineTarget["features"]> = { cacheReadOnly: true, cachedTokens: true }) {
+		const started: ChatRequest[] = [];
+		const replies: ((cached: number | null) => void)[] = [];
+		const client: InferenceClient = {
+			chat(request) {
+				started.push(request);
+				return new Promise<ChatResponse>((resolve) => {
+					replies.push((cachedTokens) =>
+						resolve({
+							text: "ok",
+							finishReason: "stop",
+							usage: { promptTokens: 100, completionTokens: 5, cachedTokens },
+						}),
+					);
+				});
+			},
+		};
+		const pool = createSidecarPool({
+			client,
+			target: { ...TARGET, features: { ...ENGINE_PROFILES.generic, ...features } },
+			config: POOL,
+			moduleLimits: () => DEFAULT_MODULE_LIMITS,
+		});
+		return { pool, started, replies };
+	}
+
+	it("asks every call to leave the cache as it was", async () => {
+		const { pool, started, replies } = forkPool();
+		const result = pool.run(call("plain"));
+		await flush();
+		expect(started[0]).toMatchObject({ cacheWrite: false });
+		replies[0]?.(null);
+		expect((await result).ok).toBe(true);
+	});
+
+	it("refuses a fork at once when the engine cannot serve it from its cache", async () => {
+		for (const features of [{}, { cacheReadOnly: true }, { cachedTokens: true }]) {
+			const { pool, started } = forkPool(features);
+			expect(await pool.run(forkCall("a"))).toMatchObject({ ok: false, outcome: "error" });
+			expect(started).toEqual([]);
+		}
+		const { pool, started } = forkPool();
+		const other = { body: { ...FORK.body, model: "another" } };
+		expect(await pool.run(forkCall("a", other))).toMatchObject({ ok: false, outcome: "error" });
+		expect(started).toEqual([]);
+	});
+
+	it("runs one fork at a time, beside calls that are not forks", async () => {
+		const { pool, started, replies } = forkPool();
+		const results = [pool.run(forkCall("first")), pool.run(forkCall("second")), pool.run(call("plain"))];
+		await flush();
+		expect(started.map((r) => r.messages[0]?.["content"])).toEqual(["first", "plain"]);
+		replies[0]?.(95);
+		await flush();
+		expect(started.map((r) => r.messages[0]?.["content"])).toEqual(["first", "plain", "second"]);
+		replies[1]?.(null);
+		replies[2]?.(95);
+		expect((await Promise.all(results)).every((r) => r.ok)).toBe(true);
+	});
+
+	it("stops forking once a fork misses the cache", async () => {
+		for (const cached of [10, null]) {
+			const { pool, started, replies } = forkPool();
+			const missed = pool.run(forkCall("first"));
+			await flush();
+			replies[0]?.(cached);
+			// The reply it paid for is still used.
+			expect((await missed).ok).toBe(true);
+			const refused = await pool.run(forkCall("second"));
+			expect(refused).toMatchObject({ ok: false, outcome: "error" });
+			expect(refused.ok ? "" : refused.error).toContain("missed the cache");
+			expect(started).toHaveLength(1);
+		}
+	});
+});

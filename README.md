@@ -189,7 +189,7 @@ When you quit pi, Exocortex waits up to 2 seconds for background work to finish 
 
 [`exocortex.config.example.jsonc`](exocortex.config.example.jsonc) documents every option. The ones you are most likely to set:
 
-- **`engine`**: where sidecar calls go (`baseUrl`, `model`, `apiKey`) and which `profile` the server matches: `generic`, `vllm`, `sglang`, `llamacpp` or `ninfer`. Unset fields fall back to pi's main model when it is an OpenAI-compatible provider.
+- **`engine`**: where sidecar calls go (`baseUrl`, `model`, `apiKey`) and which `profile` the server matches: `generic`, `vllm`, `sglang`, `llamacpp` or `dylanbrodiefafard/ninfer` (the fork linked above; upstream ninfer is `generic`). Unset fields fall back to pi's main model when it is an OpenAI-compatible provider.
 - **`pool`**: `maxConcurrent` must equal the engine's real slot count, and `reservedForMain` is the number of slots sidecars never take. If the pool thinks it has more slots than the engine does, sidecars crowd out the main agent.
 - **`modules`**: one block per module. All are off unless enabled here.
 - **`embeddings`** (optional): any OpenAI-compatible `/embeddings` server, for example a small model on the CPU. Memory then recognises the same error said in different words. Without it, keyword matching is used.

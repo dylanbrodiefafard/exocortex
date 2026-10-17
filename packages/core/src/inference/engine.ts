@@ -1,6 +1,6 @@
 import type { ExoConfig } from "../config.ts";
 
-/** Engine capabilities Exocortex can use (docs/INFERENCE_ENGINES.md F1–F7). */
+/** Engine capabilities Exocortex can use (docs/INFERENCE_ENGINES.md F1–F7, F10). */
 export interface EngineFeatures {
 	/** F1: automatic prefix caching shared across concurrent requests. */
 	readonly prefixCaching: boolean;
@@ -16,6 +16,11 @@ export interface EngineFeatures {
 	readonly logprobs: boolean;
 	/** F7: `n > 1` sharing one prefill. */
 	readonly n: boolean;
+	/**
+	 * F10: a request can read the prefix cache without writing to it (`ninfer.cache_write: false`),
+	 * and the entry it read is left as it was (D-093).
+	 */
+	readonly cacheReadOnly: boolean;
 }
 
 export type EngineProfile = ExoConfig["engine"]["profile"];
@@ -33,6 +38,7 @@ export const ENGINE_PROFILES: Readonly<Record<EngineProfile, EngineFeatures>> = 
 		priority: false,
 		logprobs: false,
 		n: false,
+		cacheReadOnly: false,
 	},
 	vllm: {
 		prefixCaching: true,
@@ -42,6 +48,7 @@ export const ENGINE_PROFILES: Readonly<Record<EngineProfile, EngineFeatures>> = 
 		priority: false, // needs --scheduling-policy priority
 		logprobs: true,
 		n: true,
+		cacheReadOnly: false,
 	},
 	sglang: {
 		prefixCaching: true,
@@ -51,6 +58,7 @@ export const ENGINE_PROFILES: Readonly<Record<EngineProfile, EngineFeatures>> = 
 		priority: false, // needs priority scheduling enabled
 		logprobs: true,
 		n: true,
+		cacheReadOnly: false,
 	},
 	llamacpp: {
 		prefixCaching: false, // per-slot cache; no concurrent sharing
@@ -60,15 +68,19 @@ export const ENGINE_PROFILES: Readonly<Record<EngineProfile, EngineFeatures>> = 
 		priority: false,
 		logprobs: true,
 		n: false,
+		cacheReadOnly: false,
 	},
-	ninfer: {
-		prefixCaching: false, // single-owner checkpoints at e04fad3
+	// The owner's fork at its `experimental` branch; upstream ninfer has none of these beyond
+	// `cachedTokens` and rejects the `ninfer.cache_write` field: use `generic` for it.
+	"dylanbrodiefafard/ninfer": {
+		prefixCaching: false, // one owner per cached prefix: no concurrent sharing
 		cachedTokens: true,
-		jsonSchema: false,
+		jsonSchema: true,
 		thinkingToggle: false,
 		priority: false,
-		logprobs: false,
+		logprobs: true,
 		n: false,
+		cacheReadOnly: true, // `ninfer.cache_write`, on the fork's `experimental` branch since 17c504c
 	},
 };
 

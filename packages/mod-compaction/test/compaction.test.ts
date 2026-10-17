@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { CompactionRequest, ExoModule } from "@exocortex/core";
+import type { ChatRequest, CompactionRequest, ExoModule } from "@exocortex/core";
 import { createTestModuleContext, type SidecarReply } from "@exocortex/testkit";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createCompaction } from "../src/compaction.ts";
@@ -55,6 +55,7 @@ function request(extra: Partial<CompactionRequest> = {}): CompactionRequest {
 		filesModified: ["src/lib.rs"],
 		tokensBefore: 120_000,
 		customInstructions: null,
+		fork: null,
 		...extra,
 	};
 }
@@ -317,5 +318,61 @@ describe("grounded", () => {
 		expect(summary).toContain(
 			"## Next Move\n1. Open nowhere_fn, then run cargo test after cloning the word body. [unverified: nowhere_fn]\n2. (none)\n\n## Relevant Files",
 		);
+	});
+});
+
+describe("the summary as a fork of the main agent's context (D-093)", () => {
+	const fork = {
+		body: {
+			model: "m",
+			messages: [
+				{ role: "user", content: "implement forth" },
+				{ role: "assistant", content: "editing src/kept_only.rs" },
+			],
+		},
+	};
+	const engine = { features: { cacheReadOnly: true, cachedTokens: true }, cachedTokens: 95 };
+	function forked(settings: Record<string, unknown>, options: object, reply: (r: ChatRequest) => SidecarReply) {
+		const t = createTestModuleContext({ cwd: dir, ...options, reply });
+		return { t, module: createCompaction(settings, t.context) };
+	}
+
+	it("continues the main agent's context with the instruction alone", async () => {
+		const { module, t } = forked({}, engine, () => `${SUMMARY}\n- \`src/kept_only.rs\`: next`);
+		const summary = await summaryOf(module, request({ fork, customInstructions: "the parser" }));
+		expect(t.requests).toHaveLength(1);
+		const [sent] = t.requests;
+		expect(sent?.fork).toBe(fork);
+		expect(sent?.thinking).toBeUndefined();
+		expect(sent?.messages).toHaveLength(1);
+		const prompt = String(sent?.messages[0]?.["content"]);
+		expect(prompt).toContain("do not call a tool");
+		expect(prompt).toContain("## Objective");
+		expect(prompt).toContain("focus on: the parser");
+		// The transcript is what the fork replaces.
+		expect(prompt).not.toContain("[User]: implement forth");
+		// A name only in the messages the harness keeps was read by the fork: it is not marked.
+		expect(summary).toContain("- `src/kept_only.rs`: next");
+	});
+
+	it("asks with the transcript when there is no fork to be had", async () => {
+		const transcript = (t: { requests: ChatRequest[] }) =>
+			t.requests.filter((r) => !r.fork).map((r) => String(r.messages[1]?.["content"]));
+		// The engine cannot fork, the setting is off, or the harness gave none.
+		for (const [settings, options, req] of [
+			[{}, {}, request({ fork })],
+			[{ fork: false }, engine, request({ fork })],
+			[{}, engine, request()],
+		] as const) {
+			const { module, t } = forked(settings, options, () => SUMMARY);
+			expect(await summaryOf(module, req)).toContain("## Objective");
+			expect(t.requests).toHaveLength(1);
+			expect(transcript(t)[0]).toContain("[User]: implement forth");
+		}
+		// A fork that answered the conversation instead is not used.
+		const { module, t } = forked({}, engine, (r) => (r.fork ? "Sure, running the tests now." : SUMMARY));
+		expect(await summaryOf(module, request({ fork }))).toContain("## Objective");
+		expect(t.requests.map((r) => r.fork !== undefined)).toEqual([true, false]);
+		expect(t.logs.join("\n")).toContain("did not follow the template");
 	});
 });

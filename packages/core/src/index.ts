@@ -15,6 +15,7 @@ export {
 	type ChatResponse,
 	type ChatUsage,
 	createOpenAIClient,
+	type ForkPrefix,
 	type InferenceClient,
 	InferenceError,
 } from "./inference/client.ts";

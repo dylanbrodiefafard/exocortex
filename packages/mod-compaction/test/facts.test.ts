@@ -61,6 +61,7 @@ function request(extra: Partial<CompactionRequest> = {}): CompactionRequest {
 		filesModified: [],
 		tokensBefore: 120_000,
 		customInstructions: null,
+		fork: null,
 		...extra,
 	};
 }

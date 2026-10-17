@@ -9,6 +9,7 @@ import type { CompactionSettings } from "./settings.ts";
 const SYSTEM_PROMPT = loadPrompt(new URL("../prompts/summarize-system.v2.md", import.meta.url));
 const SUMMARIZE_PROMPT = loadPrompt(new URL("../prompts/summarize.v2.md", import.meta.url));
 const UPDATE_PROMPT = loadPrompt(new URL("../prompts/summarize-update.v2.md", import.meta.url));
+const FORK_PROMPT = loadPrompt(new URL("../prompts/summarize-fork.v1.md", import.meta.url));
 const TEMPLATE = loadPrompt(new URL("../prompts/summary-template.v2.md", import.meta.url));
 
 /** The template's top-level sections, in order. */
@@ -59,7 +60,16 @@ export async function writeNarrative(
 			? `\n\nThe user asked this summary to focus on: ${request.customInstructions}`
 			: "",
 	};
+	// A name the previous summary only carries as unverified is not evidence for itself.
+	const carried = prior
+		.split("\n")
+		.filter((line) => !line.includes("[unverified:"))
+		.join("\n");
+	const evidence = `${request.conversation}\n${carried}\n${request.customInstructions ?? ""}`;
 	ctx.progress("Writing the compaction summary…");
+	const forked = await writeFromFork(ctx, settings, request, shared, signal);
+	// The fork also read the messages the harness keeps, which the span does not have.
+	if (forked) return { ...grounded(forked.summary, `${evidence}\n${forked.read}`, ctx), updated: prior !== "" };
 	const result = await pool.run({
 		module: "compaction",
 		priority: "critical",
@@ -86,13 +96,52 @@ export async function writeNarrative(
 		ctx.log("summary did not follow the template: not used");
 		return undefined;
 	}
-	// A name the previous summary only carries as unverified is not evidence for itself.
-	const carried = prior
-		.split("\n")
-		.filter((line) => !line.includes("[unverified:"))
-		.join("\n");
-	const evidence = `${request.conversation}\n${carried}\n${request.customInstructions ?? ""}`;
 	return { ...grounded(summary, evidence, ctx), updated: prior !== "" };
+}
+
+/**
+ * The handover written as a continuation of the main agent's own context (D-093): the engine has
+ * that context cached, so only the instruction is new, and the sidecar reads the conversation as
+ * the agent did, not a transcript of it. Undefined when there is no fork to be had or the reply
+ * cannot be used; the caller then asks with the transcript.
+ */
+async function writeFromFork(
+	ctx: ModuleContext,
+	settings: CompactionSettings,
+	request: CompactionRequest,
+	shared: { readonly template: string; readonly instructions: string },
+	signal: AbortSignal,
+): Promise<{ readonly summary: string; readonly read: string } | undefined> {
+	const pool = ctx.pool();
+	if (!pool || !request.fork || !settings.fork) return undefined;
+	const result = await pool.run({
+		module: "compaction",
+		priority: "critical",
+		timeoutMs: settings.timeoutMs,
+		signal,
+		request: {
+			fork: request.fork,
+			messages: [{ role: "user", content: FORK_PROMPT.render(shared).trim() }],
+			maxTokens: settings.maxSummaryTokens,
+		},
+	});
+	if (!result.ok) {
+		ctx.log(`summary from a fork ${result.outcome}: ${result.error}`);
+		return undefined;
+	}
+	const summary = parseSummary(result.value);
+	if (!summary) {
+		ctx.log("summary from a fork did not follow the template: asking with the transcript");
+		return undefined;
+	}
+	return { summary, read: texts(request.fork.body["messages"]).join("\n") };
+}
+
+/** Every string in a JSON value: what a request's messages say, without the JSON around it. */
+function texts(value: unknown): string[] {
+	if (typeof value === "string") return [value];
+	if (typeof value !== "object" || value === null) return [];
+	return Object.values(value).flatMap(texts);
 }
 
 /**

@@ -1,24 +1,25 @@
 # Inference engine expectations
 
-Exocortex talks to its model through **the standard OpenAI-compatible Chat Completions API**, using only features that mainstream engines (vLLM, SGLang, llama.cpp) already provide. ninfer is the owner's primary engine, but Exocortex doesn't depend on anything ninfer-specific (D-032).
+Exocortex talks to its model through **the standard OpenAI-compatible Chat Completions API**, using only features that mainstream engines (vLLM, SGLang, llama.cpp) already provide. ninfer is the owner's primary engine. Exocortex depends on nothing ninfer-specific, with one exception it can do without: read-only cache requests (F10, D-093).
 
 The engine-support columns are from general knowledge of each project as of 2026. Verify them against the version you deploy. "Flag" means the feature exists but is off by default.
 
 ## Features Exocortex uses
 
-| # | Feature | What Exocortex does with it | Without it | vLLM | SGLang | llama.cpp | ninfer `e04fad3` |
-|---|---|---|---|---|---|---|---|
-| F1 | **Automatic prefix caching, shared across concurrent requests** | Fork-prefix sidecars: resend main's exact request (captured from pi) plus a short suffix, and pay only for the suffix | Sidecars use short, isolated prompts only | yes (APC) | yes (RadixAttention) | partial (per-slot; host-RAM prompt cache) | **partial**: single-owner checkpoints, no concurrent sharing |
-| F2 | `usage.prompt_tokens_details.cached_tokens` | Measure cache hits per call; eval metric | Eval can't attribute latency | flag | yes | its own `timings` fields | yes |
-| F3 | `response_format: json_schema` (grammar-constrained) | Sidecar verdicts, ledgers and extractions return valid JSON | Prompted JSON + validate + one repair retry | yes | yes | yes | **no** (tool-call args only) |
-| F4 | `chat_template_kwargs.enable_thinking` affects only the generation suffix | Sidecars turn thinking off while still sharing main's prefix | Sidecars copy main's thinking settings | yes (stock Qwen template) | yes | yes | **no**: effort/thinking changes the system block |
-| F5 | Request `priority` | Main beats sidecars in admission and prefill | Exocortex caps in-flight sidecars and prompt sizes itself | flag (`--scheduling-policy priority`) | flag | no | no |
-| F6 | `logprobs` / `top_logprobs` | Calibrated confidence on supervisor verdicts (low margin → `uncertain`) | N-way voting, or no confidence | yes | yes | yes | no |
-| F7 | `n > 1` sharing one prefill | Cheap verdict voting and parallel diagnoses | N separate requests (cheap anyway if F1 holds) | yes | yes | no | no (`n` must be 1) |
-| F8 | Client disconnect cancels the request | Timed-out interactive sidecars stop using GPU | Wasted compute | yes | yes | yes | yes |
-| F9 | `/v1/embeddings` (any server) | Memory retrieval, if BM25 recall proves insufficient (D-026) | BM25 + triggers only | yes | yes | yes | no; any separate server works |
+| # | Feature | What Exocortex does with it | Without it | vLLM | SGLang | llama.cpp | ninfer `e04fad3` | `dylanbrodiefafard/ninfer` `experimental` |
+|---|---|---|---|---|---|---|---|---|
+| F1 | **Automatic prefix caching, shared across concurrent requests** | Fork-prefix sidecars: resend main's exact request (captured from pi) plus a short suffix, and pay only for the suffix | Sidecars use short, isolated prompts only | yes (APC) | yes (RadixAttention) | partial (per-slot; host-RAM prompt cache) | **partial**: single-owner checkpoints, no concurrent sharing | as upstream |
+| F2 | `usage.prompt_tokens_details.cached_tokens` | Measure cache hits per call; eval metric | Eval can't attribute latency | flag | yes | its own `timings` fields | yes | yes |
+| F3 | `response_format: json_schema` (grammar-constrained) | Sidecar verdicts, ledgers and extractions return valid JSON | Prompted JSON + validate + one repair retry | yes | yes | yes | **no** (tool-call args only) | **yes** |
+| F4 | `chat_template_kwargs.enable_thinking` affects only the generation suffix | Sidecars turn thinking off while still sharing main's prefix | Sidecars copy main's thinking settings | yes (stock Qwen template) | yes | yes | **no**: effort/thinking changes the system block | as upstream |
+| F5 | Request `priority` | Main beats sidecars in admission and prefill | Exocortex caps in-flight sidecars and prompt sizes itself | flag (`--scheduling-policy priority`) | flag | no | no | no (requirements written) |
+| F6 | `logprobs` / `top_logprobs` | Calibrated confidence on supervisor verdicts (low margin → `uncertain`) | N-way voting, or no confidence | yes | yes | yes | no | **yes** |
+| F7 | `n > 1` sharing one prefill | Cheap verdict voting and parallel diagnoses | N separate requests (cheap anyway if F1 holds) | yes | yes | no | no (`n` must be 1) | no |
+| F8 | Client disconnect cancels the request | Timed-out interactive sidecars stop using GPU | Wasted compute | yes | yes | yes | yes | yes |
+| F9 | `/v1/embeddings` (any server) | Memory retrieval, if BM25 recall proves insufficient (D-026) | BM25 + triggers only | yes | yes | yes | no; any separate server works | no |
+| F10 | **Read-only cache requests**: `ninfer.cache_write: false` reads the prefix cache, saves nothing, and leaves the entry it read as it was | Every sidecar call sends it, so sidecars never evict the main agent's prefix. With F2 it also allows **forks**: a sidecar call that continues from the main agent's whole context and pays only for its own instruction (D-093) | Sidecars' finished prompts take cache space; no forks | no (APC shares prefixes without it) | no (RadixAttention likewise) | no | no | **yes** (`17c504c`) |
 
-At startup the `InferenceClient` reads an **engine profile** from Exocortex config (`generic`, `vllm`, `sglang`, `llamacpp`, `ninfer`): a set of the flags above. Each module checks the flags it needs and takes its fallback when one is false. There are no engine-specific code paths beyond request-field mapping. Eval measures the real effect (e.g. `cached_tokens` for F1) instead of trusting the profile.
+At startup the `InferenceClient` reads an **engine profile** from Exocortex config (`generic`, `vllm`, `sglang`, `llamacpp`, `dylanbrodiefafard/ninfer`): a set of the flags above. The last one is the owner's fork; upstream ninfer has only F2 and F8, so it is `generic` with `cachedTokens` overridden. Each module checks the flags it needs and takes its fallback when one is false. There are no engine-specific code paths beyond request-field mapping. Eval measures the real effect (e.g. `cached_tokens` for F1) instead of trusting the profile.
 
 ## What ninfer would need for parity
 
@@ -34,12 +35,26 @@ Ranked by how much they matter to Exocortex. All of these are features the other
 5. **F5: request `priority`** (vLLM semantics: integer, lower runs first; default 0). This matters more on ninfer than elsewhere, because one prefill at a time stalls decode.
 6. **F7: `n > 1`.** It follows almost for free from F1.
 
-Nothing beyond parity is requested. Earlier drafts asked for retention control, a session `continue_from` API, a capabilities endpoint, request deadlines and decode-time thinking budgets. All of these are dropped:
+## Beyond parity: read-only cache requests (F10, D-093)
+
+The one feature Exocortex uses that the other engines do not have. vLLM and SGLang share a cached prefix among concurrent requests, so a sidecar there reads main's prefix without taking it. On ninfer a cached prefix has one owner, and a request that reads it takes it; F10 is what makes reading safe.
+
+- **Field:** `"ninfer": { "cache_write": false }` on Chat Completions; the default is `true`.
+- **Reads are unchanged:** same lookup, same `cached_tokens`, `reuse_source` and `prefix_reuse_path`.
+- **Nothing of the request is kept** when it ends (stop, length, cancel or error), in any tier, and it publishes no checkpoint.
+- **The entry it read is restored** to what it was: same frontier, same checkpoints, same recency. Its owner's next append hits as if the read-only request had never run.
+- **With no hit** it takes a clean lane when there is one and leaves it clean.
+- **A request that needs an entry a read-only request holds waits for it**, keeping its place in the queue; it never falls to a full reset because of the holder.
+- `cache_write: false` with `capture_context_checkpoint: true` is a 400.
+- **As built** (`experimental` `17c504c`, `docs/serving.md` there): a VRAM hit copies the prefix and its state into a lane of its own, so the source is not held while the request runs. An idle server that cannot keep the source (no free lane, no RAM room) returns HTTP 429 `server_overloaded`; Exocortex treats that as a failed call, and a fork then falls back to its transcript prompt. The read-only result stays in VRAM until a lane is needed and is evicted before anything else.
+- **Test:** main sends a 100k-token conversation; a read-only request sends the same prefix plus 500 tokens and reports `cached_tokens` near the prefix; main's next append reports the same `cached_tokens` as a run without the read-only request.
+
+Nothing else beyond parity is requested. Earlier drafts asked for retention control, a session `continue_from` API, a capabilities endpoint, request deadlines and decode-time thinking budgets. All of these are dropped:
 - pi exposes the exact outgoing request, so Exocortex can rebuild prefixes itself;
 - client-side timeouts plus disconnect cover deadlines;
 - the engine profile replaces capability discovery.
 
 ## Beyond parity: worth considering only with evidence
 These aren't requested. They're listed in case eval data later shows a large, specific win:
-- **Cache residency hints**, e.g. keep main's prefix hot under memory pressure. Eval would need to show main losing cache to sidecar churn.
+- ~~**Cache residency hints**~~: taken up as F10 (D-093), in the form "a sidecar leaves the cache as it found it".
 - **Speculative forking:** decode N short sidecar continuations from one prefix within a single batch slot. This is only interesting if F1 + F7 prove to be the bottleneck.

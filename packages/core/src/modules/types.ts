@@ -1,3 +1,4 @@
+import type { ForkPrefix } from "../inference/client.ts";
 import type { Embedder } from "../inference/embeddings.ts";
 import type { SidecarPool } from "../inference/pool.ts";
 import type { JsonValue, TraceEventInput } from "../trace/store.ts";
@@ -166,6 +167,12 @@ export interface CompactionRequest {
 	readonly tokensBefore: number;
 	/** Extra instructions the user gave (e.g. `/compact focus on the parser`). */
 	readonly customInstructions: string | null;
+	/**
+	 * The main agent's whole context, for a sidecar call that continues from it (D-093): the span
+	 * above and the recent messages the harness keeps. Null when the harness cannot give one, as
+	 * after a context overflow.
+	 */
+	readonly fork: ForkPrefix | null;
 }
 
 /** A module's compaction summary. */
