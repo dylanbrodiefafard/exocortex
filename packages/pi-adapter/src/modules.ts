@@ -21,6 +21,7 @@ import {
 	readHiddenRun,
 	runShellCommand,
 	type SettleAction,
+	type SettleInfo,
 	type ToolCall,
 	type ToolOutcome,
 	type ToolResultDraft,
@@ -79,6 +80,8 @@ interface Job {
 	readonly stop: AbortController;
 	readonly label: string;
 	startedTurn: boolean;
+	/** `runs` when its continuation was sent: the run it started is a later one. */
+	sentAtRun: number;
 }
 
 /** Widget key of a follow-up offered beside the user's draft (D-097). */
@@ -89,9 +92,32 @@ const OFFER_WIDGET_KEY = "exo.offer";
  */
 const OFFER_SHORTCUT = "alt+r";
 
+/**
+ * Pi's default `compaction.reserveTokens` (`core/compaction/compaction.js:55`): it compacts once the
+ * context passes the window less this (`:173-176`). The extension API does not expose the setting.
+ */
+const PI_RESERVE_TOKENS = 16_384;
+
+/** What settle hooks are told: how the run ended, its last words and how full the context is. */
+function settleInfo(event: AgentBeforeSettleEvent, ctx: ExtensionContext): SettleInfo {
+	const context = contextOf(ctx);
+	return { outcome: event.outcome, lastAssistantText: lastAssistantText(event), ...(context ? { context } : {}) };
+}
+
+/** How full the context is and where pi compacts it, when pi knows (D-098). */
+function contextOf(ctx: ExtensionContext): { readonly tokens: number; readonly compactAt: number } | undefined {
+	try {
+		const usage = ctx.getContextUsage();
+		if (!usage || usage.tokens === null || !(usage.contextWindow > PI_RESERVE_TOKENS)) return undefined;
+		return { tokens: usage.tokens, compactAt: usage.contextWindow - PI_RESERVE_TOKENS };
+	} catch {
+		return undefined;
+	}
+}
+
 /** Status-line key set while a module's background job runs (D-097); the eval driver waits on it. */
 const BACKGROUND_STATUS_KEY = "exo.background";
-/** Hard cap on how long tool-result rewrites may hold the agent loop, across all modules. */
+/** Hard cap on how long the rewrites of one batch of tool results may hold the agent loop, across all modules and results (D-098). */
 const REWRITE_BUDGET_MS = 20_000;
 /** Hard cap on how long modules may look before a tool runs, across all modules: the tool waits (D-094). */
 const TOOL_CALL_BUDGET_MS = 5_000;
@@ -99,8 +125,12 @@ const TOOL_CALL_BUDGET_MS = 5_000;
 const HIDDEN_RUN_BUDGET_MS = 4_000;
 /** The name the reading's sidecar call and trace event go under: it serves every module. */
 const HIDDEN_RUN_MODULE = "runs";
-/** Hard cap on a module-written compaction summary; pi's default compaction runs after it. */
-const COMPACT_BUDGET_MS = 120_000;
+/**
+ * A guard against an Exocortex bug in a module-written compaction summary, not a guess at how long
+ * one takes (D-098): the calls end when the engine stops answering, and pi's own abort stops them.
+ * Pi's default compaction runs after it.
+ */
+const COMPACT_BUDGET_MS = 15 * 60_000;
 /** Hard cap on how long modules may hold a new user prompt before the agent starts on it. */
 const USER_TURN_BUDGET_MS = 6_000;
 /** Hard cap on how long modules' `dispose` may hold a session's end. */
@@ -187,6 +217,24 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 	let settling: AbortController | undefined;
 	/** Tool results are handled one after another: each waits for the one before it. */
 	let toolResults: Promise<unknown> = Promise.resolve();
+	/**
+	 * When the rewrites of the current batch of tool results must be done (D-098). A rewrite holds
+	 * the agent only once every tool of the batch has finished: before that, the other tools are
+	 * still running and it costs nothing, so it gets its own {@link REWRITE_BUDGET_MS}. The rewrites
+	 * that start after the last tool finished share one, set by the first of them. Each result had
+	 * its own before, so a batch of N could hold the agent N times that. Cleared when the turn ends.
+	 */
+	let batchDeadline: number | undefined;
+	/** The current batch's tool calls and the results in so far (calls made by tools not counted). */
+	let batchCalls = 0;
+	let batchResults = 0;
+	const newBatch = () => {
+		batchDeadline = undefined;
+		batchCalls = 0;
+		batchResults = 0;
+	};
+	/** Runs (`agent_start`) so far: a job's continuation is over once a run after it settles. */
+	let runs = 0;
 	/** Each module's background job now running (D-097), by module id. */
 	const jobs = new Map<string, Job>();
 	/** The session's latest context: where a background job's result is shown. */
@@ -313,7 +361,34 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 			},
 			log: (message) => options.log(`${id}: ${message}`),
 			background: (label, job) => startJob(id, life, label, job),
+			deliverLate: (text) => deliverLate(id, life, text),
+			forkPrefix: async () => {
+				const ctx = lastCtx;
+				if (life.over || !ctx || !options.fork) return undefined;
+				return options.fork.prefix(ctx);
+			},
 		};
+	}
+
+	/**
+	 * Steers a module's late help into the running agent (D-098): pi takes it after the current
+	 * tool batch, before the next model call (`pi-agent-core/dist/agent-loop.js:186`), and an agent
+	 * about to stop takes one more turn for it. Nothing is sent while the agent is idle.
+	 */
+	function deliverLate(id: string, life: { readonly over: boolean }, text: string): boolean {
+		const ctx = lastCtx;
+		if (life.over || !ctx) return false;
+		try {
+			if (ctx.isIdle()) return false;
+			pi.sendMessage(
+				{ customType: `exo.${id}`, content: text, display: true, details: { exo: { module: id, late: true } } },
+				{ deliverAs: "steer" },
+			);
+			return true;
+		} catch (error) {
+			onError(`${id}.deliverLate`, error);
+			return false;
+		}
 	}
 
 	/**
@@ -329,14 +404,17 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 		const ctx = lastCtx;
 		if (life.over || !ctx?.hasUI) return false;
 		jobs.get(id)?.stop.abort();
-		const entry: Job = { stop: new AbortController(), label, startedTurn: false };
+		const entry: Job = { stop: new AbortController(), label, startedTurn: false, sentAtRun: 0 };
 		jobs.set(id, entry);
 		showJobs(ctx);
 		const unwatch = watchEscape(ctx, () => entry.stop.abort());
 		void (async () => {
 			try {
 				const action = await job(entry.stop.signal);
-				if (action && !entry.stop.signal.aborted && !life.over) entry.startedTurn = deliver(id, action, ctx);
+				if (action && !entry.stop.signal.aborted && !life.over) {
+					entry.sentAtRun = runs;
+					entry.startedTurn = deliver(id, action, ctx);
+				}
 			} catch (error) {
 				onError(`${id}.background`, error);
 			} finally {
@@ -385,7 +463,8 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 
 	/** The turn a job started has ended: the job is no longer waited on. */
 	function endStartedTurns(ctx: ExtensionContext): void {
-		const ended = [...jobs].filter(([, job]) => job.startedTurn);
+		// Only a run that began after the job's continuation was sent can have been that continuation.
+		const ended = [...jobs].filter(([, job]) => job.startedTurn && runs > job.sentAtRun);
 		for (const [id] of ended) jobs.delete(id);
 		if (ended.length > 0) showJobs(ctx);
 	}
@@ -425,7 +504,10 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 	 * True when it started a turn.
 	 */
 	function deliver(id: string, action: SettleAction, ctx: ExtensionContext): boolean {
-		const now = action.kind === "continue" && !ctx.isIdle() ? { ...action, kind: "suggest" as const } : action;
+		// Pi is not idle while it settles; a continuation sent then is still taken (it steers into the
+		// ending run, `core/agent-session.js:1427`). Only a run the user started makes it a suggestion.
+		const busy = !ctx.isIdle() && settling === undefined;
+		const now = action.kind === "continue" && busy ? { ...action, kind: "suggest" as const } : action;
 		const applied = apply(id, now, ctx);
 		if (!applied.used || applied.offered) return false;
 		const entry = applied.result?.entries?.[0];
@@ -517,6 +599,7 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 			// A new session, or the same one reloaded: modules start over from what the session holds.
 			stopJobs();
 			dropOffer(lastCtx);
+			newBatch();
 			lastCtx = ctx;
 			await disposeAll();
 			cwd = ctx.cwd;
@@ -542,6 +625,7 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 			// What a background job read, and what an offered follow-up was about, is about to change.
 			stopJobs();
 			dropOffer(lastCtx);
+			newBatch();
 			const accepted = suggested !== undefined && sameText(suggested, event.text);
 			suggested = undefined;
 			if (event.source !== "extension") continuations = 0;
@@ -557,7 +641,10 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 
 	pi.on(
 		"before_agent_start",
-		guarded("before_agent_start", (_event, ctx) => hold.whileHolding(ctx, () => userTurnContext(ctx))),
+		guarded("before_agent_start", (_event, ctx) => {
+			lastCtx = ctx;
+			return hold.whileHolding(ctx, () => userTurnContext(ctx));
+		}),
 	);
 
 	pi.on(
@@ -572,6 +659,7 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 	pi.on(
 		"tool_call",
 		guarded("tool_call", async (event: ToolCallEvent, ctx) => {
+			if (event.parentToolCallId === undefined) batchCalls += 1;
 			await hold.whileHolding(ctx, () => beforeToolCall(event, signalOf(ctx)));
 			return undefined;
 		}),
@@ -579,9 +667,36 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 
 	pi.on(
 		"tool_result",
-		guarded("tool_result", (event, ctx) =>
-			hold.whileHolding(ctx, () => inOrder(() => toolResult(event, signalOf(ctx)))),
-		),
+		guarded("tool_result", (event, ctx) => {
+			lastCtx = ctx;
+			if ((event as { parentToolCallId?: string }).parentToolCallId === undefined) batchResults += 1;
+			return hold.whileHolding(ctx, () => inOrder(() => toolResult(event, signalOf(ctx))));
+		}),
+	);
+
+	// Pi ends a turn after its whole batch of tool results: the next batch has its own budget.
+	pi.on(
+		"turn_end",
+		guarded("turn_end", () => {
+			newBatch();
+			return undefined;
+		}),
+	);
+	pi.on(
+		"agent_start",
+		guarded("agent_start", () => {
+			runs += 1;
+			return undefined;
+		}),
+	);
+	// A run that settles ends a job's continuation, also one aborted before its settle hook (pi
+	// skips `agent_before_settle` then, `core/agent-session.js:1362`).
+	pi.on(
+		"agent_settled",
+		guarded("agent_settled", (_event, ctx) => {
+			endStartedTurns(ctx);
+			return undefined;
+		}),
 	);
 
 	pi.on(
@@ -747,7 +862,7 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 			fullOutputPath: fullOutputPathOf(event.details, event.structuredContent),
 			status: statusOf(outcome.output),
 		};
-		const deadline = Date.now() + rewriteBudgetMs;
+		const deadline = rewriteDeadline();
 		const notes: RewriteNote[] = [];
 		const applied: { readonly module: string; readonly result: Committable }[] = [];
 		let current = draft.current;
@@ -796,6 +911,7 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 			customInstructions: event.customInstructions ?? null,
 			// After an overflow the last request was never answered: there is nothing to continue from.
 			fork: (event.reason === "overflow" ? undefined : await options.fork?.prefix(ctx)) ?? null,
+			conversationSince: (timestamp) => serializeSpan(span.filter((m) => (m.timestamp ?? 0) > timestamp)),
 		};
 		const deadline = Date.now() + compactBudgetMs;
 		for (const module of compactors) {
@@ -832,7 +948,7 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 		endStartedTurns(ctx);
 		const asked = modules().filter((m) => m.onSettle);
 		if (asked.length === 0) return undefined;
-		const info = { outcome: event.outcome, lastAssistantText: lastAssistantText(event) };
+		const info = settleInfo(event, ctx);
 		const stop = new AbortController();
 		settling = stop;
 		const unwatch = watchEscape(ctx, () => stop.abort());
@@ -882,6 +998,35 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 		}
 	}
 
+	/** When this result's rewrites must be done: its own budget while other tools of its batch still run, else the batch's. */
+	function rewriteDeadline(): number {
+		if (batchResults < batchCalls) return Date.now() + rewriteBudgetMs;
+		batchDeadline ??= Date.now() + rewriteBudgetMs;
+		return batchDeadline;
+	}
+
+	/** Puts a follow-up in the editor, or, beside a draft the user is typing, offers it (D-097). */
+	function suggest(
+		moduleId: string,
+		action: SettleAction & { readonly kind: "suggest" },
+		ctx: ExtensionContext,
+	): { readonly used: boolean; readonly offered?: boolean } {
+		// Nothing can show it: the module is not told it was used.
+		if (!ctx.hasUI) return { used: false };
+		suggested = action.text;
+		if (ctx.ui.getEditorText().trim() !== "") {
+			showOffer(ctx, { id: moduleId, action });
+			hold.settled(ctx, `exo: ${action.summary} (${OFFER_SHORTCUT} adds it to your message)`);
+			return { used: true, offered: true };
+		}
+		// A follow-up offered earlier is about an older state: this one replaces it.
+		if (offer) showOffer(ctx, undefined);
+		hold.settled(ctx, `exo: ${action.summary} (suggestion in editor)`);
+		ctx.ui.setEditorText(action.text);
+		ctx.ui.notify(`${action.summary}. Suggested follow-up is in the editor: Enter sends it.`, "info");
+		return { used: true };
+	}
+
 	/** Carries out a settle action. `used` is false when the action was dropped instead. */
 	function apply(
 		moduleId: string,
@@ -889,21 +1034,8 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 		ctx: ExtensionContext,
 	): { readonly used: boolean; readonly offered?: boolean; readonly result?: BoundaryResult } {
 		switch (action.kind) {
-			case "suggest": {
-				// Nothing can show it: the module is not told it was used.
-				if (!ctx.hasUI) return { used: false };
-				suggested = action.text;
-				// The user is typing: their draft stays, and the follow-up waits beside it until they add it.
-				if (ctx.ui.getEditorText().trim() !== "") {
-					showOffer(ctx, { id: moduleId, action });
-					hold.settled(ctx, `exo: ${action.summary} (${OFFER_SHORTCUT} adds it to your message)`);
-					return { used: true, offered: true };
-				}
-				hold.settled(ctx, `exo: ${action.summary} (suggestion in editor)`);
-				ctx.ui.setEditorText(action.text);
-				ctx.ui.notify(`${action.summary}. Suggested follow-up is in the editor: Enter sends it.`, "info");
-				return { used: true };
-			}
+			case "suggest":
+				return suggest(moduleId, action, ctx);
 			case "continue": {
 				if (continuations >= maxContinuations) {
 					const refusal = `${action.summary}: not continuing, the agent was continued ${continuations} times in a row`;

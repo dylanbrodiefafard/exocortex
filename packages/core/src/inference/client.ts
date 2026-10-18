@@ -53,13 +53,32 @@ export interface ChatResponse {
 	readonly usage: ChatUsage | null;
 }
 
+/**
+ * When an engine counts as stopped (D-098): no first token within `firstTokenMs` plus the time a
+ * slow prefill of the prompt takes, or no token for `stallMs` after that. A slow reply is not
+ * stopped; only one that stops arriving is.
+ */
+export interface Liveness {
+	readonly firstTokenMs: number;
+	readonly stallMs: number;
+}
+
+export interface ChatOptions {
+	readonly liveness?: Liveness;
+	/** Called as the reply arrives, with the characters so far (reasoning included). */
+	readonly onProgress?: (chars: number) => void;
+}
+
 export interface InferenceClient {
-	/** One non-streaming chat completion. Rejects with {@link InferenceError}. */
-	chat(request: ChatRequest, signal?: AbortSignal): Promise<ChatResponse>;
+	/**
+	 * One chat completion, streamed and returned whole. Rejects with {@link InferenceError}; kind
+	 * `stalled` when the engine stopped answering by `options.liveness`.
+	 */
+	chat(request: ChatRequest, signal?: AbortSignal, options?: ChatOptions): Promise<ChatResponse>;
 }
 
 export class InferenceError extends Error {
-	readonly kind: "http" | "network" | "aborted" | "bad_response";
+	readonly kind: "http" | "network" | "aborted" | "bad_response" | "stalled";
 	readonly status: number | undefined;
 
 	constructor(kind: InferenceError["kind"], message: string, status?: number) {
@@ -76,7 +95,9 @@ export function buildChatBody(target: EngineTarget, request: ChatRequest): JsonO
 	return {
 		...(base ?? { model: target.model, messages: request.messages }),
 		max_tokens: request.maxTokens,
-		stream: false,
+		// Streamed so a stalled engine can be told from a slow one (D-098); usage comes in the last chunk.
+		stream: true,
+		stream_options: { include_usage: true },
 		...(request.temperature === undefined ? {} : { temperature: request.temperature }),
 		...(request.thinking === undefined || base ? {} : { chat_template_kwargs: { enable_thinking: request.thinking } }),
 		...(request.priority !== undefined && target.features.priority ? { priority: request.priority } : {}),
@@ -121,33 +142,205 @@ function forkBase(target: EngineTarget, request: ChatRequest, fork: ForkPrefix):
 /** Client for any OpenAI-compatible `/chat/completions` endpoint. */
 export function createOpenAIClient(target: EngineTarget, fetchImpl: typeof fetch = fetch): InferenceClient {
 	return {
-		async chat(request, signal) {
-			let response: Response;
+		async chat(request, signal, options = {}) {
+			const body = JSON.stringify(buildChatBody(target, request));
+			const watch = watchLiveness(options.liveness, body.length, signal);
 			try {
-				response = await fetchImpl(`${target.baseUrl}/chat/completions`, {
-					method: "POST",
-					headers: {
-						"content-type": "application/json",
-						...(target.apiKey ? { authorization: `Bearer ${target.apiKey}` } : {}),
-					},
-					body: JSON.stringify(buildChatBody(target, request)),
-					...(signal ? { signal } : {}),
-				});
-			} catch (error) {
-				if (signal?.aborted) throw new InferenceError("aborted", "request aborted");
-				throw new InferenceError("network", String(error));
+				let response: Response;
+				try {
+					response = await fetchImpl(`${target.baseUrl}/chat/completions`, {
+						method: "POST",
+						headers: {
+							"content-type": "application/json",
+							...(target.apiKey ? { authorization: `Bearer ${target.apiKey}` } : {}),
+						},
+						body,
+						signal: watch.signal,
+					});
+				} catch (error) {
+					throw watch.failure(error);
+				}
+				if (!response.ok || !(response.headers.get("content-type") ?? "").includes("text/event-stream")) {
+					// An error, or a server that answers whole: nothing arrives in pieces to watch.
+					watch.pause();
+					const text = await response.text().catch((error: unknown) => {
+						throw watch.failure(error);
+					});
+					if (!response.ok) {
+						throw new InferenceError("http", `HTTP ${response.status}: ${text.slice(0, 500)}`, response.status);
+					}
+					return parseChatResponse(text);
+				}
+				return await readStream(response, watch, options.onProgress);
+			} finally {
+				watch.stop();
 			}
-			const text = await response.text().catch((error: unknown) => {
-				throw signal?.aborted
-					? new InferenceError("aborted", "request aborted")
-					: new InferenceError("network", String(error));
-			});
-			if (!response.ok) {
-				throw new InferenceError("http", `HTTP ${response.status}: ${text.slice(0, 500)}`, response.status);
-			}
-			return parseChatResponse(text);
 		},
 	};
+}
+
+/**
+ * Prompt tokens per second a prefill is assumed to reach at the least: it widens the first-token
+ * window for long prompts so a slow prefill is not taken for a stopped engine. Loose on purpose:
+ * this tells a dead engine from a slow one, nothing finer.
+ */
+const MIN_PREFILL_TOKENS_PER_S = 500;
+/** Characters of request body per prompt token, roughly. */
+const CHARS_PER_TOKEN = 4;
+
+interface Watch {
+	readonly signal: AbortSignal;
+	/** Something arrived that the engine generated: the stall window starts over. */
+	alive(): void;
+	/** No more liveness to watch: the reply is being read whole. The caller's signal still aborts it. */
+	pause(): void;
+	stop(): void;
+	/** Ends the request: the engine stops generating for it. */
+	abort(): void;
+	/** The error to throw for a failed read: stalled, aborted by the caller, or the network's. */
+	failure(error: unknown): InferenceError;
+}
+
+function watchLiveness(liveness: Liveness | undefined, bodyChars: number, signal: AbortSignal | undefined): Watch {
+	const inner = new AbortController();
+	const onAbort = () => inner.abort();
+	if (signal?.aborted) inner.abort();
+	else signal?.addEventListener("abort", onAbort, { once: true });
+	let stalled: string | undefined;
+	let timer: NodeJS.Timeout | undefined;
+	const arm = (ms: number, why: string) => {
+		clearTimeout(timer);
+		if (!liveness) return;
+		timer = setTimeout(() => {
+			stalled = why;
+			inner.abort();
+		}, ms);
+		timer.unref?.();
+	};
+	if (liveness) {
+		const prefillMs = Math.round((bodyChars / CHARS_PER_TOKEN / MIN_PREFILL_TOKENS_PER_S) * 1000);
+		const firstMs = liveness.firstTokenMs + prefillMs;
+		arm(firstMs, `no token within ${firstMs} ms`);
+	}
+	return {
+		signal: inner.signal,
+		alive: () => liveness && arm(liveness.stallMs, `no token for ${liveness.stallMs} ms`),
+		pause: () => clearTimeout(timer),
+		stop: () => {
+			clearTimeout(timer);
+			signal?.removeEventListener("abort", onAbort);
+		},
+		abort: () => inner.abort(),
+		failure: (error) => {
+			if (stalled !== undefined) return new InferenceError("stalled", `engine stopped answering: ${stalled}`);
+			if (signal?.aborted) return new InferenceError("aborted", "request aborted");
+			return error instanceof InferenceError ? error : new InferenceError("network", String(error));
+		},
+	};
+}
+
+/**
+ * A server-sent event stream of chat completion chunks, put together: the reply's content, its
+ * finish reason, and the usage the last chunk carries. Reasoning deltas count as the engine being
+ * alive but are not part of the text, as in a whole reply.
+ */
+async function readStream(
+	response: Response,
+	watch: Watch,
+	onProgress: ((chars: number) => void) | undefined,
+): Promise<ChatResponse> {
+	const reader = response.body?.getReader();
+	if (!reader) throw new InferenceError("bad_response", "streamed response has no body");
+	const decoder = new TextDecoder();
+	const reply = { text: "", chars: 0, finishReason: null as string | null, usage: null as ChatUsage | null, chunks: 0 };
+	/** One line of the stream; true once it said the stream is done. */
+	const take = (raw: string): boolean => {
+		const line = raw.replace(/\r$/, "");
+		if (!line.startsWith("data:")) return false;
+		const data = line.slice(5).trim();
+		if (data === "[DONE]") return true;
+		if (data !== "" && applyChunk(reply, data)) {
+			watch.alive();
+			onProgress?.(reply.chars);
+		}
+		return false;
+	};
+	let buffer = "";
+	let complete = false;
+	try {
+		while (!complete) {
+			let read: Awaited<ReturnType<typeof reader.read>>;
+			try {
+				read = await reader.read();
+			} catch (error) {
+				throw watch.failure(error);
+			}
+			if (read.done) {
+				// A last line with no newline after it, and what the decoder still holds.
+				buffer += decoder.decode();
+				if (buffer !== "") take(buffer);
+				complete = true;
+				break;
+			}
+			buffer += decoder.decode(read.value, { stream: true });
+			let end = buffer.indexOf("\n");
+			while (end !== -1 && !complete) {
+				complete = take(buffer.slice(0, end));
+				buffer = buffer.slice(end + 1);
+				end = buffer.indexOf("\n");
+			}
+		}
+	} finally {
+		// Ended early (a bad chunk, an error event, a throwing callback) or at `[DONE]` with the
+		// connection still open: close it, so the engine stops generating for a call that is over.
+		watch.abort();
+		reader.cancel().catch(() => undefined);
+	}
+	if (reply.chunks === 0) throw new InferenceError("bad_response", "stream carried no completion chunks");
+	return { text: reply.text, finishReason: reply.finishReason, usage: reply.usage };
+}
+
+/** Adds one chunk to the reply; true when it carried something the engine generated. */
+function applyChunk(
+	reply: { text: string; chars: number; finishReason: string | null; usage: ChatUsage | null; chunks: number },
+	data: string,
+): boolean {
+	let json: Readonly<Record<string, unknown>>;
+	try {
+		json = record(JSON.parse(data));
+	} catch {
+		throw new InferenceError("bad_response", `stream chunk is not JSON: ${data.slice(0, 200)}`);
+	}
+	const error = record(json["error"]);
+	if (Object.keys(error).length > 0) {
+		throw new InferenceError(
+			"http",
+			`stream error: ${String(error["message"] ?? JSON.stringify(error)).slice(0, 500)}`,
+		);
+	}
+	reply.chunks += 1;
+	const usage = usageOf(json["usage"]);
+	if (usage) reply.usage = usage;
+	const choice = record(array(json["choices"])[0]);
+	const delta = record(choice["delta"]);
+	const content = typeof delta["content"] === "string" ? delta["content"] : "";
+	const reasoning = [delta["reasoning_content"], delta["reasoning"]].find((r) => typeof r === "string") as
+		| string
+		| undefined;
+	reply.text += content;
+	reply.chars += content.length + (reasoning?.length ?? 0);
+	if (typeof choice["finish_reason"] === "string") reply.finishReason = choice["finish_reason"];
+	return content !== "" || (reasoning ?? "") !== "" || typeof choice["finish_reason"] === "string";
+}
+
+function usageOf(value: unknown): ChatUsage | null {
+	const usage = record(value);
+	const promptTokens = usage["prompt_tokens"];
+	const completionTokens = usage["completion_tokens"];
+	const cached = record(usage["prompt_tokens_details"])["cached_tokens"];
+	return typeof promptTokens === "number" && typeof completionTokens === "number"
+		? { promptTokens, completionTokens, cachedTokens: typeof cached === "number" ? cached : null }
+		: null;
 }
 
 function parseChatResponse(body: string): ChatResponse {
@@ -163,17 +356,10 @@ function parseChatResponse(body: string): ChatResponse {
 	if (typeof content !== "string") {
 		throw new InferenceError("bad_response", "response has no choices[0].message.content string");
 	}
-	const usage = record(record(json)["usage"]);
-	const promptTokens = usage["prompt_tokens"];
-	const completionTokens = usage["completion_tokens"];
-	const cached = record(usage["prompt_tokens_details"])["cached_tokens"];
 	return {
 		text: content,
 		finishReason: typeof choice["finish_reason"] === "string" ? choice["finish_reason"] : null,
-		usage:
-			typeof promptTokens === "number" && typeof completionTokens === "number"
-				? { promptTokens, completionTokens, cachedTokens: typeof cached === "number" ? cached : null }
-				: null,
+		usage: usageOf(record(json)["usage"]),
 	};
 }
 

@@ -1,4 +1,4 @@
-import type { CompactionRequest, ExoModule, JsonValue, ModuleContext } from "@exocortex/core";
+import type { CompactionRequest, ExoModule, JsonValue, ModuleContext, SettleInfo } from "@exocortex/core";
 import {
 	boundRequests,
 	type CommandRecord,
@@ -12,7 +12,7 @@ import {
 	type StoredFacts,
 	strings,
 } from "./facts.ts";
-import { type Narrative, UNVERIFIED_NOTE, writeNarrative } from "./narrative.ts";
+import { type EarlySummary, type Narrative, UNVERIFIED_NOTE, writeEarlySummary, writeNarrative } from "./narrative.ts";
 import { type FactsView, factsFromSummary, MAX_FILES, renderSummary, type Shown } from "./render.ts";
 import { type CompactionSettings, parseSettings } from "./settings.ts";
 import {
@@ -28,6 +28,8 @@ export const COMPACTION_ID = "compaction";
 
 /** Texts an extension sent as the user that are remembered, to leave them out of the requests. */
 const MAX_EXTENSION_TEXTS = 50;
+/** An early summary is written again once the context grew by this share of where pi compacts (D-098). */
+const EARLY_REFRESH_SHARE = 0.1;
 /** A longer one is not remembered, and so is listed with the requests. */
 const MAX_EXTENSION_TEXT_CHARS = 20_000;
 const BEFORE_SESSION = "with changes from before this session";
@@ -127,8 +129,46 @@ export function createCompaction(raw: Readonly<Record<string, unknown>>, ctx: Mo
 		clock = Math.max(clock, previous.clock);
 	};
 
+	/** The summary written before compaction was due (D-098), and whether one is being written. */
+	let early: EarlySummary | undefined;
+	let writingEarly = false;
+	/** Compactions seen: an early summary begun before one is of a context that is gone. */
+	let compactionsSeen = 0;
+
+	/**
+	 * Writes the summary early once the context is past `earlySummaryAt` of where pi compacts, and
+	 * again each time it grows by a tenth of that since the last one. It runs from a fork, at
+	 * background priority, while the agent is idle; nothing waits for it.
+	 */
+	const writeEarly = (context: SettleInfo["context"]): void => {
+		if (!settings.earlySummary || !context || writingEarly) return;
+		const { tokens, compactAt } = context;
+		if (tokens < settings.earlySummaryAt * compactAt) return;
+		if (early && tokens - early.tokens < EARLY_REFRESH_SHARE * compactAt) return;
+		writingEarly = true;
+		const at = Date.now();
+		const asOf = compactionsSeen;
+		ctx
+			.forkPrefix()
+			.then((fork) => (fork ? writeEarlySummary(ctx, settings, fork) : undefined))
+			.then((written) => {
+				if (!written || asOf !== compactionsSeen) return;
+				early = { ...written, at, tokens };
+				ctx.record({ kind: "exo.compaction", data: { action: "early_summary", tokens, compactAt } });
+			})
+			.catch((error: unknown) => ctx.log(`early summary failed: ${String(error)}`))
+			.finally(() => {
+				writingEarly = false;
+			});
+	};
+
 	return {
 		id: COMPACTION_ID,
+
+		async onSettle(info) {
+			writeEarly(info.context);
+			return undefined;
+		},
 
 		onUserTurn(turn) {
 			// What an extension sent is not the user's request. An accepted suggestion is part of the
@@ -158,6 +198,11 @@ export function createCompaction(raw: Readonly<Record<string, unknown>>, ctx: Mo
 		},
 
 		async compact(request, signal) {
+			// The summary does not depend on the workspace: it is written while git is read.
+			const writing = writeNarrative(ctx, settings, request, signal, early).catch((error: unknown) => {
+				ctx.log(`summary failed: ${String(error)}`);
+				return undefined;
+			});
 			const [workspace] = await Promise.all([readWorkspace(ctx), started]);
 			const previous = previousFacts(request);
 			if (previous) absorb(previous);
@@ -186,7 +231,7 @@ export function createCompaction(raw: Readonly<Record<string, unknown>>, ctx: Mo
 			};
 			const view: FactsView = { ...requests, modified: files.shown, read, commands, lastEditAt };
 
-			const narrative = await writeNarrative(ctx, settings, request, signal);
+			const narrative = await writing;
 			if (!narrative && settings.fallback === "harness") return undefined;
 			ctx.record({
 				kind: "exo.compaction",
@@ -198,6 +243,7 @@ export function createCompaction(raw: Readonly<Record<string, unknown>>, ctx: Mo
 					userMessages: requests.requests.length + requests.requestsOmitted,
 					commands: commands.filter((c) => c.outcome !== "unlisted").length,
 					unverified: narrative?.unverified.length ?? 0,
+					early: narrative?.early ?? "none",
 				},
 			});
 			return {
@@ -213,6 +259,9 @@ export function createCompaction(raw: Readonly<Record<string, unknown>>, ctx: Mo
 		},
 
 		onCompacted() {
+			// An early summary was of the context before this compaction, as is one still being written.
+			early = undefined;
+			compactionsSeen += 1;
 			// The harness compacted, with this module's summary or its own: either way the span's
 			// requests are no longer in the context.
 			if (!pending) return;

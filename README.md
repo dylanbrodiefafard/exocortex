@@ -67,13 +67,15 @@ When the agent stops, the supervisor compares what you asked for (your message, 
 
 If something is missing, it puts a follow-up listing it in your editor. Press Enter to send it, or edit it first. `/exo supervisor auto` lets it send the follow-up itself, at most 3 times per task.
 
+The check runs in the background, so you have the session back as soon as the agent stops. The status line shows it working (`exo: checking the work…`), with no time limit: your test suite takes as long as it takes. Escape or a new message stops it.
+
 **Review.** With `"review": true`, once the supervisor finds the task complete it also reviews the changes for bugs, the way Cursor's Bugbot and Claude Code's code review do:
 - Five independent passes read the change, each with the files in a different order. Each changed function is shown whole, along with the other places that use a function whose signature changed.
 - A finding counts only if it quotes a line the change added and at least two passes report it.
 - A separate call then tries to disprove each one. Only findings it can't disprove are kept, at most 3, most severe first.
 - What survives goes in your editor, with room for the agent to say a finding is not a bug.
 
-The review runs in the background with no time limit, so you get the session back as soon as the verdict is in. The status line shows it running. Escape or sending a new message stops it, since the code it read is about to change.
+The review runs right after the verdict, in the same background job, with no time limit. Escape or sending a new message stops it, since the code it read is about to change.
 
 If the review finishes while you're typing, your draft is left alone. A line above the editor says what was found, and `alt+r` (or `/exo add`) adds the findings below your message. If you send without them, they're dropped. The same applies to any follow-up that arrives while you're typing.
 
@@ -89,7 +91,7 @@ Makes pi's own `read`, `edit` and `write` more useful to the model. It adds no t
   - the text matches several places (it lists each one);
   - the file doesn't exist (it suggests paths that do).
 - **Reads.** Read output gets line numbers (`cat -n` style). When a read stops before the end of a long file, it lists the functions, types and headings in the rest of it, with their line numbers.
-- **Checks after edits.** After an edit or write, it runs a quick check on the file and shows only the errors that weren't there before the change. Syntax checks for Python, Go, shell and JavaScript work with nothing to set up. Add your own in `checks`, for example `cargo check` for `*.rs`. A check that covers the whole project only reports errors that are new, wherever they are.
+- **Checks after edits.** After an edit or write, it runs a quick check on the file and shows only the errors that weren't there before the change. Syntax checks for Python, Go, shell and JavaScript work with nothing to set up. Add your own in `checks`, for example `cargo check` for `*.rs`. A check that covers the whole project only reports errors that are new, wherever they are. The edit's result waits up to 4 s for its check (`checkHoldMs`). A slower check, like a full `cargo check`, keeps running, and its new errors reach the agent before its next step.
 
 Everything it shows is quoted from the file or the check's output. When it has nothing exact to say, it says nothing.
 
@@ -106,7 +108,7 @@ Shortens long build and test output before the model sees it. It first hides wha
 
 On a first failure, triage only moves a buried first error to the top. It steps in when a failure reports the same errors again:
 
-- It says so, names the edited files that did not change it, and adds a two-sentence hint from a sidecar that has read the code the errors point at and those edits. A hint that names files or symbols found nowhere in its evidence or the repo is dropped.
+- It says so, names the edited files that did not change it, and adds a two-sentence hint from a sidecar that has read the code the errors point at and those edits. A hint that names files or symbols found nowhere in its evidence or the repo is dropped. A hint that takes longer than the notice waits for (6 s) still reaches the agent before its next step, unless the command has run again by then.
 - Fewer failing tests or a different message counts as progress, not a repeat. A test run that failed behind `| tail` still counts as a failure.
 - Once the command passes, the failure is forgotten: if it breaks again later, that is a first failure. A failure that went away and came back without a pass is described as that, with no claim about the edits.
 - Counting carries on through your own messages ("try again") and through `/reload`.
@@ -117,6 +119,8 @@ On a first failure, triage only moves a buried first error to the top. It steps 
 ### Compaction
 
 When pi compacts the conversation, a sidecar writes a structured handover (objective, important details, work state, next move, relevant files) and merges the previous summary into it on later compactions. Below it, the summary lists your requests verbatim, the files changed, which commands last failed (with their first error) and which succeeded. If the sidecar fails or ignores the format, pi compacts as usual.
+
+There's no time limit on the summary; the status line shows it growing, and pi's own abort stops it. With `"earlySummary": true`, the summary is written in the background once the context is 70% of the way to where pi compacts, while the agent is idle. When compaction comes, only what happened since is added.
 
 ### Memory
 

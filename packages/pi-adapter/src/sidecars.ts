@@ -25,22 +25,28 @@ export interface SidecarOptions {
 const API_KEY_LOOKUP_TIMEOUT_MS = 2_000;
 
 /**
- * How long a session's end waits for `background` sidecar calls (memory writing a card's lesson)
- * before the pool closes and cancels them (D-086). Pi awaits `session_shutdown` handlers with no
- * limit of its own, and on quit it has already put the terminal back (PI_API_NOTES §16), so this
- * is time the user spends looking at a terminal that has not returned. Two seconds is about one
- * short call on a local engine and still reads as "closing"; the wait ends the moment nothing is
- * left, and most sessions end with nothing running.
+ * How long a session's end may wait for `background` sidecar calls (memory writing a card's
+ * lesson) before the pool closes and cancels them (D-086). The wait ends when they are done, and a
+ * call whose engine stopped answering ends by itself (`pool.stallMs`, D-098), so this is a guard
+ * against a bug, not a guess at how long a call takes. Pi awaits `session_shutdown` with no limit
+ * of its own and has already put the terminal back (PI_API_NOTES §16): a wait says so on stderr,
+ * and Ctrl+C then quits at once (PI_API_NOTES §16).
  */
-export const DEFAULT_SHUTDOWN_DRAIN_MS = 2_000;
-/** A mistyped setting cannot hold a quit for longer than this. */
 export const MAX_SHUTDOWN_DRAIN_MS = 300_000;
-/** Overrides {@link DEFAULT_SHUTDOWN_DRAIN_MS}, in ms; `0` turns the wait off. The eval asks for longer. */
+/**
+ * The wait when the session is replaced (`/new`, `/resume`, `/fork`, `/reload`), not quit: the user
+ * is waiting for the next session in a TUI that is still running, so the work in flight gets about
+ * one short call's time (D-086) and what is left is cancelled.
+ */
+export const SWITCH_DRAIN_MS = 2_000;
+/** A wait this long is shown on stderr: the user is looking at a terminal that has not returned. */
+const DRAIN_NOTICE_AFTER_MS = 500;
+/** Caps the wait below {@link MAX_SHUTDOWN_DRAIN_MS}, in ms; `0` turns the wait off. The eval asks for longer. */
 const SHUTDOWN_DRAIN_ENV = "EXO_SHUTDOWN_DRAIN_MS";
 
 export function shutdownDrainMs(env: Readonly<Record<string, string | undefined>>): number {
 	const value = (env[SHUTDOWN_DRAIN_ENV] ?? "").trim();
-	return /^\d+$/.test(value) ? Math.min(Number(value), MAX_SHUTDOWN_DRAIN_MS) : DEFAULT_SHUTDOWN_DRAIN_MS;
+	return /^\d+$/.test(value) ? Math.min(Number(value), MAX_SHUTDOWN_DRAIN_MS) : MAX_SHUTDOWN_DRAIN_MS;
 }
 
 /**
@@ -146,13 +152,13 @@ export function registerSidecars(pi: ExtensionAPI, options: SidecarOptions): voi
 	);
 	pi.on(
 		"session_shutdown",
-		guarded("sidecars.session_shutdown", async () => {
+		guarded("sidecars.session_shutdown", async (event) => {
 			// From here a rebuild still waiting on a key lookup builds nothing.
 			generation += 1;
 			mainActive = false;
 			// Whatever goes wrong in either step, the pool is closed: none outlives its session.
 			try {
-				await drain(runtime.pool);
+				await drain(runtime.pool, event.reason === "quit");
 			} catch (error) {
 				onError("sidecars.drain", error);
 			}
@@ -173,11 +179,22 @@ export function registerSidecars(pi: ExtensionAPI, options: SidecarOptions): voi
 	 * stays in `runtime` meanwhile, so a module can still submit the call its result leads to. What
 	 * happened goes to the trace when there was anything to wait for: `remaining` calls were cut off.
 	 */
-	async function drain(pool: SidecarPool | undefined): Promise<void> {
-		const limitMs = shutdownDrainMs(options.env);
+	async function drain(pool: SidecarPool | undefined, quitting: boolean): Promise<void> {
+		const configured = shutdownDrainMs(options.env);
+		const limitMs = quitting ? configured : Math.min(configured, SWITCH_DRAIN_MS);
 		if (!pool || limitMs === 0) return;
 		const started = performance.now();
-		const { settled, remaining } = await pool.drain(limitMs);
+		const notice = setTimeout(() => {
+			// Only on quit is the terminal put back first; while the TUI runs, a line on stderr would land in it.
+			if (!quitting) return;
+			try {
+				process.stderr.write("exocortex: finishing background work (memory lessons); Ctrl+C quits now\n");
+			} catch {
+				// Nowhere to say it.
+			}
+		}, DRAIN_NOTICE_AFTER_MS);
+		notice.unref();
+		const { settled, remaining } = await pool.drain(limitMs).finally(() => clearTimeout(notice));
 		if (settled + remaining === 0) return;
 		runtime.record({
 			kind: "exo.action",

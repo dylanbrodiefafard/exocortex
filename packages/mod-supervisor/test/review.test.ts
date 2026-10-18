@@ -146,6 +146,8 @@ function context(
 			jobs.push({ label, stop, done: job(stop.signal) });
 			return true;
 		},
+		deliverLate: () => false,
+		forkPrefix: async () => undefined,
 	};
 }
 
@@ -170,12 +172,9 @@ describe("review after a complete verdict (D-097)", () => {
 		);
 		sup.onUserTurn?.(REQUEST);
 		writeFileSync(join(repo, "app.py"), CHANGED);
-		expect(await sup.onSettle?.(DONE, signal)).toEqual({
-			kind: "notify",
-			summary: "supervisor: complete · reviewing the changes",
-			level: "info",
-		});
-		expect(jobs.map((j) => j.label)).toEqual(["reviewing the changes"]);
+		// The verdict and the review run in one background job; the hook returns at once (D-098).
+		expect(await sup.onSettle?.(DONE, signal)).toBeUndefined();
+		expect(jobs.map((j) => j.label)).toEqual(["checking the work"]);
 
 		const action = await lastJob();
 		expect(action).toMatchObject({
@@ -215,7 +214,7 @@ describe("review after a complete verdict (D-097)", () => {
 		await sup.onSettle?.(DONE, signal);
 		expect(await lastJob()).toEqual({
 			kind: "notify",
-			summary: "supervisor: review found nothing that held up (1 proposed by 3/3 passes)",
+			summary: "supervisor: complete · review found nothing that held up (1 proposed by 3/3 passes)",
 			level: "info",
 		});
 		expect(reviews()[0]?.["checked"]).toEqual([
@@ -223,25 +222,28 @@ describe("review after a complete verdict (D-097)", () => {
 		]);
 	});
 
-	it("does not start when the verdict is not complete", async () => {
+	it("does not review when the verdict is not complete", async () => {
 		const sup = createSupervisor({ review: true }, context({ verdict: INCOMPLETE, passes: [] }));
 		sup.onUserTurn?.(REQUEST);
 		writeFileSync(join(repo, "app.py"), CHANGED);
-		expect(textOf(await sup.onSettle?.(DONE, signal))).toContain("Add the comma");
-		expect(jobs).toEqual([]);
+		await sup.onSettle?.(DONE, signal);
+		expect(textOf(await lastJob())).toContain("Add the comma");
+		expect(findPrompts()).toEqual([]);
 	});
 
 	it("reviews a task once, and not when the agent changed nothing", async () => {
 		const sup = createSupervisor({ review: true, reviewPasses: 2 }, context({ verdict: COMPLETE, passes: [] }));
 		sup.onUserTurn?.({ text: "Explain greet.", origin: "user" });
-		expect(await sup.onSettle?.(DONE, signal)).toMatchObject({ summary: "supervisor: complete" });
-		expect(jobs).toEqual([]);
+		await sup.onSettle?.(DONE, signal);
+		expect(await lastJob()).toMatchObject({ summary: "supervisor: complete" });
+		expect(findPrompts()).toEqual([]);
 
 		writeFileSync(join(repo, "app.py"), CHANGED);
 		await sup.onSettle?.(DONE, signal);
 		await lastJob();
-		expect(await sup.onSettle?.(DONE, signal)).toMatchObject({ summary: "supervisor: complete" });
-		expect(jobs).toHaveLength(1);
+		await sup.onSettle?.(DONE, signal);
+		expect(await lastJob()).toMatchObject({ summary: "supervisor: complete" });
+		expect(findPrompts()).toHaveLength(2);
 		expect(reviews()).toHaveLength(1);
 	});
 
@@ -284,6 +286,26 @@ describe("review after a complete verdict (D-097)", () => {
 		const [appSecond, utilSecond] = order(second);
 		expect(Math.sign((appFirst ?? 0) - (utilFirst ?? 0))).not.toBe(Math.sign((appSecond ?? 0) - (utilSecond ?? 0)));
 		expect(first).toContain("main.py:2:print(shout('hi'))");
+	});
+
+	it("changes nothing in the task when stopped after its findings were checked", async () => {
+		const passes = [[finding("strip() on None crashes")], [finding("strip() on None crashes")]];
+		const base = context({ verdict: COMPLETE, passes });
+		const ctx: ModuleContext = {
+			...base,
+			// The user presses Escape while the review reads the workspace's state for its follow-up.
+			runCommand: (command, options) => {
+				if (checkPrompts().length > 0 && command.startsWith("git")) jobs.at(-1)?.stop.abort();
+				return base.runCommand(command, options);
+			},
+		};
+		const sup = createSupervisor({ review: true, reviewPasses: 2, mode: "auto" }, ctx);
+		sup.onUserTurn?.(REQUEST);
+		writeFileSync(join(repo, "app.py"), CHANGED);
+		await sup.onSettle?.(DONE, signal);
+		expect(await lastJob()).toBeUndefined();
+		expect(sup.status?.()).toContain("0/3 continuations");
+		expect(reviews()).toEqual([]);
 	});
 
 	it("continues the agent in auto mode, within the task's follow-up limit", async () => {

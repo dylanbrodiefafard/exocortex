@@ -12,6 +12,10 @@ import {
 } from "@exocortex/testkit";
 import { afterEach, describe, expect, it } from "vitest";
 
+/** The main agent's requests open with a system prompt; a sidecar's here do not (both stream since D-098). */
+const isMain = (body: unknown): boolean =>
+	["system", "developer"].includes(String((body as { messages?: { role?: unknown }[] }).messages?.[0]?.role));
+
 const REPO = join(import.meta.dirname, "..", "..", "..");
 const PI_BIN = join(REPO, "node_modules", ".bin", "pi");
 const ADAPTER_DIR = join(REPO, "packages", "pi-adapter");
@@ -229,11 +233,12 @@ describe("pi CLI with the Exocortex extension", { timeout: 30_000 }, () => {
 		const run = await runPi([{ kind: "text", text: "pong", cachedTokens: 4 }], {}, "/exo ping");
 		expect(run.code).toBe(0);
 		expect(run.stderr).toMatch(/Exocortex sidecar OK in \d+ ms \(\d+ prompt tokens, 4 cached\): pong/);
-		// The only request is the sidecar's: non-streaming, thinking off, to the main model's id.
+		// The only request is the sidecar's: streamed with usage, thinking off, to the main model's id.
 		expect(server?.requests).toEqual([
 			expect.objectContaining({
 				model: "fake-model",
-				stream: false,
+				stream: true,
+				stream_options: { include_usage: true },
 				max_tokens: 16,
 				chat_template_kwargs: { enable_thinking: false },
 			}),
@@ -280,7 +285,7 @@ describe("pi CLI with the Exocortex extension", { timeout: 30_000 }, () => {
 			server: {
 				respond: (body) => {
 					const request = body as { stream?: boolean; messages: { content: unknown }[] };
-					if (request.stream) return mainReplies[main++] ?? { kind: "text", text: "(extra)" };
+					if (isMain(request)) return mainReplies[main++] ?? { kind: "text", text: "(extra)" };
 					const isVerdict = JSON.stringify(request.messages).includes("acceptance checklist and evidence");
 					const reply = isVerdict ? verdicts[verdict++] : ledger;
 					return { kind: "text", text: JSON.stringify(reply ?? {}) };
@@ -293,7 +298,7 @@ describe("pi CLI with the Exocortex extension", { timeout: 30_000 }, () => {
 		expect(verdict).toBe(2);
 
 		// The continuation reached the main model as the latest user-role message.
-		const mainRequests = (server?.requests ?? []).filter((r) => (r as { stream?: boolean }).stream);
+		const mainRequests = (server?.requests ?? []).filter(isMain);
 		const lastMessages = (mainRequests[1] as { messages: { role: string; content: unknown }[] }).messages;
 		expect(lastMessages.at(-1)?.role).toBe("user");
 		expect(JSON.stringify(lastMessages.at(-1)?.content)).toContain("1. Add a README");
@@ -337,7 +342,7 @@ describe("pi CLI with the Exocortex extension", { timeout: 30_000 }, () => {
 				server: {
 					// The sidecar picks which preferences fit the prompt before the agent starts.
 					respond: (body) =>
-						(body as { stream?: boolean }).stream
+						isMain(body)
 							? (ONE_TOOL_CALL[main++] ?? { kind: "text", text: "(extra)" })
 							: { kind: "text", text: JSON.stringify({ apply: [1] }) },
 				},
@@ -345,9 +350,9 @@ describe("pi CLI with the Exocortex extension", { timeout: 30_000 }, () => {
 			expect(run.code).toBe(0);
 			type Request = { stream?: boolean; messages: { role: string; content: unknown }[] };
 			const requests = (server?.requests ?? []) as Request[];
-			expect(requests[0]?.stream).toBeFalsy();
+			expect(isMain(requests[0])).toBe(false);
 			expect(JSON.stringify(requests[0]?.messages)).toContain("1. Write the failing test before the implementation.");
-			const [first, second] = requests.filter((r) => r.stream);
+			const [first, second] = requests.filter(isMain);
 			const roles = first?.messages.map((m) => m.role) ?? [];
 			expect(roles.slice(-2)).toEqual(["user", "user"]);
 			expect(JSON.stringify(first?.messages.at(-2)?.content)).toContain("Add a function that parses durations");

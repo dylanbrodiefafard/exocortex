@@ -85,7 +85,7 @@ export function createLearner({ ctx, settings, store, scope }: MemoryDeps): Lear
 
 	async function learn(item: Waiting): Promise<void> {
 		const { episode } = item;
-		const repo = await scope;
+		const repo = await scope();
 		if (!repo.known) return;
 		const refusal = refusalOf(episode);
 		if (refusal) return skipped(episode, refusal);
@@ -169,7 +169,7 @@ export function createLearner({ ctx, settings, store, scope }: MemoryDeps): Lear
 		const result = await pool.run({
 			module: MEMORY_ID,
 			priority: "background",
-			timeoutMs: settings.distillTimeoutMs,
+			// No deadline: nobody waits for a lesson. It ends when written or the engine stops answering (D-098).
 			schema: LessonSchema,
 			schemaName: "lesson",
 			request: {

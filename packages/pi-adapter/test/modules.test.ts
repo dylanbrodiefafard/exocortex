@@ -549,7 +549,91 @@ function compactEvent(signal = new AbortController().signal) {
 	};
 }
 
+describe("one rewrite budget per batch of tool results (D-098)", () => {
+	it("shares the budget among a batch's results, and gives the next turn's batch its own", async () => {
+		const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+		const { h } = setup(
+			{
+				slow: rewriter("slow", async (draft, signal) => {
+					await sleep(250);
+					return signal.aborted ? undefined : { text: `${draft.current} [seen]`, note: "seen" };
+				}),
+			},
+			{ slow: { enabled: true } },
+			{ budgetsMs: { rewrite: 400 } },
+		);
+		await h.pi.emit("session_start");
+		const text = (result: unknown) => JSON.stringify(result);
+		const first = await h.pi.emit("tool_result", bashResult("one", { toolCallId: "a" }));
+		const second = await h.pi.emit("tool_result", bashResult("two", { toolCallId: "b" }));
+		expect(text(first)).toContain("[seen]");
+		// 250 ms of the batch's 400 are gone: the second result's rewrite is cut short.
+		expect(second).toBeUndefined();
+		await h.pi.emit("turn_end", {});
+		const next = await h.pi.emit("tool_result", bashResult("three", { toolCallId: "c" }));
+		expect(text(next)).toContain("[seen]");
+	});
+
+	it("does not charge the batch for a result that came while its other tools still ran", async () => {
+		const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+		const { h } = setup(
+			{ quick: rewriter("quick", async (draft) => ({ text: `${draft.current} [seen]`, note: "seen" })) },
+			{ quick: { enabled: true } },
+			{ budgetsMs: { rewrite: 300 } },
+		);
+		await h.pi.emit("session_start");
+		// A read and a long test run in one batch.
+		await h.pi.emit("tool_call", { toolName: "read", toolCallId: "a", input: { path: "x" } });
+		await h.pi.emit("tool_call", { toolName: "bash", toolCallId: "b", input: { command: "npm test" } });
+		const read = await h.pi.emit("tool_result", bashResult("read it", { toolCallId: "a" }));
+		await sleep(400);
+		// The test run finished well after the read's rewrite: its own rewrite still runs.
+		const tests = await h.pi.emit("tool_result", bashResult("1 failing", { toolCallId: "b" }));
+		expect(JSON.stringify(read)).toContain("[seen]");
+		expect(JSON.stringify(tests)).toContain("[seen]");
+	});
+});
+
 describe("compaction hosting", () => {
+	it("serializes only the span's messages newer than a given time, for a summary written early (D-098)", async () => {
+		const requests: CompactionRequest[] = [];
+		const { h } = setup(
+			{
+				writer: () => ({
+					id: "writer",
+					compact: async (request) => {
+						requests.push(request);
+						return undefined;
+					},
+				}),
+			},
+			{ writer: { enabled: true } },
+		);
+		await h.pi.emit("session_start");
+		await h.pi.emit("session_before_compact", compactEvent());
+		const [request] = requests;
+		expect(request?.conversationSince(0)).toBe(request?.conversation);
+		expect(request?.conversationSince(2)).toContain("and tests");
+		expect(request?.conversationSince(2)).not.toContain("implement forth");
+		expect(request?.conversationSince(3)).toBe("");
+	});
+
+	it("tells settle hooks how full the context is and where pi compacts it, when pi knows (D-098)", async () => {
+		const probe = newProbe();
+		const { h } = setup({ a: probeModule("a", probe, () => undefined) }, { a: { enabled: true } });
+		await h.pi.emit("session_start");
+		const usage = (tokens: number | null) =>
+			h.pi.ctx({ getContextUsage: () => ({ tokens, contextWindow: 131_072, percent: null }) });
+		await h.pi.emit("agent_before_settle", settleEvent(), usage(90_000));
+		await h.pi.emit("agent_before_settle", settleEvent(), usage(null));
+		await h.pi.emit("agent_before_settle", settleEvent());
+		expect(probe.settles.map((s) => s.context)).toEqual([
+			{ tokens: 90_000, compactAt: 131_072 - 16_384 },
+			undefined,
+			undefined,
+		]);
+	});
+
 	it("passes a harness-agnostic request and returns the first module summary", async () => {
 		const requests: CompactionRequest[] = [];
 		const { h } = setup(
@@ -908,6 +992,12 @@ describe("background jobs (D-097)", () => {
 		]);
 		// Listed until the turn it started settles, so nothing waiting on it sees a gap.
 		expect(status(h).at(-1)).toBe("exo: continuing after reviewing");
+		// That turn was aborted, so pi skipped its settle hook: its end still clears the line.
+		await h.pi.emit("agent_settled", {});
+		expect(status(h).at(-1)).toBe("exo: continuing after reviewing");
+		await h.pi.emit("agent_start", {});
+		await h.pi.emit("agent_settled", {});
+		expect(status(h).at(-1)).toBeUndefined();
 
 		await h.pi.emit("agent_before_settle", settleEvent());
 		h.pi.idle = false;
@@ -932,6 +1022,29 @@ describe("background jobs (D-097)", () => {
 		await h2.pi.emit("session_start");
 		await h2.pi.emit("agent_before_settle", settleEvent());
 		expect(headless.started).toBe(false);
+	});
+
+	it("steers late help into a working agent, and sends none to an idle one (D-098)", async () => {
+		const probe = newProbe();
+		const { h } = setup({ a: probeModule("a", probe) }, { a: { enabled: true } });
+		await h.pi.emit("session_start");
+		await h.pi.emit("tool_result", { toolName: "bash", input: { command: "make" }, isError: false, content: "ok" });
+		h.pi.idle = false;
+		expect(probe.context?.deliverLate("[exo a] later help")).toBe(true);
+		expect(h.pi.sent).toEqual([
+			{
+				message: {
+					customType: "exo.a",
+					content: "[exo a] later help",
+					display: true,
+					details: { exo: { module: "a", late: true } },
+				},
+				options: { deliverAs: "steer" },
+			},
+		]);
+		h.pi.idle = true;
+		expect(probe.context?.deliverLate("[exo a] too late")).toBe(false);
+		expect(h.pi.sent).toHaveLength(1);
 	});
 
 	it("stops a module's job when another starts and when the session ends", async () => {

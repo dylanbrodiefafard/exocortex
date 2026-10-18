@@ -12,9 +12,11 @@ export const SettingsSchema = Type.Object(
 		checks: Type.Array(Type.String({ minLength: 1 }), { default: [], ...USER_ONLY }),
 		/** Also run the test and build commands the user's request names in a code span (D-011; the rule is in `checks.ts`, D-084). */
 		runPromptChecks: Type.Boolean({ default: true }),
-		checkTimeoutMs: Type.Integer({ minimum: 1000, default: 120_000 }),
-		ledgerTimeoutMs: Type.Integer({ minimum: 1000, default: 30_000 }),
-		verdictTimeoutMs: Type.Integer({ minimum: 1000, default: 60_000 }),
+		/**
+		 * A limit on each check command. Unset (the default): none. The checks run in the background
+		 * once the agent stops, and Escape or a new message stops them (D-098).
+		 */
+		checkTimeoutMs: Type.Optional(Type.Integer({ minimum: 1000 })),
 		/** Sidecar thinking (Qwen `enable_thinking`). Off by default: short JSON tasks (D-008). */
 		thinking: Type.Boolean({ default: false }),
 		/**

@@ -56,6 +56,7 @@ function request(extra: Partial<CompactionRequest> = {}): CompactionRequest {
 		tokensBefore: 120_000,
 		customInstructions: null,
 		fork: null,
+		conversationSince: () => "",
 		...extra,
 	};
 }
@@ -138,6 +139,7 @@ describe("compaction", () => {
 					userMessages: 2,
 					commands: 5,
 					unverified: 0,
+					early: "none",
 				},
 			},
 		]);
@@ -208,8 +210,8 @@ describe("compaction", () => {
 	});
 
 	it("truncates huge user messages and long file lists, and reports invalid settings", async () => {
-		const invalid = setup({ timeoutMs: 5 });
-		expect(invalid.t.logs.some((l) => l.startsWith("compaction /timeoutMs"))).toBe(true);
+		const invalid = setup({ maxSummaryTokens: 5 });
+		expect(invalid.t.logs.some((l) => l.startsWith("compaction /maxSummaryTokens"))).toBe(true);
 		const { module } = setup({ fallback: "deterministic", maxUserMessageChars: 200 });
 		const files = Array.from({ length: 45 }, (_, i) => `f${String(i).padStart(2, "0")}.ts`);
 		const summary = await summaryOf(module, request({ userMessages: ["y".repeat(5_000)], filesModified: files }));
@@ -336,6 +338,130 @@ describe("the summary as a fork of the main agent's context (D-093)", () => {
 		const t = createTestModuleContext({ cwd: dir, ...options, reply });
 		return { t, module: createCompaction(settings, t.context) };
 	}
+
+	describe("the summary written early (D-098)", () => {
+		const DONE = { outcome: "completed" as const, lastAssistantText: "done" };
+		const at = (tokens: number) => ({ ...DONE, context: { tokens, compactAt: 100_000 } });
+		const idle = () => new Promise((resolve) => setTimeout(resolve, 30));
+		const EARLY = SUMMARY.replace(
+			"Implement a Forth interpreter in Rust.",
+			"Implement a Forth interpreter in Rust (written early).",
+		);
+		function early(reply: (r: ChatRequest) => SidecarReply = (r) => (r.fork ? EARLY : SUMMARY)) {
+			const t = createTestModuleContext({ cwd: dir, ...engine, forkPrefix: fork, reply });
+			return { t, module: createCompaction({ earlySummary: true }, t.context) };
+		}
+
+		it("is written in the background once the context passes the threshold, not before", async () => {
+			const { module, t } = early();
+			expect(await module.onSettle?.(at(60_000), signal)).toBeUndefined();
+			await idle();
+			expect(t.requests).toEqual([]);
+			expect(await module.onSettle?.(at(75_000), signal)).toBeUndefined();
+			await idle();
+			expect(t.requests).toHaveLength(1);
+			expect(t.requests[0]?.fork).toBe(fork);
+			expect(t.records).toEqual([
+				{ kind: "exo.compaction", data: { action: "early_summary", tokens: 75_000, compactAt: 100_000 } },
+			]);
+			// Not again until the context grew by a tenth of the threshold.
+			await module.onSettle?.(at(80_000), signal);
+			await idle();
+			expect(t.requests).toHaveLength(1);
+			await module.onSettle?.(at(86_000), signal);
+			await idle();
+			expect(t.requests).toHaveLength(2);
+		});
+
+		it("is used as written when nothing came after it, and updated with only what did", async () => {
+			const { module, t } = early();
+			await module.onSettle?.(at(75_000), signal);
+			await idle();
+			const asWritten = await module.compact?.(request({ conversationSince: () => "" }), signal);
+			expect(asWritten?.summary).toContain("(written early)");
+			expect(t.requests).toHaveLength(1);
+			expect(t.records.at(-1)?.data).toMatchObject({ narrative: true, early: "as_written" });
+
+			const since: number[] = [];
+			const updated = await module.compact?.(
+				request({
+					conversationSince: (ms) => {
+						since.push(ms);
+						return "[User]: also add DROP";
+					},
+				}),
+				signal,
+			);
+			expect(updated?.summary).toContain("## Objective");
+			const prompt = String(t.requests.at(-1)?.messages[1]?.["content"]);
+			expect(prompt).toContain("(written early)");
+			expect(prompt).toContain("[User]: also add DROP");
+			// Only what came after the fork, not the whole span.
+			expect(prompt).not.toContain("[User]: implement forth\n\n[Assistant]: on it");
+			expect(since).toHaveLength(1);
+			expect(t.records.at(-1)?.data).toMatchObject({ early: "updated" });
+		});
+
+		it("is dropped once the context was compacted, and left alone by a summary with the user's own focus", async () => {
+			const { module, t } = early();
+			await module.onSettle?.(at(75_000), signal);
+			await idle();
+			const focused = await module.compact?.(request({ customInstructions: "the parser" }), signal);
+			expect(focused?.summary).not.toContain("(written early)");
+			module.onCompacted?.();
+			const after = await module.compact?.(request({ conversationSince: () => "" }), signal);
+			expect(after?.summary).not.toContain("(written early)");
+			expect(t.records.at(-1)?.data).toMatchObject({ early: "none" });
+		});
+
+		it("is not used once a compaction happened while it was written, or on another branch", async () => {
+			let release = () => {};
+			const gate = new Promise<void>((resolve) => {
+				release = resolve;
+			});
+			const { module, t } = early(async (r) => {
+				if (r.fork) await gate;
+				return r.fork ? EARLY : SUMMARY;
+			});
+			await module.onSettle?.(at(75_000), signal);
+			// pi compacts before the early summary is back.
+			module.onCompacted?.();
+			release();
+			await idle();
+			const after = await module.compact?.(request({ conversationSince: () => "" }), signal);
+			expect(after?.summary).not.toContain("(written early)");
+
+			const fresh = early();
+			await fresh.module.onSettle?.(at(75_000), signal);
+			await idle();
+			// The user moved to another branch: the context no longer begins with what the fork read.
+			const other = { body: { model: "m", messages: [{ role: "user", content: "something else entirely" }] } };
+			await fresh.module.compact?.(request({ fork: other, conversationSince: () => "" }), signal);
+			// Written whole from the new branch's fork, not from the early summary.
+			expect(fresh.t.records.at(-1)?.data).toMatchObject({ early: "none" });
+			expect(fresh.t.requests.at(-1)?.fork).toBe(other);
+			expect(t.records.at(-1)?.data).toMatchObject({ early: "none" });
+		});
+
+		it("is not written when switched off or with no fork to be had", async () => {
+			const off = createTestModuleContext({ cwd: dir, ...engine, forkPrefix: fork, reply: () => SUMMARY });
+			await createCompaction({}, off.context).onSettle?.(at(90_000), signal);
+			const none = createTestModuleContext({ cwd: dir, ...engine, reply: () => SUMMARY });
+			await createCompaction({ earlySummary: true }, none.context).onSettle?.(at(90_000), signal);
+			await idle();
+			expect([...off.requests, ...none.requests]).toEqual([]);
+		});
+	});
+
+	it("shows the summary growing while the user waits, instead of a deadline (D-098)", async () => {
+		const long = `${SUMMARY}\n${"- more detail on the parser\n".repeat(20)}`;
+		const { module, t } = forked({}, engine, () => long);
+		await summaryOf(module, request({ fork }));
+		expect(t.progress).toEqual([
+			"Writing the compaction summary…",
+			`Writing the compaction summary… ${Math.round(long.length / 4)} tokens`,
+		]);
+	});
 
 	it("continues the main agent's context with the instruction alone", async () => {
 		const { module, t } = forked({}, engine, () => `${SUMMARY}\n- \`src/kept_only.rs\`: next`);

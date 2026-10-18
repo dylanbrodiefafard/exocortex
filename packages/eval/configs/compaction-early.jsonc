@@ -1,0 +1,8 @@
+// Compaction + D-098: once the context passes 70% of where pi compacts, the summary is written in
+// the background while the agent is idle, and compaction only adds what came after it. Compare
+// against `compaction` on runs that compacted: success, and the time compaction held the agent.
+{
+	"modules": {
+		"compaction": { "enabled": true, "earlySummary": true }
+	}
+}

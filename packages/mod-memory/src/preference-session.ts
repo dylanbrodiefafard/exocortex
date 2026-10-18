@@ -1,5 +1,6 @@
 import {
 	cosineSimilarity,
+	holdFor,
 	type JsonValue,
 	loadPrompt,
 	type SettleAction,
@@ -29,6 +30,8 @@ import {
 } from "./preferences.ts";
 import { type RetiredBy, type SightingSource, type StoredPreference, TASK_KINDS } from "./store.ts";
 
+/** Times a message is read for preferences before it is given up, as a lesson is (`learn.ts`). */
+const MAX_READ_ATTEMPTS = 3;
 const PREFERENCES_PROMPT = loadPrompt(new URL("../prompts/preferences.v4.md", import.meta.url));
 
 const PreferencesSchema = Type.Object({
@@ -145,7 +148,8 @@ export function createPreferenceSession(
 	/** The harness's id (M9): a module rebuilt mid-session is still the same session of evidence. */
 	const session = ctx.sessionId;
 	/** The user's own messages since the last settle, each with what the agent had said before it. */
-	const unread: { readonly text: string; readonly before: string }[] = [];
+	/** Messages not read for preferences yet, and how many reads of each went unanswered. */
+	const unread: { readonly text: string; readonly before: string; readonly tries: number }[] = [];
 	/** Preferences already in this session's context. Saved state is untrusted: only numbers are taken. */
 	const shown = new Set<number>(Array.isArray(saved) ? saved.filter((id) => typeof id === "number") : []);
 	/** Preferences a sidecar retired since the user was last told. */
@@ -164,13 +168,21 @@ export function createPreferenceSession(
 	 * open answer comes through here too (D-066): the question asked for standing rules, so each
 	 * one admitted is standing, and the user is waiting on the calls.
 	 */
-	async function learn(message: string, before: string, source: SightingSource = "message"): Promise<number> {
-		const repo = await scope;
+	async function learn(
+		message: string,
+		before: string,
+		source: SightingSource = "message",
+		onUnanswered?: () => void,
+	): Promise<number> {
+		const repo = await scope();
 		// A sighting says where a preference was stated: under a guessed repo name it would be wrong.
 		if (!repo.known && source !== "interview") return 0;
 		const text = startAndEnd(message, PREFERENCE_MESSAGE_CHARS, { mark: MESSAGE_CUT_MARK });
 		const proposals = await propose(text, before, source);
-		if (!proposals) return 0;
+		if (!proposals) {
+			onUnanswered?.();
+			return 0;
+		}
 		let count = 0;
 		for (const item of proposals) {
 			const admitted = admitStatement({ ...item, correction: item.correction && before.trim() !== "" }, text, ctx.cwd);
@@ -195,8 +207,9 @@ export function createPreferenceSession(
 	 * A proposal that states nothing, traced with the reason so that the gates can be measured.
 	 * `relation_unknown`: the relation sidecar did not answer. A rule stored without knowing what it
 	 * repeats or contradicts could stand beside its opposite, so it waits until the user says it again.
+	 * `unanswered`: the reading sidecar did not answer for a message {@link MAX_READ_ATTEMPTS} times.
 	 */
-	function skipped(reason: Refusal | "relation_unknown"): void {
+	function skipped(reason: Refusal | "relation_unknown" | "unanswered"): void {
 		ctx.record({ kind: "exo.memory", data: { action: "preference_skipped", reason } });
 	}
 
@@ -211,7 +224,6 @@ export function createPreferenceSession(
 		const result = await ctx.pool()?.run({
 			module: MEMORY_ID,
 			priority: priorityOf(source),
-			timeoutMs: settings.preferenceTimeoutMs,
 			schema: PreferencesSchema,
 			schemaName: "preferences",
 			request: {
@@ -244,7 +256,6 @@ export function createPreferenceSession(
 		const result = await ctx.pool()?.run({
 			module: MEMORY_ID,
 			priority: priorityOf(source),
-			timeoutMs: settings.preferenceTimeoutMs,
 			schema: RelationSchema,
 			schemaName: "preference_relation",
 			request: {
@@ -378,7 +389,8 @@ export function createPreferenceSession(
 		const result = await pool.run({
 			module: MEMORY_ID,
 			priority: "interactive",
-			timeoutMs: settings.preferenceSelectTimeoutMs,
+			// The agent has not started: it waits up to what this kind of call usually takes (D-098).
+			timeoutMs: holdFor(pool, MEMORY_ID, "preference_selection", settings.preferenceSelectTimeoutMs),
 			signal,
 			schema: SelectionSchema,
 			schemaName: "preference_selection",
@@ -435,14 +447,14 @@ export function createPreferenceSession(
 
 		heard(turn) {
 			if (settings.preferences && turn.text.trim().length >= MIN_PREFERENCE_MESSAGE_CHARS) {
-				unread.push({ text: turn.text, before: lastAssistantText });
+				unread.push({ text: turn.text, before: lastAssistantText, tries: 0 });
 			}
 		},
 
 		async context(turn, signal) {
 			if (!settings.preferences || turn.origin !== "user") return undefined;
 			if (turn.text.trim().split(/\s+/).length < MIN_PROMPT_WORDS) return undefined;
-			const candidates = activePreferences(store.preferences(), (await scope).id, settings.preferenceMinSessions)
+			const candidates = activePreferences(store.preferences(), (await scope()).id, settings.preferenceMinSessions)
 				.filter((p) => !shown.has(p.id))
 				.slice(0, settings.maxPreferences);
 			if (candidates.length === 0) return undefined;
@@ -473,7 +485,12 @@ export function createPreferenceSession(
 			lastAssistantText = info.lastAssistantText;
 			// The agent has stopped, so the background sidecar can run without competing with it.
 			for (const message of unread.splice(0)) {
-				learn(message.text, message.before).catch((error: unknown) =>
+				// Not answered (the engine stopped, or the session's budget ran out): read again at the next stop (D-098).
+				const again = () => {
+					if (message.tries + 1 < MAX_READ_ATTEMPTS) unread.push({ ...message, tries: message.tries + 1 });
+					else skipped("unanswered");
+				};
+				learn(message.text, message.before, "message", again).catch((error: unknown) =>
 					ctx.log(`preference learning failed: ${String(error)}`),
 				);
 			}

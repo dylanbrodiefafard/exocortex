@@ -34,11 +34,38 @@ export function createMemory(raw: Readonly<Record<string, unknown>>, ctx: Module
 	const saved = savedParts(ctx.savedState);
 	let resolved: RepoScope | undefined;
 	let ready = false;
+	const unknown = (): RepoScope => ({ id: `path:${ctx.cwd}`, known: false });
+	let scope = repoScope(ctx).catch(unknown);
+	scope.then((repo) => {
+		resolved = repo;
+		if (repo.known) return;
+		ctx.log("git did not say which repo this is in time: nothing is learned or recalled until it does");
+		ctx.record({ kind: "exo.memory", data: { action: "scope_unknown" } });
+	}, ignore);
+	/**
+	 * Asks git again, at the user's next message (D-098), one lookup at a time. Readers keep the
+	 * answer they have, unknown, until git names the repo: a git that hangs does not hold the hot path.
+	 */
+	let retrying = false;
+	const retry = (): void => {
+		if (retrying) return;
+		retrying = true;
+		repoScope(ctx)
+			.catch(unknown)
+			.then((repo) => {
+				if (!repo.known) return;
+				resolved = repo;
+				scope = Promise.resolve(repo);
+			}, ignore)
+			.finally(() => {
+				retrying = false;
+			});
+	};
 	const deps: MemoryDeps = {
 		ctx,
 		settings,
 		store: storeFor(settings.dbPath, ctx.log),
-		scope: repoScope(ctx).catch(() => ({ id: `path:${ctx.cwd}`, known: false })),
+		scope: () => scope,
 		resolvedScope: () => resolved,
 		changed: () => {
 			if (ready) ctx.saveState({ v: STATE_VERSION, cards: recaller.state(), preferences: preferences.state() });
@@ -49,17 +76,12 @@ export function createMemory(raw: Readonly<Record<string, unknown>>, ctx: Module
 	const recaller = createRecaller(deps, saved.cards);
 	const preferences = createPreferenceSession(deps, saved.preferences);
 	ready = true;
-	deps.scope.then((repo) => {
-		resolved = repo;
-		if (repo.known) return;
-		ctx.log("git did not say which repo this is in time: nothing is learned or recalled in this session");
-		ctx.record({ kind: "exo.memory", data: { action: "scope_unknown" } });
-	}, ignore);
 
 	return {
 		id: MEMORY_ID,
 
 		onUserTurn(turn) {
+			if (resolved?.known === false) retry();
 			if (turn.origin !== "user") return;
 			recaller.finishTask();
 			learner.reset();

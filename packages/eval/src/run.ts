@@ -74,9 +74,9 @@ const ADAPTER_ENTRY = fileURLToPath(import.meta.resolve("@exocortex/pi-adapter")
 
 /**
  * The harness closes pi the moment the agent settles, and memory's lesson-writing is a background
- * call that only starts then (D-086). An interactive session gives such calls 2 s at quit; a run
- * gives them 30 s, which is one call's own deadline (memory's `distillTimeoutMs`), so a call that
- * was free to start is never the one cut off. It costs nothing when nothing is in the background.
+ * call that only starts then (D-086). Pi waits for such calls until they are done, and a call whose
+ * engine stops answering ends by itself (D-098); a run caps the wait at 30 s so a slow engine cannot
+ * stretch the suite. It costs nothing when nothing is in the background.
  */
 const DEFAULT_DRAIN_MS = 30_000;
 /**

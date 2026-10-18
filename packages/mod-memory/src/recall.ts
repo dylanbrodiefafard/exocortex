@@ -250,7 +250,7 @@ export function createRecaller({ ctx, settings, store, scope, changed }: MemoryD
 	return {
 		async rewrite(draft, signal) {
 			const signature = failureSignature(draft);
-			const repo = await scope;
+			const repo = await scope();
 			if (!signature || !repo.known) return undefined;
 			const cards = (await recallCards(repo.id, signature, draft.output, signal)).filter(
 				(r) => !injected.has(r.card.id) && !done.has(r.card.id) && !stale(r),
@@ -332,7 +332,7 @@ export function createRecaller({ ctx, settings, store, scope, changed }: MemoryD
 				ctx.record({ kind: "exo.memory", data: { action: "card_retired", card: id, by: "user" } });
 				return `Forgot card ${id}.`;
 			}
-			return sub === "cards" ? scope.then(listCards) : undefined;
+			return sub === "cards" ? scope().then(listCards) : undefined;
 		},
 
 		state() {

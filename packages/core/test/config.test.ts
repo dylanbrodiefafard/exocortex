@@ -20,7 +20,6 @@ describe("loadConfig", () => {
 			pool: {
 				maxConcurrent: 6,
 				reservedForMain: 2,
-				timeoutMs: 20_000,
 				sessionTokenBudget: 0,
 				backgroundWhenIdleOnly: true,
 			},

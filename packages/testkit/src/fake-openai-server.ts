@@ -10,6 +10,8 @@ import type { AddressInfo } from "node:net";
  * - `overflow`: HTTP 400 with an OpenAI-style context-length error;
  * - `drop_midstream`: the connection is cut after part of the reply (a streaming request gets the
  *   first chunks and no `[DONE]`; a non-streaming one gets no response at all).
+ * - `stall`: the engine stops answering after part of the reply, with the connection left open (a
+ *   streaming request gets the first chunks, then nothing; a non-streaming one, nothing).
  */
 export type ScriptedReply = (
 	| { readonly kind: "text"; readonly text: string }
@@ -19,6 +21,7 @@ export type ScriptedReply = (
 	| { readonly kind: "reasoning"; readonly reasoning: string; readonly text: string }
 	| { readonly kind: "overflow" }
 	| { readonly kind: "drop_midstream"; readonly text: string }
+	| { readonly kind: "stall"; readonly text: string }
 ) & {
 	/** Delay before responding, to simulate generation time. */
 	readonly delayMs?: number;
@@ -146,6 +149,7 @@ export async function startFakeOpenAIServer(
 		const content: Content = { reply, toolCalls: toolCallsPayload(reply, () => ++toolCalls) };
 		if (isStreaming(body)) streamReply(res, id, model, content, body);
 		else if (reply.kind === "drop_midstream") res.destroy();
+		else if (reply.kind === "stall") return;
 		else sendJson(res, completionObject(id, model, content, body));
 	}
 
@@ -340,6 +344,11 @@ function streamReply(res: ServerResponse, id: string, model: string, content: Co
 		res.write(`data: ${JSON.stringify(payload)}\n\n`);
 	};
 	chunk({ role: "assistant" }, null);
+	if (reply.kind === "stall") {
+		// Part of the reply, then silence until the client gives up.
+		chunk({ content: reply.text.slice(0, Math.ceil(reply.text.length / 2)) }, null);
+		return;
+	}
 	if (reply.kind === "drop_midstream") {
 		// Half the text, then the socket closes: no finish reason, no usage, no [DONE].
 		chunk({ content: reply.text.slice(0, Math.ceil(reply.text.length / 2)) }, null);

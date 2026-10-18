@@ -27,8 +27,9 @@ export const SettingsSchema = Type.Object(
 		sidecar: Type.Boolean({ default: true }),
 		maxHintsPerSignature: Type.Integer({ minimum: 0, default: 2 }),
 		/**
-		 * The hint holds the agent loop, and the notice it comes with must be back within this module's
-		 * share of the host's time for a rewrite: 20 s among up to three rewriting modules (D-082).
+		 * How long the notice waits for its hint, holding the agent loop: within this module's share of
+		 * the host's time for a rewrite (D-082). A hint not ready by then is not lost: it reaches the
+		 * model as late help before its next call (D-098).
 		 */
 		hintTimeoutMs: Type.Integer({ minimum: 500, maximum: MAX_HOLD_MS, default: MAX_HOLD_MS }),
 		thinking: Type.Boolean({ default: false }),
@@ -37,7 +38,7 @@ export const SettingsSchema = Type.Object(
 		 * a cause from a different angle; distinct, grounded ones are listed. 0 = off.
 		 */
 		hypotheses: Type.Integer({ minimum: 0, maximum: 5, default: 0 }),
-		/** A result is held for the longer of the two timeouts, not their sum: the hint is skipped when the hypotheses used the time. */
+		/** How long a notice at the loop threshold waits for its hypotheses; later ones arrive as late help (D-098). */
 		hypothesisTimeoutMs: Type.Integer({ minimum: 500, maximum: MAX_HOLD_MS, default: MAX_HOLD_MS }),
 		/** Commands whose exit code 1 means "no match" or "differs", not failure. */
 		benignCommands: Type.Array(Type.String({ minLength: 1 }), {

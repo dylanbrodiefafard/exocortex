@@ -60,7 +60,10 @@ export const SettingsSchema = Type.Object(
 		sidecarMaxInputChars: Type.Integer({ minimum: 1_000, default: 60_000 }),
 		/** Cap on lines the sidecar may keep. */
 		sidecarMaxLines: Type.Integer({ minimum: 10, default: 150 }),
-		/** The sidecar holds the agent loop, so the deadline is short; the deterministic result is the fallback. */
+		/**
+		 * The most the sidecar may hold the agent loop; the deterministic result is the fallback. Once
+		 * this session has timed a few such calls, the hold is half again their 90th percentile, if less (D-098).
+		 */
 		sidecarTimeoutMs: Type.Integer({ minimum: 500, default: 6_000 }),
 		thinking: Type.Boolean({ default: false }),
 		/**

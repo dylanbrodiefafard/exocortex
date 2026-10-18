@@ -3,12 +3,7 @@ import { type FakeOpenAIServer, startFakeOpenAIServer } from "@exocortex/testkit
 import { afterEach, describe, expect, it } from "vitest";
 import { registerExoCommand } from "../src/command.ts";
 import { registerModuleHost } from "../src/modules.ts";
-import {
-	DEFAULT_SHUTDOWN_DRAIN_MS,
-	MAX_SHUTDOWN_DRAIN_MS,
-	registerSidecars,
-	shutdownDrainMs,
-} from "../src/sidecars.ts";
+import { MAX_SHUTDOWN_DRAIN_MS, registerSidecars, SWITCH_DRAIN_MS, shutdownDrainMs } from "../src/sidecars.ts";
 import { type AdapterHarness, createAdapterHarness } from "./harness.ts";
 
 let harness: AdapterHarness | undefined;
@@ -267,7 +262,7 @@ describe("sidecar lifecycle", () => {
 			expect(traced[0]).toMatchObject({
 				kind: "exo.action",
 				module: "sidecars",
-				data: { action: "drained", settled: 1, remaining: 0, limitMs: 2_000 },
+				data: { action: "drained", settled: 1, remaining: 0, limitMs: MAX_SHUTDOWN_DRAIN_MS },
 			});
 		});
 
@@ -279,6 +274,17 @@ describe("sidecar lifecycle", () => {
 			expect(pool.stats().queued.background).toBe(1);
 			await h.pi.emit("session_shutdown", { reason: "quit" });
 			expect((await lesson).ok).toBe(true);
+		});
+
+		it("waits only briefly when the session is replaced rather than quit (D-098)", async () => {
+			const { h, run, traced } = await session(3_000);
+			const lesson = run("background");
+			const took = await elapsed(h.pi.emit("session_shutdown", { reason: "new" }));
+			expect(took).toBeLessThan(2_800);
+			expect(await lesson).toMatchObject({ ok: false, outcome: "closed" });
+			expect(traced.map((e) => e.data)).toEqual([
+				{ action: "drained", settled: 0, remaining: 1, ms: expect.any(Number), limitMs: SWITCH_DRAIN_MS },
+			]);
 		});
 
 		it("stops waiting when the time is up, cuts off what is left and says how many", async () => {
@@ -306,12 +312,12 @@ describe("sidecar lifecycle", () => {
 		});
 
 		it("can be turned off, and a setting that is not a time is the default", async () => {
-			expect(shutdownDrainMs({})).toBe(DEFAULT_SHUTDOWN_DRAIN_MS);
+			expect(shutdownDrainMs({})).toBe(MAX_SHUTDOWN_DRAIN_MS);
 			expect(shutdownDrainMs({ EXO_SHUTDOWN_DRAIN_MS: "30000" })).toBe(30_000);
 			expect(shutdownDrainMs({ EXO_SHUTDOWN_DRAIN_MS: " 250 " })).toBe(250);
 			expect(shutdownDrainMs({ EXO_SHUTDOWN_DRAIN_MS: "0" })).toBe(0);
 			for (const bad of ["", "soon", "-5", "1.5", "1e3", "NaN"]) {
-				expect(shutdownDrainMs({ EXO_SHUTDOWN_DRAIN_MS: bad }), bad).toBe(DEFAULT_SHUTDOWN_DRAIN_MS);
+				expect(shutdownDrainMs({ EXO_SHUTDOWN_DRAIN_MS: bad }), bad).toBe(MAX_SHUTDOWN_DRAIN_MS);
 			}
 			// A typo cannot make quitting hang for hours.
 			expect(shutdownDrainMs({ EXO_SHUTDOWN_DRAIN_MS: "999999999" })).toBe(MAX_SHUTDOWN_DRAIN_MS);

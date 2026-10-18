@@ -2031,6 +2031,113 @@ Open check: Exocortex's injected `custom_message` reaches ninfer as a second con
   - **A user who reads the code and waits, typing nothing,** gets the findings late into their thinking. That is the cost of not holding the session.
   - **`declaredName` is a set of patterns.** A declaration it misses gets no caller lookup, and a word that is also a common identifier finds unrelated uses. Up to 8 uses are shown per name.
 
+### D-098 — Time limits: a call ends when its engine stops answering, not when a guessed deadline passes · accepted (2026-10-17; owner's request after an audit of every time limit; amends D-036's non-streaming client, the pool's 20 s default (D-039), memory's deadlines (D-062, D-081), D-086's shutdown wait and D-081 item 12)
+- **Context:** an audit found about 40 time limits. Almost none had a recorded reason, and no module's latency had been measured. Only D-038's load test has numbers. Every sidecar request was `stream: false`, so the only way to tell a stopped engine from a slow one was a total deadline. A slow call was then lost and counted as "no help".
+- **The rule now:** a limit says what it protects.
+  - **Engine liveness**, for every call: is the engine still answering?
+  - **The cost of holding the agent or the user**, for calls on the hot path.
+  - **A guard against an Exocortex bug**, where nothing else bounds a wait.
+  - No limit stands in for "this should have finished by now".
+- **1. Every sidecar request streams** (`stream: true`, `stream_options.include_usage`). The client puts the reply together and reports usage from the last chunk.
+  - ninfer, on its `experimental` branch, sends `cached_tokens` and its `ninfer` stats in the stream's usage chunk (`docs/serving.md` there). So cache stats (D-095) and fork checks (D-093) keep their data.
+  - A server that answers a streamed request whole is read as before.
+  - An error event mid-stream is an HTTP error.
+  - Reasoning deltas count as the engine answering but are not part of the text, as in a whole reply.
+- **2. Liveness** (`ChatOptions.liveness`, kind `stalled`; the pool's outcome is `timeout` with the reason):
+  - **No first token** within `pool.firstTokenMs` (default 120 s), plus the prompt's length at 500 tokens/s. A long prompt's prefill is not taken for a stopped engine.
+  - **No token for `pool.stallMs`** (default 60 s) after the first. At 200 tokens/s that is 12,000 tokens' worth of silence.
+  - Both defaults are deliberately loose: they tell a dead engine from a slow one, nothing finer.
+  - Any delta, reasoning included, resets the stall window.
+- **3. `pool.timeoutMs` has no default.** A call that sets no deadline has none.
+  - Calls that hold the agent or the user set their own: triage, trimmer, preference selection, `/exo ping`.
+  - A call can report progress (`onProgress`, characters so far) for a progress line.
+- **4. Background calls lose their deadlines:** memory's lesson (`distillTimeoutMs` removed) and preference reading (`preferenceTimeoutMs` removed). Nobody waits for them.
+  - A message whose preference reading gets no answer is read again at the next stop, up to 3 times as a lesson is. It was lost before.
+- **5. Shutdown waits until background work is done** (D-086 called its 2 s "a guess").
+  - A call whose engine stops answering ends by itself, so the wait is bounded by liveness.
+  - The 5-minute cap stays as a bug guard.
+  - After 0.5 s, a line on stderr says what it is waiting for and that Ctrl+C quits at once (PI_API_NOTES §16).
+  - `EXO_SHUTDOWN_DRAIN_MS` still caps it; the eval keeps 30 s.
+- **6. Memory asks git again.** A repo lookup git did not answer (5 s per command, a hang guard) used to switch learning and recall off for the session (D-081 item 12). It is now tried again at the user's next message.
+- **Kept, as hang guards:** git and grep command limits, process kill graces, SQLite busy timeouts, `dispose` (2 s), the API key lookup and fork serialization (2 s), and the embeddings server's limit (a separate CPU server).
+- **7. The supervisor's work runs in the background** (`ModuleContext.background`, D-097). The settle hook returns at once, so pi hands the session back the moment the agent stops.
+  - The job runs the ledger, the evidence, the user's checks, the verdict, the follow-up and, on `complete` with `review` on, the review.
+  - The status line shows `exo: checking the work… (Esc stops)`. Escape or a new message stops the job.
+  - **A stopped job changes nothing and records nothing.** Every change to the task (continuations, the pending follow-up, the stall count) comes after its last wait.
+  - **What was guessed is gone:**
+    - the ledger wait (`ledgerTimeoutMs`: 30 s, after which the stop was skipped as `no_ledger`);
+    - the verdict deadline (`verdictTimeoutMs`: 60 s each);
+    - the 120 s default on each check command. `checkTimeoutMs` stays, unset by default, for a user who wants a limit.
+    - None of these had a recorded reason.
+  - **Auto mode** continues through the job's `continue`, which starts a new turn (D-097), instead of pi's settle boundary (D-039). Both count toward the host's limit on consecutive continuations.
+  - **Without a UI (print mode)** there is no job and no one to type. The work runs inside the hook as before, under the host's settle budget.
+  - The eval driver already waits for background jobs and follows the turns they start (D-097).
+- **8. Late, not lost: `ModuleContext.deliverLate(text)`.** Help that misses its tool result is sent as an `exo.<module>` custom message with `deliverAs: "steer"`.
+  - **When it lands:** pi takes a steered message after the current tool batch, before the next model call (`pi-agent-core/dist/agent-loop.js:186`). If the model call has already started, it lands one batch later.
+  - **An agent about to stop** takes one more turn for it, which is right for "your edit introduced an error".
+  - **While the agent is idle**, nothing is sent: help for a run that ended is stale.
+  - **Prompt cache:** the message is appended after the tool results, so the prefix is unchanged (D-029).
+  - **Triage:**
+    - The notice still waits for its advice, up to `hintTimeoutMs`, or `hypothesisTimeoutMs` when it considers causes. The hold was the larger of the two before, and the hint was skipped when hypotheses used the time.
+    - Advice not ready by then keeps running with no deadline and is sent late.
+    - It is stopped when the same command runs again (its output is not the one the advice read), the user speaks, or the context is compacted. Stopping it also frees its sidecar slot.
+    - A late hint counts as given only once sent.
+    - The 400 ms floor below which no hint call was started is gone.
+  - **Tools:**
+    - `checkTimeoutMs` (4 s, after which a check showed nothing) becomes `checkHoldMs`: how long an edit's result waits for its check.
+    - A slower check after an edit is not stopped. Its new errors arrive late as "`<check>` reports N new errors after your edit to `<path>`".
+    - It is stopped as stale by a newer edit under the same check, a shell command (its changes would be blamed on the edit), or the user's next message.
+    - The check before an edit still waits at most `checkHoldMs`, since the edit cannot start until it is done.
+- **9. Compaction has no deadline** (`timeoutMs`, 90 s per call, is gone). The user is waiting either way, and pi's own abort (`event.signal`) stops it.
+  - **Progress:** the status line shows the summary growing ("Writing the compaction summary… 1,240 tokens").
+  - **Host budget:** the host's 120 s budget becomes a 15-minute bug guard.
+  - **Git runs alongside:** the git reads for the facts no longer wait in front of the summary.
+  - **Considered and dropped: asking for the transcript summary beside the fork.** Forks exist only on ninfer, which runs one prefill at a time, prefill first (D-023). The transcript's long prefill would stall the fork's decode in the common case, where the fork succeeds. Without deadlines, a failing fork fails fast (refused, or a reply off the template) or by stalling, so asking afterwards costs little.
+- **10. The summary written early** (`earlySummary`, off until A/B'd; eval config `compaction-early`).
+  - **Trigger:** once the context passes `earlySummaryAt` (0.7) of where pi compacts, the compaction module writes the summary from a fork. It does so again each time the context grows by a tenth of that.
+    - The settle hook now gets the context's size (`SettleInfo.context`, from `ctx.getContextUsage()`).
+    - Where pi compacts is the window less 16,384 tokens: pi's default `reserveTokens` (`core/compaction/compaction.js:55`, `:173-176`), which the extension API does not expose.
+  - **It costs no waiting:** the call is `background` priority, so the pool holds it until the agent is idle. The fork (`ModuleContext.forkPrefix`) holds the previous summary and everything up to it.
+  - **At compaction,** the span's messages after the fork (`CompactionRequest.conversationSince`) are merged into it with the update prompt. When there are none, it is used as written. The user waits for a short update instead of the whole summary.
+  - **It also works after an overflow,** when there is no fork to compact from.
+  - **It is dropped** when a compaction happens (it was of the context before it). It is not used for a `/compact` with the user's own focus, which it never had.
+  - **The trace records** `exo.compaction` `early_summary`, and each compaction's `early: as_written | updated | none`.
+  - **Open risk:** it may cover messages pi then keeps verbatim. The summary then repeats some of what follows it, which costs tokens, not correctness.
+- **11. One rewrite budget per batch of tool results.**
+  - **Before:** each result got its own 20 s, set when its rewrite began, and results are handled one after another (D-078). A batch of N parallel tool calls could hold the agent for up to N × 20 s.
+  - **Now:** the batch's first rewrite starts one deadline that all its results share. `turn_end`, which pi emits after the whole batch, clears it.
+  - **Cost:** a slow rewrite of an early result leaves less for the later ones. With late delivery (item 8), triage and the tools module lose little by it.
+- **12. Holds from measured latency** (`holdFor`, `SidecarPool.typicalMs`).
+  - **What is measured:** the pool keeps the time of each kind of call's last 50 successful runs, queueing included. A kind is a module and its reply schema.
+  - **The hold:** on the hot path, a call holds what it is part of for half again the 90th percentile of its kind, between 500 ms and the module's setting. The setting is now a maximum.
+  - **Until there are 5 samples,** the setting holds.
+  - **The rule:** a typical call is never cut short; one far slower than usual stops costing the agent time.
+  - **Used by:**
+    - triage's hint and hypotheses (whose late answers still arrive, item 8);
+    - the trimmer's line selection (no late use: the deterministic trim stands);
+    - memory's preference selection before the agent starts.
+  - **Not used** for the tools module's checks (shell commands, not pool calls) or for memory's embedding lookup (a separate server). Both keep their setting.
+  - **Open risk:** times come from this session only, so the first few calls of a session wait the full setting.
+- **13. Fixes from a review of this entry** (three reviewers, each finding shown with a failing case first):
+  - **Holds that could not grow back** (item 12). A call cut off by its hold ended as `timeout` and was not timed, so a hold set from fast calls cut every slower one for the rest of the session. A call cut off by its deadline now counts as taking that long, so the hold climbs back by half each time, up to the setting.
+  - **The batch budget charged results that held nobody** (item 11). `tool_result` fires as each tool finishes, while the others still run. A result now holds the agent only once every tool of the batch is in (counting `tool_call`s and results, nested calls aside). Until then it has its own budget; after, the batch's.
+  - **Session switches waited up to 5 minutes** (item 5). `session_shutdown` also fires for `/new`, `/resume`, `/fork` and `/reload`, with the TUI still running. Only `reason: "quit"` waits for background work. A switch waits at most 2 s, as before D-098, and prints nothing.
+  - **A stream that went wrong stayed open** (item 1). A bad chunk, an error event or a throwing callback left the request running, and the engine kept generating into a slot the pool had freed. The reader is now cancelled and the request aborted on every exit.
+    - A last line with no newline is read.
+    - `[DONE]` ends the read even if the connection stays open.
+    - The caller's abort still works while a whole (non-streamed) reply is read.
+  - **A stopped job could still change the task** (item 7). A review stopped while it read the workspace's fingerprint went on to count a continuation and set the pending follow-up. The no-progress streak was also bumped before the verdict's wait. Both now change the task only after their last wait.
+  - **"continuing after …" could stay on the status line.** Pi skips the settle hook for an aborted run. A job's continuation now ends at `agent_settled` of any run that began after it was sent.
+  - **A continuation sent while pi was still settling became a suggestion.** It is sent as a continuation, since pi takes a message steered then (`core/agent-session.js:1427`).
+  - **A stale offer could linger** beside a newer follow-up put straight in the editor. It is cleared.
+  - **Late triage advice was keyed by the command text.** Advice on `cargo build` survived a rerun as `cargo build 2>&1` with the same errors, and its hint was saved on a copy of the failure that had been replaced. Late advice is now stopped by the failure as well as the command, and saved on the failure as it is now.
+  - **A late check recorded the file's state when it ended,** which could be after a shell command changed it. It records the state it read.
+  - **An early summary still being written outlived a compaction,** and one could be used on another branch after `/tree`. A summary begun before a compaction is dropped. At compaction one is used only if the context still begins with the messages its fork read.
+  - **Memory's repo retry made the hot path wait on a hanging git.** The retry runs in the background, one at a time. Readers keep the last answer until git names the repo.
+  - **Un-awaited promises** (a late check, late advice, the summary started before the git reads) get a `.catch`, per the rule that nothing may reject unhandled.
+- **Tests:** `createTestModuleContext` runs no background jobs unless asked (`background: true`), so a module's hook result can be read directly; review tests run the jobs.
+- **Tests (D-098 item 1):** the fake server gains a `stall` reply. Integration tests tell main requests from sidecar requests by the system prompt, since both stream now.
+
 ---
 
 ## Open questions (carried from brief §10, updated)

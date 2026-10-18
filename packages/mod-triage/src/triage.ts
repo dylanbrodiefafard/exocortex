@@ -7,6 +7,7 @@ import {
 	failureKey,
 	fileEdits,
 	firstErrorLine,
+	holdFor,
 	isBenignExit,
 	type JsonValue,
 	loadPrompt,
@@ -75,8 +76,6 @@ const MAX_FAILURES = 64;
 const MAX_COMMANDS = 64;
 /** Commands remembered as having reported one failure. */
 const MAX_FAILURE_COMMANDS = 8;
-/** A sidecar call with less time than this left is not started. */
-const MIN_SIDECAR_MS = 400;
 /** Hints remembered per failure, whatever the cap on calls is set to. */
 const MAX_KEPT_HINTS = 16;
 
@@ -187,17 +186,26 @@ export function createTriage(raw: Readonly<Record<string, unknown>>, ctx: Module
 	/** Twice the threshold is where a notice becomes the hand-over. */
 	const handOverAt = settings.loopThreshold * 2;
 	/**
-	 * The longest one result is held for sidecar calls, on this module's own clock: the notice must
-	 * be back before the host's deadline, which the pool's timeouts do not promise (their clock
-	 * stops while a call waits for a slot).
+	 * Advice still being worked out after its notice went back (D-098), by command. It is stopped
+	 * once it would be stale: the command ran again, the user spoke, or the context was compacted.
 	 */
-	const holdMs = Math.max(settings.hintTimeoutMs, settings.hypothesisTimeoutMs);
+	const lateWork = new Set<{ readonly command: string; readonly failure: string; readonly stop: AbortController }>();
+	/** Stops late advice: all of it, or that on a command's output or on a failure, whatever command reported it. */
+	const stopLateWork = (match?: { readonly command?: string; readonly failure?: string }) => {
+		for (const work of lateWork) {
+			if (match && work.command !== match.command && work.failure !== match.failure) continue;
+			work.stop.abort();
+			lateWork.delete(work);
+		}
+	};
 
 	return {
 		id: TRIAGE_ID,
 
 		onUserTurn(turn) {
 			if (turn.origin !== "user") return;
+			// The user spoke: advice on what came before is not what they asked about now.
+			stopLateWork();
 			if (turn.text.trim() !== "") asked.push(startAndEnd(turn.text.trim(), GOAL_CHARS));
 			if (asked.length > MAX_GOAL_MESSAGES) asked.shift();
 			// A loop is the agent's own doing: a call the user asked for again is not part of one.
@@ -213,6 +221,8 @@ export function createTriage(raw: Readonly<Record<string, unknown>>, ctx: Module
 
 		onToolResult(tool) {
 			const command = commandOf(tool.input, tool.toolName);
+			// Advice on this command's last result is about output that has just been replaced.
+			stopLateWork({ command });
 			const outcome = isFailure(tool)
 				? `exit ${tool.exitCode ?? "error"}`
 				: isMasked(tool)
@@ -231,6 +241,8 @@ export function createTriage(raw: Readonly<Record<string, unknown>>, ctx: Module
 			// The loop ended: a later one starts over with its first notice.
 			if (!currentLoop()) state.loopLevel = 0;
 			observed = { key, sighting: sightingOf(tool) };
+			// The same failure again, perhaps from another spelling of the command: its late advice read older output.
+			if (observed.sighting) stopLateWork({ failure: observed.sighting.id });
 			save();
 		},
 
@@ -277,7 +289,12 @@ export function createTriage(raw: Readonly<Record<string, unknown>>, ctx: Module
 			};
 		},
 
+		dispose() {
+			stopLateWork();
+		},
+
 		onCompacted() {
+			stopLateWork();
 			// Hints, hypotheses and loop notices were in the span that is gone: there is nothing left
 			// to repeat. The failures are still failing, so the counts stay.
 			state.loopLevel = 0;
@@ -436,11 +453,15 @@ export function createTriage(raw: Readonly<Record<string, unknown>>, ctx: Module
 	}
 
 	type Evidence = ReturnType<typeof evidenceFor>;
+	/** What the sidecars add to a notice: hypotheses at the loop threshold, else a hint. */
+	type Advice = { readonly hypotheses?: Hypothesis[]; readonly hint?: string };
 
 	/**
-	 * The sidecar's part of a notice: hypotheses at the loop threshold, else a hint. It answers by
-	 * {@link holdMs} or the host's signal at the latest (T5) and never rejects, since the notice
-	 * does not depend on it. A call still running then is cancelled and its answer dropped.
+	 * The sidecar's part of a notice: hypotheses at the loop threshold, else a hint. The result waits
+	 * for it up to its hold (`hintTimeoutMs`, or `hypothesisTimeoutMs` when it considers causes) or
+	 * the host's signal (T5), and it never rejects, since the notice does not depend on it. Advice
+	 * not ready by then is not dropped: it is sent as late help when it is (D-098), unless the
+	 * command ran again, the user spoke or the context was compacted.
 	 */
 	async function advise(
 		failure: Failure,
@@ -448,35 +469,71 @@ export function createTriage(raw: Readonly<Record<string, unknown>>, ctx: Module
 		draft: ToolResultDraft,
 		outlived: readonly FileEdit[],
 		signal: AbortSignal,
-	): Promise<{ readonly hypotheses?: Hypothesis[]; readonly hint?: string } | undefined> {
+	): Promise<Advice | undefined> {
 		if (signal.aborted || !ctx.pool() || (!settings.sidecar && settings.hypotheses === 0)) return undefined;
-		const deadline = Date.now() + holdMs;
-		const left = () => deadline - Date.now();
-		const hold = new AbortController();
-		const work = async () => {
+		const late = new AbortController();
+		const command = commandOf(draft.input, draft.toolName);
+		const entry = { command, failure: sighting.id, stop: late };
+		lateWork.add(entry);
+		const considering = sighting.count >= settings.loopThreshold && settings.hypotheses > 0 && !failure.hypothesized;
+		// The longest the result waits, on this module's own clock: the notice must be back before the host's deadline.
+		// Up to what this kind of advice usually takes, at most the setting (D-098): later advice arrives late anyway.
+		const holdMs = considering
+			? holdFor(ctx.pool(), TRIAGE_ID, "hypothesis", settings.hypothesisTimeoutMs)
+			: holdFor(ctx.pool(), TRIAGE_ID, "diagnosis", settings.hintTimeoutMs);
+		const work = async (): Promise<Advice | undefined> => {
 			const evidence = evidenceFor(sighting, draft, outlived);
-			const hypotheses =
-				sighting.count >= settings.loopThreshold ? await hypothesize(failure, evidence, hold.signal, left) : undefined;
+			const hypotheses = considering ? await hypothesize(failure, evidence, late.signal) : undefined;
 			if (hypotheses) return { hypotheses };
-			const hint = await diagnose(failure, evidence, hold.signal, left);
+			const hint = await diagnose(failure, evidence, late.signal);
 			return hint === undefined ? undefined : { hint };
 		};
 		const report = (error: unknown) => {
 			ctx.log(`sidecar advice failed: ${String(error)}`);
 			return undefined;
 		};
+		// Caught on the work itself: it may fail after the wait for it is over.
+		const working = work().catch(report);
 		let timer: ReturnType<typeof setTimeout> | undefined;
-		const stopped = new Promise<undefined>((resolve) => {
-			timer = setTimeout(() => resolve(undefined), holdMs);
-			signal.addEventListener("abort", () => resolve(undefined), { once: true });
+		const held = new Promise<"held">((resolve) => {
+			timer = setTimeout(() => resolve("held"), holdMs);
+			signal.addEventListener("abort", () => resolve("held"), { once: true });
 		});
-		try {
-			// Caught on the work itself: it may fail after the wait for it is over.
-			return await Promise.race([work().catch(report), stopped]);
-		} finally {
-			clearTimeout(timer);
-			hold.abort();
+		const first = await Promise.race([working, held]);
+		clearTimeout(timer);
+		const forget = () => {
+			lateWork.delete(entry);
+		};
+		if (first !== "held") {
+			forget();
+			return first;
 		}
+		working
+			.then((advice) => {
+				forget();
+				if (advice && !late.signal.aborted) deliverAdvice(failure, sighting.id, sighting.count, command, advice);
+			})
+			.catch(report);
+		return undefined;
+	}
+
+	/** Advice that came after its notice, sent while the agent is still working (D-098). */
+	function deliverAdvice(failure: Failure, failureId: string, count: number, command: string, advice: Advice): void {
+		if (advice.hypotheses) {
+			const head = `[exo triage] Possible causes of the repeated failure of \`${command}\` (${count} times), considered since:`;
+			ctx.deliverLate(`${head}\n${renderHypotheses(advice.hypotheses)}`);
+			return;
+		}
+		const hint = advice.hint;
+		if (hint === undefined) return;
+		if (!ctx.deliverLate(`[exo triage hint on the repeated failure of \`${command}\`: ${hint}]`)) return;
+		// As a hint given with its notice is (see `rewriteToolResult`): counted, and not to be repeated.
+		// On the failure as it is now: a later sighting may have replaced the object this advice began with.
+		hintsGiven += 1;
+		const current = state.failures.get(failureId) ?? failure;
+		current.hints = [...current.hints, hint].slice(-MAX_KEPT_HINTS);
+		unsaved = true;
+		save();
 	}
 
 	/**
@@ -484,7 +541,7 @@ export function createTriage(raw: Readonly<Record<string, unknown>>, ctx: Module
 	 * grounded hypotheses that name a check are kept, and only a list of 2+ is shown: no LLM picks a
 	 * winner (research R6.1).
 	 */
-	async function hypothesize(failure: Failure, evidence: Evidence, signal: AbortSignal, left: () => number) {
+	async function hypothesize(failure: Failure, evidence: Evidence, signal: AbortSignal) {
 		const pool = ctx.pool();
 		if (settings.hypotheses === 0 || !pool || failure.hypothesized) return undefined;
 		// Asked once, shown or not: it is several calls each time.
@@ -496,7 +553,6 @@ export function createTriage(raw: Readonly<Record<string, unknown>>, ctx: Module
 				pool.run({
 					module: TRIAGE_ID,
 					priority: "interactive",
-					timeoutMs: Math.min(settings.hypothesisTimeoutMs, left()),
 					signal,
 					schema: HypothesisSchema,
 					schemaName: "hypothesis",
@@ -522,11 +578,10 @@ export function createTriage(raw: Readonly<Record<string, unknown>>, ctx: Module
 		return distinct.length >= 2 ? distinct : undefined;
 	}
 
-	async function diagnose(failure: Failure, evidence: Evidence, signal: AbortSignal, left: () => number) {
+	async function diagnose(failure: Failure, evidence: Evidence, signal: AbortSignal) {
 		const pool = ctx.pool();
 		if (!settings.sidecar || !pool || failure.hintCalls >= settings.maxHintsPerSignature) return undefined;
-		// The hypotheses used the time: the notice goes without a hint, and no call is spent on one.
-		if (signal.aborted || left() < MIN_SIDECAR_MS) return undefined;
+		if (signal.aborted) return undefined;
 		failure.hintCalls += 1;
 		unsaved = true;
 		const earlier = [...failure.hints];
@@ -534,7 +589,6 @@ export function createTriage(raw: Readonly<Record<string, unknown>>, ctx: Module
 		const result = await pool.run({
 			module: TRIAGE_ID,
 			priority: "interactive",
-			timeoutMs: Math.min(settings.hintTimeoutMs, left()),
 			signal,
 			schema: DiagnosisSchema,
 			schemaName: "diagnosis",

@@ -291,6 +291,23 @@ appendEntry<T = unknown>(customType: string, data?: T): void;
 - While streaming, **it requires `deliverAs`**. Without it, `prompt()` throws (`:1966-1971`), and the throw is reported as an `extension_error` (`:3350-3357`); it does not crash pi.
 - Both calls are fire-and-forget (`void`).
 
+### When a steered message reaches the model (D-098)
+Verified in pi 1.0.2's `dist/`:
+- `sendCustomMessage` (`core/agent-session.js:1746-1781`): while streaming and with `triggerTurn` not `false`, `deliverAs: "steer"` (the default) calls `agent.steer`.
+- **When idle:**
+  - With no trigger, the message is only appended to the session.
+  - With `triggerTurn: true` it starts a run. While `agent_settled` handlers run, the run is deferred until after them (`_deferredSettledActions`).
+- **The agent loop polls steering after each turn's tool batch, at `turn_end`** (`pi-agent-core/dist/agent-loop.js:186`), and before the next turn's preparation (`:107-112`).
+  - A message steered while the model is streaming its next reply is taken after that reply's tool batch.
+  - A message steered while the agent would otherwise stop keeps it going for one more turn.
+  - Steering drains one message at a time by default (`agent.js:139`).
+- **Message order:** the message is inserted after the tool results and before the next assistant message (`agent-loop.js:116-121`), so no tool call is left without its result.
+
+### Context usage (D-098)
+- `ctx.getContextUsage()` returns `{ tokens: number | null, contextWindow, percent }` (`core/extensions/types.d.ts:197-203`, `:248`). `tokens` is null right after a compaction, until the next reply.
+- Pi auto-compacts when `contextTokens > contextWindow - reserveTokens` (`core/compaction/compaction.js:173-176`). `reserveTokens` defaults to 16,384 (`:55`).
+- The setting is not exposed to extensions outside `session_before_compact`, whose `preparation.settings` has it.
+
 ### Designed continuation hook
 `agent_before_settle` (and `turn_end`) return `{entries: [{type: "custom_message", ...}], continue: true}` to append context and force **one** more model request (`extensions.md:117`; `agent-session.ts:1846-1870`).
 - Validation: continuing requires runnable context. An invalid request is reported and ignored (`agent-session.ts:973-1009`).

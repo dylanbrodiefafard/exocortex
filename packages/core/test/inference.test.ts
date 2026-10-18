@@ -67,7 +67,8 @@ describe("buildChatBody", () => {
 			model: "m",
 			messages: request.messages,
 			max_tokens: 64,
-			stream: false,
+			stream: true,
+			stream_options: { include_usage: true },
 			chat_template_kwargs: { enable_thinking: false },
 		});
 	});
@@ -113,7 +114,8 @@ describe("buildChatBody", () => {
 			chat_template_kwargs: main.chat_template_kwargs,
 			temperature: 0.6,
 			max_tokens: 64,
-			stream: false,
+			stream: true,
+			stream_options: { include_usage: true },
 			ninfer: { cache_write: false },
 		});
 		expect(buildChatBody(target({ thinkingToggle: true }), { ...fork, temperature: 0 })).toMatchObject({
@@ -142,7 +144,12 @@ describe("createOpenAIClient", () => {
 			// The fake reports usage in proportion to the request and the reply (about 4 characters a token).
 			usage: { promptTokens: 8, completionTokens: 2, cachedTokens: 7 },
 		});
-		expect(server?.requests[0]).toMatchObject({ model: "m", max_tokens: 5, stream: false });
+		expect(server?.requests[0]).toMatchObject({
+			model: "m",
+			max_tokens: 5,
+			stream: true,
+			stream_options: { include_usage: true },
+		});
 	});
 
 	it("maps HTTP errors and aborts to InferenceError kinds", async () => {
@@ -159,6 +166,100 @@ describe("createOpenAIClient", () => {
 		setTimeout(() => controller.abort(), 20);
 		await expect(pending).rejects.toBeInstanceOf(InferenceError);
 		await expect(pending).rejects.toMatchObject({ kind: "aborted" });
+	});
+
+	it("streams the reply: reasoning counts as progress, not text (D-098)", async () => {
+		const t = await serve([{ kind: "reasoning", reasoning: "let me think", text: "done", cachedTokens: 3 }]);
+		const progress: number[] = [];
+		const response = await createOpenAIClient(t).chat(
+			{ messages: [{ role: "user", content: "x" }], maxTokens: 50 },
+			undefined,
+			{ onProgress: (chars) => progress.push(chars), liveness: { firstTokenMs: 5_000, stallMs: 5_000 } },
+		);
+		expect(response.text).toBe("done");
+		expect(response.usage?.cachedTokens).toBe(3);
+		expect(progress).toEqual(["let me think".length, "let me think".length + 4, "let me think".length + 4]);
+	});
+
+	it("gives up on an engine that stops answering, not on one that is slow (D-098)", async () => {
+		const t = await serve([
+			{ kind: "stall", text: "half of it" },
+			{ kind: "text", text: "slow but alive", delayMs: 300 },
+			{ kind: "text", text: "never starts", delayMs: 5_000 },
+		]);
+		const client = createOpenAIClient(t);
+		const request = { messages: [{ role: "user", content: "x" }], maxTokens: 5 };
+		await expect(
+			client.chat(request, undefined, { liveness: { firstTokenMs: 5_000, stallMs: 150 } }),
+		).rejects.toMatchObject({
+			kind: "stalled",
+			message: expect.stringContaining("no token for 150 ms"),
+		});
+		// Slower than the stall window before its first token, which is the first-token window's to judge.
+		expect((await client.chat(request, undefined, { liveness: { firstTokenMs: 2_000, stallMs: 150 } })).text).toBe(
+			"slow but alive",
+		);
+		await expect(
+			client.chat(request, undefined, { liveness: { firstTokenMs: 200, stallMs: 150 } }),
+		).rejects.toMatchObject({
+			kind: "stalled",
+			message: expect.stringContaining("no token within"),
+		});
+	});
+
+	it("reads a whole reply from a server that does not stream, and reports a stream's error event", async () => {
+		const json = (body: unknown, type = "application/json") =>
+			new Response(typeof body === "string" ? body : JSON.stringify(body), { headers: { "content-type": type } });
+		const whole = createOpenAIClient(target(), async () =>
+			json({ choices: [{ message: { content: "whole" }, finish_reason: "stop" }] }),
+		);
+		const request = { messages: [{ role: "user", content: "x" }], maxTokens: 5 };
+		expect((await whole.chat(request)).text).toBe("whole");
+
+		const failing = createOpenAIClient(target(), async () =>
+			json('data: {"error":{"message":"generation_recovery_exhausted"}}\n\n', "text/event-stream"),
+		);
+		await expect(failing.chat(request)).rejects.toMatchObject({
+			kind: "http",
+			message: expect.stringContaining("recovery"),
+		});
+		const empty = createOpenAIClient(target(), async () => json("data: [DONE]\n\n", "text/event-stream"));
+		await expect(empty.chat(request)).rejects.toMatchObject({ kind: "bad_response" });
+		const garbled = createOpenAIClient(target(), async () => json("data: {not json\n\n", "text/event-stream"));
+		await expect(garbled.chat(request)).rejects.toMatchObject({ kind: "bad_response" });
+		// A last line with no newline after it is read, not dropped.
+		const unterminated = createOpenAIClient(target(), async () =>
+			json('data: {"choices":[{"delta":{"content":"tail"},"finish_reason":"stop"}]}', "text/event-stream"),
+		);
+		expect((await unterminated.chat(request)).text).toBe("tail");
+	});
+
+	it("closes the request when the stream goes wrong or says it is done, so the engine stops (D-098)", async () => {
+		const opened: { cancelled: boolean }[] = [];
+		const streaming = (lines: string[], keepOpen: boolean) => async () => {
+			const state = { cancelled: false };
+			opened.push(state);
+			const encoder = new TextEncoder();
+			const body = new ReadableStream<Uint8Array>({
+				start(controller) {
+					for (const line of lines) controller.enqueue(encoder.encode(`${line}\n\n`));
+					if (!keepOpen) controller.close();
+				},
+				cancel() {
+					state.cancelled = true;
+				},
+			});
+			return new Response(body, { headers: { "content-type": "text/event-stream" } });
+		};
+		const chunk = '{"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}';
+		const request = { messages: [{ role: "user", content: "x" }], maxTokens: 5 };
+		const liveness = { firstTokenMs: 5_000, stallMs: 200 };
+		const bad = createOpenAIClient(target(), streaming([`data: ${chunk}`, "data: not json"], true));
+		await expect(bad.chat(request, undefined, { liveness })).rejects.toMatchObject({ kind: "bad_response" });
+		// `[DONE]` with the connection left open is the end, not a stall.
+		const done = createOpenAIClient(target(), streaming([`data: ${chunk}`, "data: [DONE]"], true));
+		expect((await done.chat(request, undefined, { liveness })).text).toBe("ok");
+		expect(opened.map((o) => o.cancelled)).toEqual([true, true]);
 	});
 
 	it("reports unreachable servers as network errors", async () => {

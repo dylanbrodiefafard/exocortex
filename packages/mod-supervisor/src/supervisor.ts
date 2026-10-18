@@ -188,6 +188,8 @@ const FINAL_MESSAGE_CHARS = 16_000;
 const CLAIMS_TAIL_CHARS = 300;
 const VOTE_TEMPERATURE = 0.7;
 const GIT_TIMEOUT_MS = 10_000;
+/** The longest a timer runs: a check command with no limit of its own (D-098). */
+const NO_TIME_LIMIT_MS = 2 ** 31 - 1;
 /** Enough of a diff for the evidence budget; a longer one loses its start, and says so. */
 const GIT_OUTPUT_CHARS = 256 * 1024;
 /** New files whose content is offered to the evidence; each is read up to the evidence budget. */
@@ -247,33 +249,117 @@ export function createSupervisor(raw: Readonly<Record<string, unknown>>, ctx: Mo
 	 * the host when the user sends a message or presses Escape. Its findings come back as a
 	 * follow-up like the verdict's. False when the host cannot run it.
 	 */
-	const startReview = (current: Task | undefined, requests: readonly string[], trigger: ReviewTrigger): boolean =>
-		ctx.background("reviewing the changes", async (signal) => {
-			const result = await runReview(ctx, settings, current, requests, signal);
+	/** A review of the task's change, as a follow-up (D-097); undefined when it was stopped. */
+	const reviewAction = async (
+		current: Task | undefined,
+		requests: readonly string[],
+		trigger: ReviewTrigger,
+		signal: AbortSignal,
+	): Promise<SettleAction | undefined> => {
+		const result = await runReview(ctx, settings, current, requests, signal);
+		if (signal.aborted) return undefined;
+		if (result === undefined) {
+			return { kind: "notify", summary: "supervisor: the review got no answer from the engine", level: "warning" };
+		}
+		// The last wait, before anything about the task changes: a review stopped here changes nothing.
+		const diffHash =
+			result !== "no_changes" && result.findings.length > 0
+				? ((await workspaceFingerprint(ctx, await current?.startRef)) ?? "")
+				: "";
+		if (signal.aborted) return undefined;
+		keepReview(ctx, current, result, trigger);
+		if (result === "no_changes") {
+			return { kind: "notify", summary: "supervisor: no changes to review since the task began", level: "info" };
+		}
+		if (result.findings.length === 0) {
+			if (current) await persist(current);
+			return { kind: "notify", summary: `supervisor: ${reviewSummary(result)}`, level: "info" };
+		}
+		const action = reviewFollowUp(ctx, settings, current, result, diffHash);
+		if (current) await persist(current);
+		return {
+			...action,
+			// Used: sent, put in the editor, or added to the user's draft. A later review does not repeat it.
+			commit: () => {
+				for (const finding of result.findings) current?.reported.add(findingKey(finding));
+				if (current) void persist(current);
+			},
+		};
+	};
+
+	/** `/exo review`: the review as a background job (D-097). False when the host cannot run one. */
+	const startReview = (current: Task | undefined, requests: readonly string[]): boolean =>
+		ctx.background("reviewing the changes", (signal) => reviewAction(current, requests, "command", signal));
+
+	/**
+	 * What the supervisor does once the agent stops (brief §6.1): the ledger, the evidence and the
+	 * user's checks, the verdict, its follow-up, and on `complete` the review (D-097). It runs as a
+	 * background job, so the user has the session back at once (D-098). Undefined when it was
+	 * stopped, which changes nothing: every change to the task comes after the last wait.
+	 */
+	const judgeWork = async (current: Task, info: SettleInfo, signal: AbortSignal): Promise<SettleAction | undefined> => {
+		const skip = (reason: string): undefined => {
+			ctx.record({ kind: "exo.action", data: { action: "skipped", reason } });
+			return undefined;
+		};
+		// The ledger is read while the agent works; it has no deadline, only the engine's liveness.
+		const ledger = await current.ledger;
+		if (signal.aborted) return undefined;
+		if (!ledger || ledger.criteria.length === 0) return skip("no_ledger");
+		if (current.continuations >= settings.maxContinuations) return skip("max_continuations");
+
+		// Asked at most once per settle, and only if something needs it.
+		let asked: Promise<Reading | undefined> | undefined;
+		const reading = () => {
+			asked ??= readFinalMessage(ctx, settings, info.lastAssistantText, signal);
+			return asked;
+		};
+		const evidence = await gatherEvidence(ctx, settings, current, ledger, reading, signal);
+		if (signal.aborted) return undefined;
+		// Counted only once the verdict is in: a job stopped during it must leave the streak as it was.
+		const { streak, stalled } = nextStreak(current, evidence.diffHash);
+		if (stalled) {
+			current.noProgressStreak = streak;
+			await persist(current);
+			return skip("no_progress");
+		}
+
+		const verdict = await decide(ctx, settings, ledger, evidence, info.lastAssistantText, reading, signal);
+		if (signal.aborted) return undefined;
+		current.noProgressStreak = streak;
+		if (!verdict) return skip("verdict_unavailable");
+		lastVerdict = verdict.verdict;
+		recordVerdict(ctx, verdict, ledger, current, evidence);
+		return afterVerdict(current, ledger, verdict, evidence, signal);
+	};
+
+	/** The follow-up to a verdict: on `complete`, the review's when there is one to run (D-097). */
+	const afterVerdict = async (
+		current: Task,
+		ledger: Ledger,
+		verdict: Judgement,
+		evidence: Gathered,
+		signal: AbortSignal,
+	): Promise<SettleAction | undefined> => {
+		const reviewNext =
+			settings.review &&
+			verdict.verdict === "complete" &&
+			!verdict.asked_user &&
+			!current.reviewed &&
+			!evidence.noChanges;
+		if (reviewNext) {
+			// The verdict's own action on `complete` is a notice; the review's follow-up says more.
+			const reviewed = await reviewAction(current, ledger.requests, "settle", signal);
 			if (signal.aborted) return undefined;
-			if (result === undefined) {
-				return { kind: "notify", summary: "supervisor: the review got no answer from the engine", level: "warning" };
+			if (reviewed?.kind === "notify") {
+				return { ...reviewed, summary: reviewed.summary.replace("supervisor: ", "supervisor: complete · ") };
 			}
-			keepReview(ctx, current, result, trigger);
-			if (result === "no_changes") {
-				return { kind: "notify", summary: "supervisor: no changes to review since the task began", level: "info" };
-			}
-			if (current) await persist(current);
-			if (result.findings.length === 0) {
-				return { kind: "notify", summary: `supervisor: ${reviewSummary(result)}`, level: "info" };
-			}
-			const diffHash = (await workspaceFingerprint(ctx, await current?.startRef)) ?? "";
-			const action = reviewFollowUp(ctx, settings, current, result, diffHash);
-			if (current) await persist(current);
-			return {
-				...action,
-				// Used: sent, put in the editor, or added to the user's draft. A later review does not repeat it.
-				commit: () => {
-					for (const finding of result.findings) current?.reported.add(findingKey(finding));
-					if (current) void persist(current);
-				},
-			};
-		});
+			if (reviewed) return reviewed;
+		}
+		const action = act(ctx, settings, current, verdict, evidence);
+		await persist(current);
+		return action;
+	};
 
 	return {
 		id: SUPERVISOR_ID,
@@ -367,68 +453,23 @@ export function createSupervisor(raw: Readonly<Record<string, unknown>>, ctx: Mo
 		async onSettle(info: SettleInfo, signal: AbortSignal): Promise<SettleAction | undefined> {
 			const current = task;
 			if (info.outcome !== "completed") return undefined;
-			const skip = (reason: string): undefined => {
-				ctx.record({ kind: "exo.action", data: { action: "skipped", reason } });
-				return undefined;
-			};
 			// The agent ran without a message this module saw (it was switched on mid-run, say).
-			if (!current) return skip("no_task");
-			current.pending = undefined;
-
-			const ledger = await withTimeout(current.ledger, settings.ledgerTimeoutMs);
-			if (!ledger || ledger.criteria.length === 0) return skip("no_ledger");
-			if (current.continuations >= settings.maxContinuations) return skip("max_continuations");
-
-			// Asked at most once per settle, and only if something needs it.
-			let asked: Promise<Reading | undefined> | undefined;
-			const reading = () => {
-				asked ??= readFinalMessage(ctx, settings, info.lastAssistantText, signal);
-				return asked;
-			};
-			const evidence = await gatherEvidence(ctx, settings, current, ledger, reading, signal);
-			if (stalled(current, evidence.diffHash)) {
-				await persist(current);
-				return skip("no_progress");
+			if (!current) {
+				ctx.record({ kind: "exo.action", data: { action: "skipped", reason: "no_task" } });
+				return undefined;
 			}
-
-			const verdict = await decide(ctx, settings, ledger, evidence, info.lastAssistantText, reading, signal);
-			if (!verdict) return skip("verdict_unavailable");
-			lastVerdict = verdict.verdict;
-			ctx.record({
-				kind: "exo.verdict",
-				data: {
-					...verdict,
-					criteria: [...ledger.criteria],
-					continuations: current.continuations,
-					checks: evidence.checks.map((c) => ({
-						command: c.command,
-						source: c.source,
-						exitCode: c.output.exitCode,
-						timedOut: c.output.timedOut,
-						outcome: checkOutcome(c.output),
-					})),
-				},
-			});
-			const action = act(ctx, settings, current, verdict, evidence);
-			// The review runs after the session is handed back, for as long as it takes (D-097).
-			const reviewing =
-				settings.review &&
-				verdict.verdict === "complete" &&
-				!verdict.asked_user &&
-				!current.reviewed &&
-				!evidence.noChanges &&
-				startReview(current, ledger.requests, "settle");
-			await persist(current);
-			return reviewing && action?.kind === "notify"
-				? { ...action, summary: `${action.summary} · reviewing the changes` }
-				: action;
+			current.pending = undefined;
+			// In the background, with no time limit: Escape or a new message stops it (D-098). Without a
+			// UI (print mode) nobody types, and it runs here, inside the hook's budget, as before.
+			if (ctx.background("checking the work", (jobSignal) => judgeWork(current, info, jobSignal))) return undefined;
+			return judgeWork(current, info, signal);
 		},
 
 		async command(args: string) {
 			if (args.trim() !== "review") return undefined;
 			const current = task ?? anchor;
 			const ledger = await current?.ledger;
-			if (!startReview(current, ledger?.requests ?? [], "command")) {
+			if (!startReview(current, ledger?.requests ?? [])) {
 				return "Review: it runs in the background, which needs pi's interactive UI.";
 			}
 			return "Reviewing the changes in the background. The findings will go in your editor; Escape or a new message stops the review.";
@@ -439,6 +480,25 @@ export function createSupervisor(raw: Readonly<Record<string, unknown>>, ctx: Mo
 			return `supervisor (${settings.mode}): ${lastVerdict ?? "watching"} · ${task.continuations}/${settings.maxContinuations} continuations`;
 		},
 	};
+}
+
+/** The verdict as the trace keeps it, with the criteria and what each check command did. */
+function recordVerdict(ctx: ModuleContext, verdict: Judgement, ledger: Ledger, task: Task, evidence: Gathered): void {
+	ctx.record({
+		kind: "exo.verdict",
+		data: {
+			...verdict,
+			criteria: [...ledger.criteria],
+			continuations: task.continuations,
+			checks: evidence.checks.map((c) => ({
+				command: c.command,
+				source: c.source,
+				exitCode: c.output.exitCode,
+				timedOut: c.output.timedOut,
+				outcome: checkOutcome(c.output),
+			})),
+		},
+	});
 }
 
 /** The user's configured checks are their definition of "the tests" (D-084): core's reading takes them as test runs. */
@@ -520,10 +580,10 @@ async function stillWanted(
 }
 
 /** Brief §6.1 guard: two continuations in a row that leave the diff unchanged stop the supervisor. */
-function stalled(task: Task, diffHash: string): boolean {
-	if (task.lastContinuationDiff === undefined) return false;
-	task.noProgressStreak = diffHash === task.lastContinuationDiff ? task.noProgressStreak + 1 : 0;
-	return task.noProgressStreak >= 2;
+function nextStreak(task: Task, diffHash: string): { readonly streak: number; readonly stalled: boolean } {
+	if (task.lastContinuationDiff === undefined) return { streak: task.noProgressStreak, stalled: false };
+	const streak = diffHash === task.lastContinuationDiff ? task.noProgressStreak + 1 : 0;
+	return { streak, stalled: streak >= 2 };
 }
 
 interface Gathered {
@@ -794,7 +854,6 @@ async function askLedger(
 	const result = await ctx.pool()?.run({
 		module: SUPERVISOR_ID,
 		priority: "interactive",
-		timeoutMs: settings.ledgerTimeoutMs,
 		schema: LedgerSchema,
 		schemaName: "goal_ledger",
 		request: {
@@ -831,7 +890,6 @@ async function readFinalMessage(
 	const result = await ctx.pool()?.run({
 		module: SUPERVISOR_ID,
 		priority: "critical",
-		timeoutMs: settings.verdictTimeoutMs,
 		signal,
 		schema: ReadingSchema,
 		schemaName: "final_message",
@@ -929,7 +987,8 @@ async function runChecks(
 		ctx.progress(`running: ${command}`);
 		checks.push({
 			command,
-			output: await ctx.runCommand(command, { timeoutMs: settings.checkTimeoutMs, signal }),
+			// The user's own command takes as long as it takes, unless they set a limit (D-098).
+			output: await ctx.runCommand(command, { timeoutMs: settings.checkTimeoutMs ?? NO_TIME_LIMIT_MS, signal }),
 			source,
 		});
 	}
@@ -1063,7 +1122,7 @@ async function judge(
 	const criteria = ledger.criteria.map((c, i) => `${i + 1}. ${c}`).join("\n");
 	const userRequest = requestView(ledger.requests);
 	const final = finalMessageView(finalMessage, settings.finalMessage, evidence.claims);
-	const common = { module: SUPERVISOR_ID, priority: "critical" as const, timeoutMs: settings.verdictTimeoutMs, signal };
+	const common = { module: SUPERVISOR_ID, priority: "critical" as const, signal };
 	const request = (content: string) => ({
 		messages: [{ role: "user" as const, content }],
 		maxTokens: SIDECAR_MAX_TOKENS,
@@ -1196,8 +1255,4 @@ async function gitHead(ctx: ModuleContext): Promise<string | undefined> {
 	} catch {
 		return undefined;
 	}
-}
-
-function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | undefined> {
-	return Promise.race([promise, new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), ms).unref())]);
 }

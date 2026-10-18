@@ -38,6 +38,7 @@ export {
 export {
 	createSidecarPool,
 	type DrainResult,
+	holdFor,
 	type ModuleLimits,
 	moduleLimitsFrom,
 	type PoolStats,

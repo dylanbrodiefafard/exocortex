@@ -219,7 +219,7 @@ export async function interview(
 	if (!dialog) return "The interview needs an interactive session.";
 	const result = await runInterview(dialog, INTERVIEW);
 	// An answer is about the user's work in general: it applies in every repo, named or not.
-	const repo = (await scope).id;
+	const repo = (await scope()).id;
 	const before = new Set(store.preferences().map((p) => p.id));
 	for (const { question, option } of result.answers) applyAnswer(question, option, repo);
 	let unread = false;

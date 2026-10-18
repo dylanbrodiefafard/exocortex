@@ -422,9 +422,9 @@ describe("S5: a check that was cut short", () => {
 		setTimeout(() => abort.abort(), 200);
 		await sup.onSettle?.(DONE, abort.signal);
 		expect(t.progress).toEqual(["running: sleep 20"]);
-		// Nothing deterministic came of it; the verdict call was aborted with everything else.
+		// Nothing deterministic came of it, and nothing is recorded: the user stopped it (D-098).
 		expect(t.records.filter((r) => r.kind === "exo.verdict")).toEqual([]);
-		expect(actions().at(-1)).toEqual({ action: "skipped", reason: "verdict_unavailable" });
+		expect(actions()).toEqual([]);
 	}, 10_000);
 });
 

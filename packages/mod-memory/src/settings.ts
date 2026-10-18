@@ -18,7 +18,6 @@ export const SettingsSchema = Type.Object(
 		 * does not refuse becomes a card with a deterministic summary of the edit.
 		 */
 		distill: Type.Boolean({ default: true }),
-		distillTimeoutMs: Type.Integer({ minimum: 1_000, default: 30_000 }),
 		thinking: Type.Boolean({ default: false }),
 		maxCards: Type.Integer({ minimum: 1, maximum: 5, default: 2 }),
 		/** Injection budget (~4 chars per token; brief §6.4 caps it near 400 tokens). */
@@ -46,12 +45,12 @@ export const SettingsSchema = Type.Object(
 		maxPreferenceChars: Type.Integer({ minimum: 200, default: 900 }),
 		/** A preference not stated as a standing rule applies once it was said in this many sessions. */
 		preferenceMinSessions: Type.Integer({ minimum: 1, default: 2 }),
-		preferenceTimeoutMs: Type.Integer({ minimum: 1_000, default: 30_000 }),
 		/**
 		 * Have a sidecar pick which preferences fit a prompt and are not already stated in it, before
 		 * the agent starts. Off, or when the sidecar fails: all of them, minus keyword matches.
 		 */
 		preferenceSelect: Type.Boolean({ default: true }),
+		/** The most the agent's start waits for the pick; once a few were timed, half again their 90th percentile, if less (D-098). */
 		preferenceSelectTimeoutMs: Type.Integer({ minimum: 500, default: 4_000 }),
 		/**
 		 * With an embeddings server (D-062): a failing output whose error line is at least this similar

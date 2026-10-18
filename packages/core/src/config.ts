@@ -68,8 +68,19 @@ const PoolConfig = Type.Object(
 		maxConcurrent: Type.Integer({ minimum: 1, default: 6 }),
 		/** Slots sidecars never use, so the main agent is never queued behind them. */
 		reservedForMain: Type.Integer({ minimum: 0, default: 2 }),
-		/** Default end-to-end deadline (queue + generation) per sidecar call. */
-		timeoutMs: Type.Integer({ minimum: 1, maximum: MAX_TIMEOUT_MS, default: 20_000 }),
+		/**
+		 * A total deadline (queue + generation) for calls that set none. Unset (the default): none, and
+		 * a call ends when it is done, its caller cancels it, or the engine stops answering
+		 * (`firstTokenMs`, `stallMs`; D-098). A call that holds the agent sets its own.
+		 */
+		timeoutMs: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_TIMEOUT_MS })),
+		/**
+		 * The engine counts as stopped when no token arrives within this, plus the time a slow prefill
+		 * of the prompt takes (D-098). Default 120 s.
+		 */
+		firstTokenMs: Type.Optional(Type.Integer({ minimum: 1_000, maximum: MAX_TIMEOUT_MS })),
+		/** The engine counts as stopped when tokens stop arriving for this long (D-098). Default 60 s. */
+		stallMs: Type.Optional(Type.Integer({ minimum: 1_000, maximum: MAX_TIMEOUT_MS })),
 		/**
 		 * How long a `background` call may be held for the main agent in one stretch before it gives
 		 * up (`expired_held`). Its deadline does not run while it is held (D-080). Default 10 minutes.

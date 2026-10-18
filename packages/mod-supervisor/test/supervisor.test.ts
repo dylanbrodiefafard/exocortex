@@ -88,6 +88,8 @@ function context(script: Script | undefined): ModuleContext {
 		runCommand: (command, options) => runShellCommand(command, { cwd: repo, ...options }),
 		log: () => {},
 		background: () => false,
+		deliverLate: () => false,
+		forkPrefix: async () => undefined,
 	};
 }
 

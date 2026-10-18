@@ -385,12 +385,39 @@ describe("checks after an edit", () => {
 		expect(await deliver(module, outcome("edit", { path: "a.rs" }, "ok"))).toBeUndefined();
 	});
 
-	it("shows nothing for a check that runs out of time", async () => {
+	it("sends what a check slower than its hold finds as late help, unless something made it stale (D-098)", async () => {
+		const E0308 = "error[E0308]: mismatched types\n  --> src/b.rs:9:1";
+		const E0425 = "error[E0425]: cannot find value `x` in this scope\n  --> src/a.rs:3:5";
 		write("a.rs", "");
-		const checks = [{ files: "*.rs", command: "sleep 5" }];
-		const { module } = setup({ checks, checkTimeoutMs: 200 });
-		await module.beforeToolCall?.({ toolName: "edit", toolCallId: "1", input: { path: "a.rs" } }, signal);
+		write("errors.txt", "");
+		// A stand-in for a slow `cargo check`: slow once the marker file exists.
+		const checks = [
+			{ files: "*.rs", command: "if [ -f slow ]; then sleep 0.6; fi; cat errors.txt; test ! -s errors.txt" },
+		];
+		const { module, late, records, logs } = setup({ checks, checkHoldMs: 200 });
+		const edit = () => module.beforeToolCall?.({ toolName: "edit", toolCallId: "1", input: { path: "a.rs" } }, signal);
+		await edit();
+		write("slow", "");
+		write("errors.txt", `${E0308}\n`);
+		// The edit's result goes back after the hold, without the check.
 		expect(await deliver(module, outcome("edit", { path: "a.rs" }, "ok"))).toBeUndefined();
+		await new Promise((resolve) => setTimeout(resolve, 900));
+		expect(logs).toEqual([]);
+		expect(late).toEqual([
+			`[exo tools] if [ -f slow ]; then sleep 0.6; fi; cat errors.txt; test ! -s errors.txt reports a new error after your edit to a.rs:\n${E0308}`,
+		]);
+		expect(module.status?.()).toContain("1 new error(s) shown");
+		expect(records).toEqual([]);
+
+		// A shell command before the check ends: its result would mix that command's changes in.
+		rmSync(join(dir, "slow"));
+		await edit();
+		write("slow", "");
+		write("errors.txt", `${E0308}\n${E0425}\n`);
+		await deliver(module, outcome("edit", { path: "a.rs" }, "ok"));
+		module.onToolResult?.(outcome("bash", { command: "touch b.rs" }, ""));
+		await new Promise((resolve) => setTimeout(resolve, 900));
+		expect(late).toHaveLength(1);
 	});
 
 	it("checks nothing when switched off or for files no check covers", async () => {

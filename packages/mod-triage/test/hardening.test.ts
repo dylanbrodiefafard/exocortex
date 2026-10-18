@@ -308,6 +308,46 @@ describe("T5: the notice does not wait on the sidecar, and state follows what wa
 		expect(Date.now() - started).toBeLessThan(400);
 	});
 
+	it("sends a hint that came after its notice as late help, and counts it once sent (D-098)", async () => {
+		const slow = () => new Promise<SidecarReply>((resolve) => setTimeout(() => resolve(HINT), 300));
+		const { triage, t } = setup({ hintTimeoutMs: 500 }, slow);
+		await deliver(triage, draft(E0502));
+		const second = await offer(triage, draft(E0502), AbortSignal.timeout(50));
+		expect(second?.note).toBe("repeat 2");
+		await new Promise((resolve) => setTimeout(resolve, 400));
+		expect(t.late).toEqual([
+			"[exo triage hint on the repeated failure of `cargo build`: The borrow of `self.stack` outlives the push. Clone the value first.]",
+		]);
+		expect(triage.status?.()).toBe("triage (1 repeats, 1 hints)");
+	});
+
+	it("drops late advice once the command ran again, and does not count advice the idle agent refused", async () => {
+		const slow = () => new Promise<SidecarReply>((resolve) => setTimeout(() => resolve(HINT), 200));
+		const { triage, t } = setup({ hintTimeoutMs: 500 }, slow);
+		await deliver(triage, draft(E0502));
+		await offer(triage, draft(E0502), AbortSignal.timeout(20));
+		// The same command ran again before the hint was ready: its output is not the one the hint read.
+		triage.onToolResult?.(draft(E0502, { toolCallId: "c3" }));
+		await new Promise((resolve) => setTimeout(resolve, 300));
+		expect(t.late).toEqual([]);
+
+		t.idle = true;
+		await offer(triage, draft(E0502, { toolCallId: "c4" }), AbortSignal.timeout(20));
+		await new Promise((resolve) => setTimeout(resolve, 300));
+		expect(t.late).toEqual([]);
+		expect(triage.status?.()).toContain("0 hints");
+	});
+
+	it("drops late advice once the same failure is seen again, under another spelling of the command", async () => {
+		const slow = () => new Promise<SidecarReply>((resolve) => setTimeout(resolve, 200, HINT));
+		const { triage, t } = setup({ hintTimeoutMs: 500 }, slow);
+		await deliver(triage, draft(E0502));
+		await offer(triage, draft(E0502), AbortSignal.timeout(20));
+		triage.onToolResult?.(draft(E0502, { toolCallId: "c3", input: { command: "cargo build 2>&1" } }));
+		await new Promise((resolve) => setTimeout(resolve, 300));
+		expect(t.late).toEqual([]);
+	});
+
 	it("counts a failure whose rewrite the host never asked for", async () => {
 		const { triage } = setup({ sidecar: false });
 		triage.onToolResult?.(draft(E0502));

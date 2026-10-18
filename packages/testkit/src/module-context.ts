@@ -4,6 +4,7 @@ import {
 	type Embedder,
 	ENGINE_PROFILES,
 	type EngineFeatures,
+	type ForkPrefix,
 	type InferenceClient,
 	InferenceError,
 	type JsonValue,
@@ -33,6 +34,10 @@ export interface TestModuleContext {
 	readonly states: JsonValue[];
 	/** Every background job the module started (D-097), run at once: `stop` aborts it, `done` is its action. */
 	readonly jobs: TestJob[];
+	/** Late help the module sent while the agent was working (D-098), in order. */
+	readonly late: string[];
+	/** Whether the agent counts as idle: late help is then refused. Settable. */
+	idle: boolean;
 }
 
 interface TestJob {
@@ -59,6 +64,13 @@ export function createTestModuleContext(options: {
 	readonly features?: Partial<EngineFeatures>;
 	/** Cached prompt tokens each reply reports, of 100; not reported when left out. */
 	readonly cachedTokens?: number;
+	/**
+	 * Run background jobs (D-097), as an interactive session does. Off by default: a module then
+	 * does its work in the hook, as without a UI, and a test reads the hook's result.
+	 */
+	readonly background?: boolean;
+	/** The main agent's context a module may continue from (`ModuleContext.forkPrefix`); none when left out. */
+	readonly forkPrefix?: ForkPrefix;
 }): TestModuleContext {
 	const requests: ChatRequest[] = [];
 	const records: Omit<TraceEventInput, "module" | "synthetic">[] = [];
@@ -66,9 +78,10 @@ export function createTestModuleContext(options: {
 	const progress: string[] = [];
 	const states: JsonValue[] = [];
 	const jobs: TestJob[] = [];
+	const late: string[] = [];
 	const { reply } = options;
 	const client: InferenceClient | undefined = reply && {
-		async chat(request, signal) {
+		async chat(request, signal, chatOptions) {
 			requests.push(request);
 			// A real client stops waiting when its signal fires; a fake that does not would let a
 			// module's timeout and cancellation paths go untested.
@@ -79,8 +92,11 @@ export function createTestModuleContext(options: {
 			});
 			const value = await Promise.race([reply(request, requests.length - 1), aborted]);
 			if (value instanceof Error) throw new InferenceError("http", value.message);
+			const text = typeof value === "string" ? value : JSON.stringify(value);
+			// The whole reply arrives as one piece, as from an engine that streams it in one chunk.
+			chatOptions?.onProgress?.(text.length);
 			return {
-				text: typeof value === "string" ? value : JSON.stringify(value),
+				text,
 				finishReason: "stop",
 				usage: { promptTokens: 100, completionTokens: 20, cachedTokens: options.cachedTokens ?? null },
 			};
@@ -115,13 +131,15 @@ export function createTestModuleContext(options: {
 				return Float32Array.from(v.map((x) => x / length));
 			}),
 	};
-	return {
+	const result: TestModuleContext = {
 		requests,
 		records,
 		logs,
 		progress,
 		states,
 		jobs,
+		late,
+		idle: false,
 		context: {
 			cwd: options.cwd,
 			sessionId: options.sessionId ?? "test-session",
@@ -135,12 +153,20 @@ export function createTestModuleContext(options: {
 			progress: (message) => progress.push(message),
 			log: (message) => logs.push(message),
 			background: (label, job) => {
+				if (!options.background) return false;
 				// As the real host does: one job per module, a new one stops the last.
 				jobs.at(-1)?.stop.abort();
 				const stop = new AbortController();
 				jobs.push({ label, stop, done: job(stop.signal) });
 				return true;
 			},
+			forkPrefix: async () => options.forkPrefix,
+			deliverLate: (text) => {
+				if (result.idle) return false;
+				late.push(text);
+				return true;
+			},
 		},
 	};
+	return result;
 }

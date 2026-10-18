@@ -30,8 +30,12 @@ export const SettingsSchema = Type.Object(
 		builtinChecks: Type.Boolean({ default: true }),
 		/** Your own checks, tried in order before the built-in ones. They run commands, so only your own config sets them. */
 		checks: Type.Array(CheckSchema, { default: [], ...USER_ONLY }),
-		/** A check that takes longer is stopped and shows nothing. */
-		checkTimeoutMs: Type.Integer({ minimum: 200, default: 4_000 }),
+		/**
+		 * How long an edit's result waits for its check, and the edit itself for the check before it.
+		 * A check after an edit that takes longer is not stopped: its new errors reach the model as
+		 * late help before its next call (D-098). One before the edit that takes longer shows nothing.
+		 */
+		checkHoldMs: Type.Integer({ minimum: 200, default: 4_000 }),
 		/** Lines of new errors shown after an edit. */
 		maxDiagnosticLines: Type.Integer({ minimum: 1, default: 20 }),
 	},

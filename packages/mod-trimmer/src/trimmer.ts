@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
 	type ExoModule,
+	holdFor,
 	loadPrompt,
 	type ModuleContext,
 	SIDECAR_MAX_TOKENS,
@@ -300,7 +301,8 @@ async function selectWithSidecar(
 	const result = await pool.run({
 		module: TRIMMER_ID,
 		priority: "interactive",
-		timeoutMs: settings.sidecarTimeoutMs,
+		// No late use for a trim: the result waits, up to what this kind of call usually takes (D-098).
+		timeoutMs: holdFor(pool, TRIMMER_ID, "line_selection", settings.sidecarTimeoutMs),
 		signal,
 		schema: SelectionSchema,
 		schemaName: "line_selection",

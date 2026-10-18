@@ -93,4 +93,40 @@ describe("repo scope (M12)", () => {
 		expect(t.records.map((r) => r.data)).toEqual([{ action: "scope_unknown" }]);
 		expect(memory.status?.()).toContain("repo unknown: not learning");
 	});
+
+	it("does not make the hot path wait on a retry whose git hangs (D-098)", async () => {
+		const t = createTestModuleContext({ cwd: space.dir(), reply: () => ({ preferences: [] }) });
+		let calls = 0;
+		const context: ModuleContext = {
+			...t.context,
+			// The first lookup times out; the retry's git never answers.
+			runCommand: () => (calls++ === 0 ? Promise.resolve(TIMED_OUT) : new Promise<CommandOutput>(() => undefined)),
+		};
+		const memory = createMemory({ dbPath: space.dbPath(), distill: false }, context);
+		await idle(20);
+		memory.onUserTurn?.({ text: "fix the build", origin: "user" });
+		const started = Date.now();
+		await memory.rewriteToolResult?.(
+			{ ...fail(), toolCallId: "c", current: "", fullOutputPath: null, status: null },
+			signal,
+		);
+		expect(Date.now() - started).toBeLessThan(200);
+	});
+
+	it("asks git again at the user's next message, and learns once it answers (D-098)", async () => {
+		const { context } = withGit([TIMED_OUT, ran("git@github.com:owner/repo.git")]);
+		const memory = createMemory({ dbPath: space.dbPath(), distill: false }, context);
+		await idle(20);
+		expect(memory.status?.()).toContain("repo unknown");
+		memory.onUserTurn?.({ text: "fix the build", origin: "user" });
+		await idle(20);
+		expect(memory.status?.()).not.toContain("repo unknown");
+		for (const tool of [fail(), edit, pass()]) memory.onToolResult?.(tool);
+		await idle(80);
+		expect(
+			openMemoryStore(space.dbPath())
+				.cards()
+				.map((c) => c.scope),
+		).toEqual(["remote:github.com/owner/repo"]);
+	});
 });

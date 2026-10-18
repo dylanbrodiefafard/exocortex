@@ -3,8 +3,6 @@ import { Value } from "typebox/value";
 
 export const SettingsSchema = Type.Object(
 	{
-		/** The user waits on compaction, so it runs at critical priority within this deadline. */
-		timeoutMs: Type.Integer({ minimum: 1_000, default: 90_000 }),
 		/**
 		 * The sidecar gets the whole span being summarized. This only guards a sidecar whose context
 		 * window is smaller than the main model's: past it, the oldest characters are left out (~4 per token).
@@ -19,6 +17,14 @@ export const SettingsSchema = Type.Object(
 		 * fork that fails.
 		 */
 		fork: Type.Boolean({ default: true }),
+		/**
+		 * D-098: once the context passes `earlySummaryAt` of the point where pi compacts, write the
+		 * summary in the background while the agent is idle, from a fork. At compaction only what
+		 * came after it is added, so the user waits for a short update instead of the whole summary.
+		 * Off until A/B'd (D-046): it is the summary the agent continues from.
+		 */
+		earlySummary: Type.Boolean({ default: false }),
+		earlySummaryAt: Type.Number({ minimum: 0.1, maximum: 0.95, default: 0.7 }),
 		/**
 		 * Without a sidecar summary: `harness` leaves compaction to the harness's default; `deterministic`
 		 * still writes the summary from tracked facts alone.

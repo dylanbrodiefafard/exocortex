@@ -3,6 +3,10 @@ import { startFakeOpenAIServer } from "@exocortex/testkit";
 import { describe, expect, it } from "vitest";
 import { percentile, renderLoadTestMarkdown, runLoadTest } from "../src/loadtest.ts";
 
+/** The main agent's requests open with a system prompt; a sidecar's here do not (both stream since D-098). */
+const isMain = (body: unknown): boolean =>
+	["system", "developer"].includes(String((body as { messages?: { role?: unknown }[] }).messages?.[0]?.role));
+
 describe("runLoadTest against a fake engine", { timeout: 30_000 }, () => {
 	it("measures both phases, keeps sidecars within their slots and reports the regression", async () => {
 		const server = await startFakeOpenAIServer([], {
@@ -53,10 +57,10 @@ describe("runLoadTest when the engine misbehaves", { timeout: 30_000 }, () => {
 	});
 
 	it("reports a load phase in which every sidecar failed as failed, not as no regression", async () => {
-		// Main requests stream; sidecar calls do not. Only the sidecars fail.
+		// Only the sidecars fail.
 		const server = await startFakeOpenAIServer([], {
 			respond: (body) =>
-				(body as { stream?: boolean }).stream
+				isMain(body)
 					? { kind: "text", text: "1 2 3", delayMs: 10 }
 					: { kind: "error", status: 500, message: "no slot" },
 		});
@@ -78,7 +82,7 @@ describe("runLoadTest when the engine misbehaves", { timeout: 30_000 }, () => {
 		let mainRequests = 0;
 		const server = await startFakeOpenAIServer([], {
 			respond: (body) => {
-				if (!(body as { stream?: boolean }).stream) return { kind: "text", text: "ok", delayMs: 5 };
+				if (!isMain(body)) return { kind: "text", text: "ok", delayMs: 5 };
 				mainRequests += 1;
 				// The warm-up and the three unloaded requests pass; the first loaded one fails.
 				return mainRequests <= 4 ? { kind: "text", text: "1 2 3" } : { kind: "error", status: 500, message: "down" };

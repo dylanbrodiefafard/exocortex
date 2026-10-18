@@ -62,6 +62,7 @@ function request(extra: Partial<CompactionRequest> = {}): CompactionRequest {
 		tokensBefore: 120_000,
 		customInstructions: null,
 		fork: null,
+		conversationSince: () => "",
 		...extra,
 	};
 }

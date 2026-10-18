@@ -1,6 +1,13 @@
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
-import { type CompactionRequest, loadPrompt, type ModuleContext, ungroundedReferences } from "@exocortex/core";
+import {
+	type CompactionRequest,
+	type ForkPrefix,
+	loadPrompt,
+	type ModuleContext,
+	ungroundedReferences,
+} from "@exocortex/core";
 import { FACTS_HEADING } from "./render.ts";
 import type { CompactionSettings } from "./settings.ts";
 
@@ -41,6 +48,60 @@ export interface Narrative {
 export interface WrittenNarrative extends Narrative {
 	/** A previous summary was merged into it. */
 	readonly updated: boolean;
+	/** Built on a summary written before compaction was due (D-098): used as written, or updated with what followed. */
+	readonly early?: "as_written" | "updated";
+}
+
+/** A summary written before compaction was due (D-098): what it says, what its fork read, and when. */
+export interface EarlySummary {
+	readonly summary: string;
+	readonly read: string;
+	/** When its fork was taken (ms since the epoch): messages after this are not in it. */
+	readonly at: number;
+	/** Context tokens when it was written. */
+	readonly tokens: number;
+	/** The messages its fork continued from, as a fingerprint: the context must still begin with them. */
+	readonly prefix: { readonly length: number; readonly hash: string };
+}
+
+/** A fingerprint of a request body's first `length` messages (all when left out). */
+function messagesPrefix(body: ForkPrefix["body"], length?: number): { readonly length: number; readonly hash: string } {
+	const messages = Array.isArray(body["messages"]) ? body["messages"] : [];
+	const taken = messages.slice(0, length ?? messages.length);
+	return { length: taken.length, hash: createHash("sha256").update(JSON.stringify(taken)).digest("hex") };
+}
+
+/**
+ * The summary written early, from a fork, at background priority (D-098): it runs while the agent
+ * is idle and nobody waits for it. Undefined when there is no engine or the reply cannot be used.
+ */
+export async function writeEarlySummary(
+	ctx: ModuleContext,
+	settings: CompactionSettings,
+	fork: ForkPrefix,
+): Promise<Omit<EarlySummary, "at" | "tokens"> | undefined> {
+	const pool = ctx.pool();
+	if (!pool) return undefined;
+	const result = await pool.run({
+		module: "compaction",
+		priority: "background",
+		request: {
+			fork,
+			messages: [
+				{ role: "user", content: FORK_PROMPT.render({ template: TEMPLATE.text.trim(), instructions: "" }).trim() },
+			],
+			maxTokens: settings.maxSummaryTokens,
+		},
+	});
+	if (!result.ok) {
+		ctx.log(`early summary ${result.outcome}: ${result.error}`);
+		return undefined;
+	}
+	const summary = parseSummary(result.value);
+	if (!summary) ctx.log("early summary did not follow the template: not kept");
+	return summary
+		? { summary, read: texts(fork.body["messages"]).join("\n"), prefix: messagesPrefix(fork.body) }
+		: undefined;
 }
 
 /** Asks the sidecar for the handover. Undefined without an engine, on a failed call, or for a reply off the template. */
@@ -49,6 +110,7 @@ export async function writeNarrative(
 	settings: CompactionSettings,
 	request: CompactionRequest,
 	signal: AbortSignal,
+	early?: EarlySummary,
 ): Promise<WrittenNarrative | undefined> {
 	const pool = ctx.pool();
 	if (!pool) return undefined;
@@ -67,14 +129,32 @@ export async function writeNarrative(
 		.join("\n");
 	const evidence = `${request.conversation}\n${carried}\n${request.customInstructions ?? ""}`;
 	ctx.progress("Writing the compaction summary…");
-	const forked = await writeFromFork(ctx, settings, request, shared, signal);
+	const progress = summaryProgress(ctx);
+	// A summary written early already holds the previous one and everything up to its fork: only
+	// what came after it is added (D-098). Not with the user's own instructions, which it never had,
+	// nor once the context no longer begins with what its fork read (a branch switched with /tree).
+	if (early && !request.customInstructions && stillApplies(early, request)) {
+		const built = await fromEarly(ctx, settings, request, early, signal, progress.of("early"));
+		if (built) {
+			return {
+				...grounded(built.summary, `${evidence}\n${early.read}`, ctx),
+				updated: true,
+				early: built.updated ? "updated" : "as_written",
+			};
+		}
+	}
+	// No deadline (D-098): the user is waiting either way, and a call ends when it is done, the
+	// engine stops answering, or pi aborts the compaction. The transcript is asked only after the
+	// fork fails, not beside it: forks exist only on ninfer, where its long prefill would stall the
+	// fork's decode (D-023), and the fork usually succeeds.
+	const forked = await writeFromFork(ctx, settings, request, shared, signal, progress.of("fork"));
 	// The fork also read the messages the harness keeps, which the span does not have.
 	if (forked) return { ...grounded(forked.summary, `${evidence}\n${forked.read}`, ctx), updated: prior !== "" };
 	const result = await pool.run({
 		module: "compaction",
 		priority: "critical",
-		timeoutMs: settings.timeoutMs,
 		signal,
+		onProgress: progress.of("transcript"),
 		request: {
 			messages: [
 				{ role: "system", content: SYSTEM_PROMPT.text.trim() },
@@ -111,14 +191,15 @@ async function writeFromFork(
 	request: CompactionRequest,
 	shared: { readonly template: string; readonly instructions: string },
 	signal: AbortSignal,
+	onProgress: (chars: number) => void,
 ): Promise<{ readonly summary: string; readonly read: string } | undefined> {
 	const pool = ctx.pool();
 	if (!pool || !request.fork || !settings.fork) return undefined;
 	const result = await pool.run({
 		module: "compaction",
 		priority: "critical",
-		timeoutMs: settings.timeoutMs,
 		signal,
+		onProgress,
 		request: {
 			fork: request.fork,
 			messages: [{ role: "user", content: FORK_PROMPT.render(shared).trim() }],
@@ -135,6 +216,80 @@ async function writeFromFork(
 		return undefined;
 	}
 	return { summary, read: texts(request.fork.body["messages"]).join("\n") };
+}
+
+/** Whether the context being compacted still begins with what the early summary's fork read; without a fork to compare, it is taken to. */
+function stillApplies(early: EarlySummary, request: CompactionRequest): boolean {
+	if (!request.fork) return true;
+	const now = messagesPrefix(request.fork.body, early.prefix.length);
+	return now.length === early.prefix.length && now.hash === early.prefix.hash;
+}
+
+/**
+ * The early summary brought up to date: as it is when nothing in the span came after its fork,
+ * else merged with what did by the update prompt. Undefined when that call fails.
+ */
+async function fromEarly(
+	ctx: ModuleContext,
+	settings: CompactionSettings,
+	request: CompactionRequest,
+	early: EarlySummary,
+	signal: AbortSignal,
+	onProgress: (chars: number) => void,
+): Promise<{ readonly summary: string; readonly updated: boolean } | undefined> {
+	const since = request.conversationSince(early.at);
+	if (since.trim() === "") return { summary: early.summary, updated: false };
+	const result = await ctx.pool()?.run({
+		module: "compaction",
+		priority: "critical",
+		signal,
+		onProgress,
+		request: {
+			messages: [
+				{ role: "system", content: SYSTEM_PROMPT.text.trim() },
+				{
+					role: "user",
+					content: UPDATE_PROMPT.render({
+						conversation: tail(since, settings.maxConversationChars),
+						template: TEMPLATE.text.trim(),
+						instructions: "",
+						prior: early.summary,
+					}).trim(),
+				},
+			],
+			maxTokens: settings.maxSummaryTokens,
+			thinking: settings.thinking,
+		},
+	});
+	if (!result?.ok) {
+		if (result) ctx.log(`update of the early summary ${result.outcome}: ${result.error}`);
+		return undefined;
+	}
+	const summary = parseSummary(result.value);
+	if (!summary) ctx.log("update of the early summary did not follow the template: writing it whole");
+	return summary ? { summary, updated: true } : undefined;
+}
+
+/** Characters per token, roughly: progress is shown in tokens. */
+const CHARS_PER_TOKEN = 4;
+
+/**
+ * A progress line for a summary being written (D-098): the reply so far, in tokens, so the user
+ * waiting on compaction sees it move instead of a fixed deadline counting down.
+ */
+function summaryProgress(ctx: ModuleContext): { readonly of: (key: string) => (chars: number) => void } {
+	const sizes = new Map<string, number>();
+	let shown = 0;
+	return {
+		of: (key) => (chars) => {
+			sizes.set(key, chars);
+			const tokens = Math.round(Math.max(...sizes.values()) / CHARS_PER_TOKEN);
+			// Every 50 tokens is enough to see it move.
+			if (tokens - shown < 50) return;
+			shown = tokens;
+			ctx.progress(`Writing the compaction summary… ${tokens} tokens`);
+		},
+	};
 }
 
 /** Every string in a JSON value: what a request's messages say, without the JSON around it. */

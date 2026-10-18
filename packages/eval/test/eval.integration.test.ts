@@ -15,6 +15,10 @@ import { renderMarkdown } from "../src/report.ts";
 import { runEval } from "../src/run.ts";
 import { loadTask, type Task } from "../src/task.ts";
 
+/** The main agent's requests open with a system prompt; a sidecar's here do not (both stream since D-098). */
+const isMain = (body: unknown): boolean =>
+	["system", "developer"].includes(String((body as { messages?: { role?: unknown }[] }).messages?.[0]?.role));
+
 const REPO = join(import.meta.dirname, "..", "..", "..");
 const TASK = loadTask(join(REPO, "tasks", "py-pagination"));
 const CONFIGS_DIR = join(REPO, "packages", "eval", "configs");
@@ -248,7 +252,7 @@ describe("runEval with the real pi CLI and a scripted model", { timeout: 60_000 
 			config: "supervisor",
 			respond: (body) => {
 				const request = body as { stream?: boolean; messages: unknown[] };
-				if (request.stream) return main[m++] ?? { kind: "text", text: "(extra)" };
+				if (isMain(request)) return main[m++] ?? { kind: "text", text: "(extra)" };
 				const isVerdict = JSON.stringify(request.messages).includes("acceptance checklist and evidence");
 				return { kind: "text", text: JSON.stringify(isVerdict ? verdicts[v++] : ledger) };
 			},

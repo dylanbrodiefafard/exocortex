@@ -14,6 +14,7 @@ import { ENGINE_PROFILES, type EngineTarget } from "../src/inference/engine.ts";
 import {
 	createSidecarPool,
 	DEFAULT_MODULE_LIMITS,
+	holdFor,
 	type ModuleLimits,
 	type PoolStats,
 	type SidecarCallRecord,
@@ -208,6 +209,101 @@ describe("sidecar pool failure handling (never rejects)", () => {
 		pending[0]?.reply('{"n": 3}');
 		expect(await result).toMatchObject({ ok: true, value: { n: 3 } });
 	});
+});
+
+describe("liveness instead of deadlines (D-098)", () => {
+	it("lets a call with no deadline run while tokens arrive, and ends one whose engine stalls", async () => {
+		const server = await startFakeOpenAIServer([
+			{ kind: "text", text: "slow but alive", delayMs: 400 },
+			{ kind: "stall", text: "half of it" },
+		]);
+		try {
+			const progress: number[] = [];
+			const pool = createSidecarPool({
+				client: createOpenAIClient({ ...TARGET, baseUrl: server.baseUrl }),
+				target: { ...TARGET, baseUrl: server.baseUrl },
+				// No total deadline: only the engine stopping ends a call.
+				config: {
+					maxConcurrent: 4,
+					reservedForMain: 2,
+					sessionTokenBudget: 0,
+					backgroundWhenIdleOnly: true,
+					firstTokenMs: 1_000,
+					stallMs: 1_000,
+				},
+				moduleLimits: () => DEFAULT_MODULE_LIMITS,
+			});
+			const call = { module: "m", priority: "interactive" as const, request: { messages: [], maxTokens: 10 } };
+			const slow = await pool.run({ ...call, onProgress: (chars) => progress.push(chars) });
+			expect(slow).toMatchObject({ ok: true, value: "slow but alive" });
+			expect(progress.at(-1)).toBe("slow but alive".length);
+			const stalled = await pool.run(call);
+			expect(stalled).toMatchObject({
+				ok: false,
+				outcome: "timeout",
+				error: expect.stringContaining("no token for 1000 ms"),
+			});
+		} finally {
+			await server.close();
+		}
+	});
+});
+
+describe("holds from measured latency (D-098)", () => {
+	it("keeps each kind of call's recent times and holds half again their 90th percentile, within bounds", async () => {
+		const { client, pending } = manualClient();
+		const pool = createSidecarPool({ client, target: TARGET, config: POOL, moduleLimits: () => DEFAULT_MODULE_LIMITS });
+		const call = {
+			module: "triage",
+			priority: "interactive" as const,
+			schemaName: "diagnosis",
+			request: { messages: [], maxTokens: 10 },
+		};
+		expect(pool.typicalMs("triage", "diagnosis")).toBeUndefined();
+		expect(holdFor(pool, "triage", "diagnosis", 6_000)).toBe(6_000);
+		for (let i = 0; i < 6; i++) {
+			const running = pool.run(call);
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			pending.shift()?.reply();
+			await running;
+		}
+		const typical = pool.typicalMs("triage", "diagnosis");
+		expect(typical?.samples).toBe(6);
+		// Fast calls: the hold is the floor, not the setting.
+		expect(holdFor(pool, "triage", "diagnosis", 6_000)).toBe(500);
+		// Another kind of call has its own times.
+		expect(pool.typicalMs("triage", "hypothesis")).toBeUndefined();
+		expect(holdFor(undefined, "triage", "diagnosis", 6_000)).toBe(6_000);
+	});
+
+	it("grows a hold back when the calls it cuts off take longer, instead of cutting them for good", async () => {
+		const { client, pending } = manualClient();
+		const pool = createSidecarPool({ client, target: TARGET, config: POOL, moduleLimits: () => DEFAULT_MODULE_LIMITS });
+		const call = {
+			module: "trimmer",
+			priority: "interactive" as const,
+			schemaName: "line_selection",
+			request: { messages: [], maxTokens: 10 },
+		};
+		for (let i = 0; i < 6; i++) {
+			const running = pool.run(call);
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			pending.shift()?.reply();
+			await running;
+		}
+		const holds = [holdFor(pool, "trimmer", "line_selection", 1_500)];
+		// The engine slows down: every call now outlasts the hold set from the fast ones.
+		for (let i = 0; i < 6; i++) {
+			const hold = holdFor(pool, "trimmer", "line_selection", 1_500);
+			await pool.run({ ...call, timeoutMs: hold });
+			pending.splice(0);
+			holds.push(holdFor(pool, "trimmer", "line_selection", 1_500));
+		}
+		expect(holds[0]).toBe(500);
+		// Each call cut off counts as taking that long, so the hold climbs back to the setting.
+		expect(holds.at(-1)).toBe(1_500);
+		expect(holds).toEqual([...holds].sort((a, b) => a - b));
+	}, 15_000);
 });
 
 describe("held background calls (D3)", () => {

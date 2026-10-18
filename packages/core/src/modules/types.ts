@@ -64,6 +64,18 @@ export interface ModuleContext {
 	 * run (no UI to stop it from, or the module is gone).
 	 */
 	readonly background: (label: string, job: (signal: AbortSignal) => Promise<SettleAction | undefined>) => boolean;
+	/**
+	 * Adds `text` for the model to read before its next call, while the agent is still working
+	 * (D-098): for help that was not ready when the tool result it belongs to went back. Sent as an
+	 * `exo.<module>` custom message, appended after the current tool batch (D-029). False, and
+	 * nothing sent, when the agent is idle: help for a run that ended is stale.
+	 */
+	readonly deliverLate: (text: string) => boolean;
+	/**
+	 * The main agent's context as a request body to continue from (D-093), when there is one now:
+	 * its last request was answered and nothing has changed the context since. Never rejects.
+	 */
+	readonly forkPrefix: () => Promise<ForkPrefix | undefined>;
 }
 
 /**
@@ -189,6 +201,12 @@ export interface CompactionRequest {
 	 * after a context overflow.
 	 */
 	readonly fork: ForkPrefix | null;
+	/**
+	 * The span's messages newer than `timestamp` (ms since the epoch), serialized as
+	 * `conversation` is; "" when there are none. For a summary written earlier that only needs what
+	 * came after it (D-098).
+	 */
+	readonly conversationSince: (timestamp: number) => string;
 }
 
 /** A module's compaction summary. */
@@ -208,6 +226,11 @@ export interface SettleInfo {
 	readonly outcome: "completed" | "aborted" | "error";
 	/** Text of the final assistant message (empty if none). */
 	readonly lastAssistantText: string;
+	/**
+	 * How full the context is, when the harness knows: its tokens, and the count at which the
+	 * harness compacts on its own (D-098).
+	 */
+	readonly context?: { readonly tokens: number; readonly compactAt: number };
 }
 
 /**

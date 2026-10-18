@@ -3,7 +3,15 @@ import type { Static, TSchema } from "typebox";
 import { clampTimeoutMs, type ExoConfig } from "../config.ts";
 import { canonicalJson } from "../fingerprint.ts";
 import type { JsonValue } from "../trace/store.ts";
-import type { ChatRequest, ChatResponse, ForkPrefix, InferenceClient } from "./client.ts";
+import {
+	type ChatOptions,
+	type ChatRequest,
+	type ChatResponse,
+	type ForkPrefix,
+	type InferenceClient,
+	InferenceError,
+	type Liveness,
+} from "./client.ts";
 import type { EngineTarget } from "./engine.ts";
 import { completeStructured, StructuredOutputError } from "./structured.ts";
 
@@ -28,10 +36,14 @@ export interface SidecarCall<S extends TSchema | undefined = undefined> {
 	readonly schema?: S;
 	readonly schemaName?: string;
 	/**
-	 * End-to-end deadline including queueing. Defaults to `pool.timeoutMs`. The one exception: while
-	 * a `background` call is held for the main agent, the deadline does not run (see `maxHoldMs`).
+	 * End-to-end deadline including queueing, for a call that holds the agent or the user. Defaults
+	 * to `pool.timeoutMs`, and without that there is none: the call ends when it is done, cancelled,
+	 * or the engine stops answering (`pool.firstTokenMs`, `pool.stallMs`; D-098). While a
+	 * `background` call is held for the main agent, the deadline does not run (see `maxHoldMs`).
 	 */
 	readonly timeoutMs?: number;
+	/** Called as the reply arrives, with its characters so far: for a progress line. */
+	readonly onProgress?: (chars: number) => void;
 	/** Cancels the call (e.g. the user typed something). */
 	readonly signal?: AbortSignal;
 }
@@ -124,6 +136,13 @@ export interface SidecarPool {
 	cancel(filter?: (call: { readonly module: string; readonly priority: SidecarPriority }) => boolean): void;
 	stats(): PoolStats;
 	/**
+	 * How long this session's recent calls of one kind took, queueing included (D-098), counting a
+	 * call cut off by its deadline as taking that long:
+	 * the 90th percentile of the last {@link LATENCY_SAMPLES}, and how many there were. Undefined
+	 * before the first.
+	 */
+	typicalMs(module: string, schemaName?: string): { readonly p90: number; readonly samples: number } | undefined;
+	/**
 	 * Gives `background` calls up to `timeoutMs` to finish, for use before `close()` at shutdown.
 	 * While draining they are not held for the main agent. Resolves as soon as none is queued or
 	 * running, or when the time is up; it cancels nothing and never rejects. Calls submitted while
@@ -185,6 +204,31 @@ interface Job {
 /** A fork that found less than this share of its prompt in the cache paid for the main agent's context again. */
 const FORK_MIN_CACHED_SHARE = 0.5;
 
+/** Successful calls of each kind whose time is kept for {@link SidecarPool.typicalMs}. */
+const LATENCY_SAMPLES = 50;
+/** Samples a hold needs before it is set from them, rather than from the module's setting. */
+const HOLD_MIN_SAMPLES = 5;
+/** A call slower than half again its kind's recent 90th percentile is unusual: what it holds is let go. */
+const HOLD_FACTOR = 1.5;
+/** No hold set from samples is shorter than this: below it, scheduling noise would decide. */
+const HOLD_FLOOR_MS = 500;
+
+/**
+ * How long a call on the hot path holds what it is part of (D-098): half again the recent 90th
+ * percentile of its kind of call, between {@link HOLD_FLOOR_MS} and `capMs` (the module's
+ * setting), or `capMs` until there are {@link HOLD_MIN_SAMPLES} samples. A typical call is never
+ * cut short; one far slower than usual stops costing the agent time.
+ */
+export function holdFor(pool: SidecarPool | undefined, module: string, schemaName: string, capMs: number): number {
+	const typical = pool?.typicalMs(module, schemaName);
+	if (!typical || typical.samples < HOLD_MIN_SAMPLES) return capMs;
+	return Math.min(capMs, Math.max(HOLD_FLOOR_MS, Math.round(typical.p90 * HOLD_FACTOR)));
+}
+
+/** Defaults of `pool.firstTokenMs` and `pool.stallMs` (D-098): a dead engine, not a slow one. */
+const DEFAULT_FIRST_TOKEN_MS = 120_000;
+const DEFAULT_STALL_MS = 60_000;
+
 const ZERO_USAGE: SidecarUsage = { promptTokens: 0, cachedTokens: null, completionTokens: 0 };
 const BUDGET_SPENT = "session sidecar token budget exhausted";
 
@@ -204,6 +248,12 @@ export function createSidecarPool(options: SidecarPoolOptions): SidecarPool {
 	const now = options.now ?? Date.now;
 	const slots = Math.max(1, config.maxConcurrent - config.reservedForMain);
 	const maxHoldMs = clampTimeoutMs(config.maxHoldMs ?? DEFAULT_MAX_HOLD_MS);
+	/** Recent successful calls' times, by kind (`typicalMs`). */
+	const latencies = new Map<string, number[]>();
+	const liveness: Liveness = {
+		firstTokenMs: config.firstTokenMs ?? DEFAULT_FIRST_TOKEN_MS,
+		stallMs: config.stallMs ?? DEFAULT_STALL_MS,
+	};
 	const queue: Job[] = [];
 	const running = new Set<Job>();
 	const outcomes = Object.fromEntries(OUTCOMES.map((o) => [o, 0])) as Record<SidecarOutcome, number>;
@@ -273,6 +323,13 @@ export function createSidecarPool(options: SidecarPoolOptions): SidecarPool {
 		},
 	): void {
 		outcomes[outcome] += 1;
+		// A call cut off by its deadline took at least that long, and counts so: were only successes
+		// kept, a hold set from them could never grow past the calls it cuts off.
+		if (outcome === "ok" || outcome === "timeout") {
+			const key = latencyKey(job.call.module, job.call.schemaName);
+			const kept = [...(latencies.get(key) ?? []), timing.queueMs + timing.latencyMs].slice(-LATENCY_SAMPLES);
+			latencies.set(key, kept);
+		}
 		try {
 			options.onRecord?.({
 				module: job.call.module,
@@ -319,8 +376,9 @@ export function createSidecarPool(options: SidecarPoolOptions): SidecarPool {
 			let settled = false;
 			let attempts = 0;
 			let usage: SidecarUsage = ZERO_USAGE;
-			/** What is left of the deadline; it only runs down while `deadline` is set. */
-			let remainingMs = clampTimeoutMs(call.timeoutMs ?? config.timeoutMs);
+			/** What is left of the deadline (none: infinite); it only runs down while `deadline` is set. */
+			const total = call.timeoutMs ?? config.timeoutMs;
+			let remainingMs = total === undefined ? Number.POSITIVE_INFINITY : clampTimeoutMs(total);
 			let deadline: NodeJS.Timeout | undefined;
 			let deadlineSince = submittedAt;
 			let holdLimit: NodeJS.Timeout | undefined;
@@ -367,14 +425,20 @@ export function createSidecarPool(options: SidecarPoolOptions): SidecarPool {
 				} else if (!held && deadline === undefined) {
 					clearTimeout(holdLimit);
 					holdLimit = undefined;
-					deadlineSince = now();
-					deadline = setTimeout(() => finish("timeout", "deadline exceeded"), remainingMs);
+					runDeadline();
 				}
+			};
+			/** Starts what is left of the deadline; a call without one only ends by liveness (D-098). */
+			const runDeadline = () => {
+				deadlineSince = now();
+				if (!Number.isFinite(remainingMs)) return;
+				deadline = setTimeout(() => finish("timeout", "deadline exceeded"), remainingMs);
 			};
 
 			const start = () => {
 				startedAt = now();
-				execute(client, target, call, request, controller.signal, (response) => {
+				const chat = { liveness, ...(call.onProgress ? { onProgress: call.onProgress } : {}) };
+				execute(client, target, call, request, controller.signal, chat, (response) => {
 					// Counted as each response arrives, so a call that fails later (a repair turn that
 					// times out) still reports what it used, and the budget sees it at once.
 					tokensUsed += (response.usage?.promptTokens ?? 0) + (response.usage?.completionTokens ?? 0);
@@ -391,12 +455,10 @@ export function createSidecarPool(options: SidecarPoolOptions): SidecarPool {
 						),
 					(error: unknown) => {
 						if (settled) return;
-						const outcome = !(error instanceof StructuredOutputError)
-							? "error"
-							: error.reason === "truncated"
-								? "truncated"
-								: "invalid_output";
-						settle({ ok: false, outcome, error: String(error), usage, ...timing() }, String(error));
+						settle(
+							{ ok: false, outcome: failureOutcome(error), error: String(error), usage, ...timing() },
+							String(error),
+						);
 					},
 				);
 			};
@@ -447,6 +509,13 @@ export function createSidecarPool(options: SidecarPoolOptions): SidecarPool {
 				outcomes: { ...outcomes },
 			};
 		},
+		typicalMs(module, schemaName) {
+			const kept = latencies.get(latencyKey(module, schemaName));
+			if (!kept || kept.length === 0) return undefined;
+			const sorted = [...kept].sort((a, b) => a - b);
+			const p90 = sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * 0.9) - 1)] ?? 0;
+			return { p90, samples: sorted.length };
+		},
 		drain(timeoutMs) {
 			if (backgroundJobs() === 0) return Promise.resolve({ settled: 0, remaining: 0 });
 			return new Promise<DrainResult>((resolve) => {
@@ -485,11 +554,12 @@ async function execute(
 	call: SidecarCall<TSchema | undefined>,
 	request: SidecarCall["request"],
 	signal: AbortSignal,
+	options: ChatOptions,
 	onResponse: (response: ChatResponse) => void,
 ): Promise<{ value: unknown; finishReason: string | null }> {
 	const withPriority = { ...request, priority: ENGINE_PRIORITY[call.priority], cacheWrite: false as const };
 	if (call.schema === undefined) {
-		const response = await client.chat(withPriority, signal);
+		const response = await client.chat(withPriority, signal, options);
 		onResponse(response);
 		return { value: response.text, finishReason: response.finishReason };
 	}
@@ -501,8 +571,21 @@ async function execute(
 		call.schemaName ?? call.module,
 		signal,
 		onResponse,
+		options,
 	);
 	return { value: result.value, finishReason: result.responses.at(-1)?.finishReason ?? null };
+}
+
+/** A kind of call: its module and the reply it asks for. */
+function latencyKey(module: string, schemaName: string | undefined): string {
+	return `${module}\0${schemaName ?? ""}`;
+}
+
+/** The outcome of a call that failed: an engine that stopped answering is a timeout (D-098). */
+function failureOutcome(error: unknown): Exclude<SidecarOutcome, "ok"> {
+	if (error instanceof InferenceError && error.kind === "stalled") return "timeout";
+	if (!(error instanceof StructuredOutputError)) return "error";
+	return error.reason === "truncated" ? "truncated" : "invalid_output";
 }
 
 /** Why a fork's response shows it did not get the main agent's context from the cache; undefined when it did. */
