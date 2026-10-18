@@ -91,6 +91,8 @@ export async function writeEarlySummary(
 				{ role: "user", content: FORK_PROMPT.render({ template: TEMPLATE.text.trim(), instructions: "" }).trim() },
 			],
 			maxTokens: settings.maxSummaryTokens,
+			// Applied only where the engine switches thinking for the new turn alone (F4, D-100).
+			thinking: settings.thinking,
 		},
 	});
 	if (!result.ok) {
@@ -204,6 +206,8 @@ async function writeFromFork(
 			fork: request.fork,
 			messages: [{ role: "user", content: FORK_PROMPT.render(shared).trim() }],
 			maxTokens: settings.maxSummaryTokens,
+			// Applied only where the engine switches thinking for the new turn alone (F4, D-100).
+			thinking: settings.thinking,
 		},
 	});
 	if (!result.ok) {

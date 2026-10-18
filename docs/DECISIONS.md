@@ -2138,6 +2138,76 @@ Open check: Exocortex's injected `custom_message` reaches ninfer as a second con
 - **Tests:** `createTestModuleContext` runs no background jobs unless asked (`background: true`), so a module's hook result can be read directly; review tests run the jobs.
 - **Tests (D-098 item 1):** the fake server gains a `stall` reply. Integration tests tell main requests from sidecar requests by the system prompt, since both stream now.
 
+### D-099 — `/exo doctor`, and triage hints from a fork of the agent's context · accepted (2026-10-17; owner's request; amends D-093's "not done" list, D-061's hint evidence)
+- **1. `/exo doctor`** checks the engine against what the profile says it can do. Every engine feature is a profile flag, and a wrong one fails quietly: a field the server refuses fails every sidecar call, and one it lacks makes a module fall back without saying so. A few calls of a few tokens each, every check with a fix to try:
+  - **The engine and model** in use, and that it **answers**.
+  - **Streaming:** whether it streams (D-098). Otherwise only a first-token deadline can tell a stopped engine from a slow one.
+  - **Usage and cached tokens:** whether both are reported. A profile that counts on cached tokens without them refuses every fork after the first (D-093).
+  - **`ninfer.cache_write: false`:** sent whatever the profile says, to see whether the server accepts it. Profile on and server refusing is a failure; server accepting and profile off is a warning.
+  - **`response_format: json_schema`:** whether a reply follows the schema. The profile is checked against it both ways.
+  - **A fork:** when the agent has answered once, a fork of its context that replies "ok", with the share of its prompt the cache served. It is a probe (`SidecarCall.probe`): a miss does not turn forks off, and its tokens do not count toward the session budget. Doctor runs only while the agent is idle.
+  - **What a check cannot tell:**
+    - A server that drops fields it does not know accepts `ninfer.cache_write` too. With the profile off, that is reported as not telling, never as a reason to turn the flag on.
+    - The JSON check's prompt asks for prose and does not show the shape, so a model that follows the prompt cannot pass for an engine that applies the schema. Thinking blocks are stripped before the reply is read.
+  - **Embeddings,** when configured.
+  - The engine target is now kept with the pool (`runtime.engine`), and replies say whether they were streamed (`ChatResponse.streamed`).
+- **2. Triage hints from a fork** (`forkHints`, off until A/B'd; eval config `triage-fork`).
+  - **What it reads:** the hint sidecar reads the agent's whole conversation, everything it has seen, tried and been told, for the instruction's cost alone. Before, it read the evidence code put together: the request, recent commands, the edits and the error excerpt.
+  - **When there is a fork:** a tool result is rewritten after the agent's request was answered with tool calls, so the fork tracker has one then. The agent is waiting for the result, so the fork does not compete with it.
+  - **This call's result in the fork** (`withToolResult`). Pi serializes a context mid-batch with every unanswered call answered "No result provided" (`pi-ai/dist/api/transform-messages.js:142`, `:197-198`). The answers after the last assistant message with tool calls are rewritten:
+    - this call's with its result as the agent will see it;
+    - the others with "not available yet", unless a real result is there (a sequential batch).
+    - What comes before is untouched, so the cache still serves it.
+    - A fork whose last calls do not include this one is not used.
+    - A first version appended answers after the calls. Pi had already answered them, so with pi's real serializer it never ran. A test now serializes through pi-ai itself.
+  - **The hold:** the fork's call is timed as the same kind as the isolated hint (`diagnosis`), so the hold from measured latency (D-098) keeps working with the option on.
+  - **The prompt** (`diagnose-fork.v1`) asks it to step out of the task, read what was tried and what the user said, and give one diagnosis and one different next action, as JSON, without calling a tool.
+  - **Grounding:** a name from the conversation counts as evidence for the hint's gate (D-061).
+  - **Fallback:** the isolated prompt is asked when there is no fork, the pool refuses it (profile flags, an earlier miss), or its reply cannot be used, for example because it called a tool.
+  - **Late delivery** (D-098) and the hold from measured latency apply as before. The hold has its own kind (`diagnosis_fork`).
+- **3. A fork's JSON is asked of the prompt, never of the engine** (`constrains`). The fork carries the agent's tools, and ninfer will not combine tool declarations with an output constraint (its `docs/serving.md`, "Tool declarations and output constraints cannot be combined"). So a fork gets no `response_format`; the JSON instruction is added and the reply is validated and repaired as on an engine without F3. Compaction's forks were unaffected: they asked for no schema.
+- **Not done:** hypotheses from forks (several calls at once, and one fork runs at a time, D-093).
+- **Known limits:**
+  - **The fork has the agent's thinking settings,** since changing them changes the prompt before the fork. A long reasoning can use up `SIDECAR_MAX_TOKENS` before the JSON; the reply is then cut off and the isolated prompt is asked. The two count as one hint call.
+  - **A fork's hint that is empty** ("not enough to tell") is taken as its answer: the isolated prompt is not asked as well.
+  - **A hint that goes late** (D-098) keeps its fork running after the agent continues. On ninfer's `experimental` build a read-only request copies the prefix into a lane of its own, so the agent's next request does not wait on it, but they share the GPU.
+- **Open risks:**
+  - The fork reads the agent's own reasoning, which D-039 and D-071 kept from the judge. That is right for advice, wrong for a verdict. Only hints use it.
+  - A hint written in the agent's voice may agree with the agent's mistake. The A/B is the measure.
+
+### D-100 — Forks: thinking off where the engine allows it, one serialization per context, a miss pauses them, and the budget counts what was computed · accepted (2026-10-17; owner's request to make fork use well designed and efficient; amends D-093's "a fork that misses stops forking" and its thinking rule, and the session budget's meaning)
+- **Context:** forks continue the main agent's context (D-093): compaction's summary, the early summary (D-098), triage hints (D-099) and doctor's probe. Four things made them dearer than they need to be.
+- **1. A fork may turn thinking off.**
+  - **The problem:** every fork has carried the agent's thinking settings, because on ninfer at `e04fad3` the thinking switch changed the system block, so turning it off would break the cached prefix (the profile's F4 was off). A fork asked for a hint or a summary therefore first wrote out a reasoning block, at about 200 tokens a second.
+  - **What the server does:** ninfer's `experimental` build documents `enable_thinking` as "the same new-turn thinking switch" as `reasoning_effort: "none"` (its `docs/serving.md`, "Chat Completions"). Whether turning it off keeps the prefix depends on the template, as its source shows:
+    - **Qwen3.8's effort template** puts the reasoning instructions in the system block when thinking is on (xhigh by default, or low) and none when it is off (`src/frontend/chat_template.cpp:626-651`, rendered at `:809-838`). A fork that turns thinking off differs from the agent's prompt at its first tokens and the cache serves almost none of it. Only an agent at `medium`, whose instructions are empty either way, keeps the prefix.
+    - **A toggle-only template** (Qwen3.6) changes only the new turn.
+    - So on the owner's model F4 stays off and forks keep the agent's thinking. The mechanism is for templates and efforts where it holds.
+  - **The rule:** every fork call now asks for the module's `thinking` setting (off by default). The client applies it only where the profile has `thinkingToggle` (F4).
+    - A request that says thinking through `reasoning_effort` gets `"none"` there.
+    - Any other request gets `chat_template_kwargs.enable_thinking`.
+    - ninfer refuses the two disagreeing (`conflicting_template_option`).
+  - **Every place the request says it agrees.** Pi's `qwen` format sends a top-level `enable_thinking`, plus `reasoning_effort` when the model has effort (`pi-ai/dist/api/openai-completions.js:632-639`). A provider's sampling settings may add `chat_template_kwargs.enable_thinking`. ninfer refuses any two that disagree (`translate.cpp:136-141`, `openai_schema.cpp:858-862`). Each one present is set; with none present, `chat_template_kwargs.enable_thinking`. A fork that wants what the agent has changes nothing.
+  - **Measured, not assumed:** the profile's default is unchanged. `/exo doctor thinking` sends the same fork with thinking off straight to the engine (no session state changes) and reports the share of the prompt the cache served.
+    - Where the answer is no, that costs one full prefill of the conversation, so plain `/exo doctor` does not run it.
+    - It runs once per session: the probe leaves the prompt it computed in the engine's cache, and a second run would hit that and pass falsely.
+    - If the cache served it, doctor says to set `engine.features.thinkingToggle: true`.
+    - If the profile has the flag on and the cache missed, that is a failure: every fork would compute the agent's context again.
+    - It says nothing when the agent already runs without thinking.
+- **2. One serialization per context.** The fork tracker asked pi to serialize the messages since the last request on every call: a model-registry round trip of up to 2 s. A triage hint, compaction and doctor would each repeat it. The fork made from a context is now kept until a message or request changes the context.
+- **3. A miss pauses forks; three stop them.**
+  - **Before:** one miss turned forks off for the session (D-093). An entry evicted once under memory pressure cost every fork after it.
+  - **Now:** a miss pauses forks until the main agent's next run (`setMainActive` true, then false), whose request caches its context again. A third miss in a session stops them for good: they evidently do not share the prefix on this engine.
+    - **A fork the engine refuses** (an HTTP 4xx: a field or shape it does not take) counts as a miss. Otherwise one that is refused every time would be sent every time.
+    - **A fork queued before the pause** is refused when its turn comes, without a request.
+    - **What counts as a miss:** less than half of the context cached, not of the whole prompt. The fork's own messages were never cached: a triage hint's tool output can be thousands of tokens, which made a full hit early in a session read as a miss.
+  - **Cost:** each retry that misses is one full prefill, at most three per session.
+- **4. The session budget counts what the engine computed:** prompt tokens the cache did not serve, plus output.
+  - **Why:** a fork of a 100k-token context costs a few hundred tokens and used to count as 100k, so a `sessionTokenBudget` sized for isolated calls ran out after a few forks.
+  - **Applies to every call:** a cached prefix is a saving wherever it comes from. `/exo status`'s token count follows the same rule.
+- **Kept:**
+  - **One fork at a time** (D-093). The `experimental` build copies a read-only hit into its own lane, so concurrent forks would not block each other, but they would share prefill. The case is rare: triage's hint and compaction do not overlap.
+
 ---
 
 ## Open questions (carried from brief §10, updated)

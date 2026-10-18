@@ -1,12 +1,14 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import type { Dialog } from "@exocortex/core";
 import { cacheReport, cacheSummary } from "./cache-stats.ts";
+import { type DoctorFinding, doctorReport, runDoctor } from "./doctor.ts";
+import type { ForkTracker } from "./fork.ts";
 import { OVERRIDES_ENTRY } from "./modules.ts";
 import type { Runtime } from "./runtime.ts";
 
 const PING_TIMEOUT_MS = 30_000;
 
-const COMMANDS = ["status", "cache", "review", "add", "ping", "on", "off"];
+const COMMANDS = ["status", "doctor", "cache", "review", "add", "ping", "on", "off"];
 /** Modes some modules accept besides on/off. */
 const MODULE_MODES: Readonly<Record<string, readonly string[]>> = { supervisor: ["suggest", "auto"] };
 
@@ -18,6 +20,7 @@ const MODULE_MODES: Readonly<Record<string, readonly string[]>> = { supervisor: 
  * - `/exo review`: the supervisor reviews the changes made so far for bugs, and puts what it finds
  *   in the editor (D-097); `/exo supervisor review` is the same;
  * - `/exo add`: adds a follow-up that arrived while the user was typing below their draft (D-097);
+ * - `/exo doctor`: checks the engine against what the profile says it can do (D-099);
  * - `/exo ping`: one tiny sidecar call (and one embedding, if configured), to check the servers are reachable;
  * - `/exo off` / `/exo on`: kill switch for every module (brief §5.3), this session only;
  *   toggles are kept in the session (an `exo.overrides` entry), so `/reload` and `/resume` keep them;
@@ -28,18 +31,31 @@ const MODULE_MODES: Readonly<Record<string, readonly string[]>> = { supervisor: 
  * - `/exo memory cards` / `/exo memory forget card <id>`: list or retire learned cards (D-081);
  * - `/exo memory interview`: a few questions whose answers become preferences (D-066).
  */
-export function registerExoCommand(pi: ExtensionAPI, runtime: Runtime): void {
+export function registerExoCommand(
+	pi: ExtensionAPI,
+	runtime: Runtime,
+	options: { readonly fork?: ForkTracker } = {},
+): void {
+	/** What `/exo doctor thinking` found this session (D-100): it is not probed twice. */
+	let thinking: DoctorFinding | undefined;
+	const thinkingFound = { get: () => thinking, set: (found: DoctorFinding) => (thinking = found) };
+	pi.on("session_start", () => {
+		thinking = undefined;
+		return undefined;
+	});
 	const subcommands = () => [...COMMANDS, ...runtime.moduleIds()];
 	pi.registerCommand("exo", {
 		description:
-			"Exocortex: status | cache | review | add | ping | on | off | <module> on|off | supervisor suggest|auto",
+			"Exocortex: status | doctor | cache | review | add | ping | on | off | <module> on|off | supervisor suggest|auto",
 		getArgumentCompletions: (prefix) =>
 			subcommands()
 				.filter((name) => name.startsWith(prefix.trim()))
 				.map((name) => ({ value: name, label: name })),
 		handler: async (args, ctx) => {
+			const [sub = "status", arg, ...rest] = args.trim().split(/\s+/).filter(Boolean);
 			const own: Readonly<Record<string, () => void | Promise<void>>> = {
 				ping: () => ping(runtime, ctx),
+				doctor: () => doctor(runtime, ctx, options.fork, arg === "thinking", thinkingFound),
 				status: () => say(ctx, status(runtime)),
 				cache: () => say(ctx, runtime.config?.enabled ? cacheReport(runtime.cacheStats) : "Exocortex: disabled"),
 				review: () => review(runtime, ctx),
@@ -50,7 +66,6 @@ export function registerExoCommand(pi: ExtensionAPI, runtime: Runtime): void {
 				off: () => switchAll(pi, runtime, ctx, "off"),
 			};
 			try {
-				const [sub = "status", arg, ...rest] = args.trim().split(/\s+/).filter(Boolean);
 				const run = Object.hasOwn(own, sub) ? own[sub] : undefined;
 				if (run) await run();
 				else if (runtime.moduleIds().includes(sub)) await moduleCommand(pi, runtime, ctx, sub, arg, rest);
@@ -162,6 +177,30 @@ function status(runtime: Runtime): string {
 	}
 	lines.push(cacheSummary(runtime.cacheStats));
 	return lines.join("\n");
+}
+
+/** `/exo doctor`: a few tiny calls that show where the engine and the profile disagree (D-099). */
+async function doctor(
+	runtime: Runtime,
+	ctx: ExtensionCommandContext,
+	fork: ForkTracker | undefined,
+	probeThinking: boolean,
+	found: { readonly get: () => DoctorFinding | undefined; readonly set: (f: DoctorFinding) => void } | undefined,
+): Promise<void> {
+	if (!runtime.config?.enabled) return say(ctx, "Exocortex: disabled", "warning");
+	// A fork while the agent works would compete with it, and there is no answered request to fork.
+	if (!ctx.isIdle()) return say(ctx, "The agent is working. Run /exo doctor once it stops.", "warning");
+	say(ctx, "Exocortex doctor: asking the engine…");
+	const findings = await runDoctor({
+		engine: runtime.engine,
+		profile: runtime.config.engine.profile,
+		pool: runtime.pool,
+		embedder: runtime.embedder,
+		fork: async () => (fork ? fork.prefix(ctx) : undefined),
+		probeThinking,
+		...(found ? { thinkingFound: found } : {}),
+	});
+	say(ctx, doctorReport(findings), findings.some((f) => f.status === "fail") ? "warning" : "info");
 }
 
 async function ping(runtime: Runtime, ctx: ExtensionCommandContext): Promise<void> {

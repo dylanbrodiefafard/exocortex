@@ -8,6 +8,7 @@ import {
 	createOpenAIClient,
 	type InferenceClient,
 	InferenceError,
+	withToolResult,
 } from "../src/inference/client.ts";
 import { ENGINE_PROFILES, type EngineTarget, resolveEngine } from "../src/inference/engine.ts";
 import { completeStructured, extractJson, StructuredOutputError } from "../src/inference/structured.ts";
@@ -124,6 +125,75 @@ describe("buildChatBody", () => {
 		});
 	});
 
+	it("turns a fork's thinking off in every place the agent's request says it, so they agree (D-100)", () => {
+		const fork = (extra: object) => ({ body: { model: "m", messages: [{ role: "user", content: "x" }], ...extra } });
+		const off = { ...request, thinking: false };
+		const toggles = target({ thinkingToggle: true });
+		// pi's "qwen" format: a top-level enable_thinking, with reasoning_effort when the model has effort.
+		const qwen = buildChatBody(toggles, { ...off, fork: fork({ enable_thinking: true, reasoning_effort: "medium" }) });
+		expect(qwen).toMatchObject({ enable_thinking: false, reasoning_effort: "none" });
+		expect(qwen).not.toHaveProperty("chat_template_kwargs");
+		const both = buildChatBody(toggles, {
+			...off,
+			fork: fork({ enable_thinking: true, chat_template_kwargs: { enable_thinking: true, preserve_thinking: true } }),
+		});
+		expect(both).toMatchObject({
+			enable_thinking: false,
+			chat_template_kwargs: { enable_thinking: false, preserve_thinking: true },
+		});
+		// Nothing said: the switch goes where ninfer reads it.
+		expect(buildChatBody(toggles, { ...off, fork: fork({}) })["chat_template_kwargs"]).toEqual({
+			enable_thinking: false,
+		});
+		// Already what the fork wants: the body is the agent's, untouched.
+		const already = fork({ reasoning_effort: "none" });
+		expect(buildChatBody(toggles, { ...off, fork: already })).not.toHaveProperty("chat_template_kwargs");
+		expect(buildChatBody(toggles, { ...request, thinking: true, fork: already })["reasoning_effort"]).toBe("none");
+		// Without F4 the fork keeps the agent's thinking: changing it would change the cached prompt.
+		expect(buildChatBody(target(), { ...off, fork: fork({ reasoning_effort: "medium" }) })["reasoning_effort"]).toBe(
+			"medium",
+		);
+	});
+
+	it("asks a fork for JSON in its prompt, not of the engine (D-099)", () => {
+		const fork = { body: { model: "m", tools: [{ type: "function" }], messages: [{ role: "user", content: "x" }] } };
+		const withSchema = { ...request, fork, jsonSchema: { name: "v", schema: { type: "object" } } };
+		expect(buildChatBody(target({ jsonSchema: true, cacheReadOnly: true }), withSchema)).not.toHaveProperty(
+			"response_format",
+		);
+	});
+
+	it("puts one call's result in a fork pi serialized mid-batch, in place of pi's placeholder (D-099)", () => {
+		const call = (id: string) => ({ id, type: "function", function: { name: "bash", arguments: "{}" } });
+		const before = [
+			{ role: "user", content: "fix it" },
+			{ role: "assistant", content: null, tool_calls: [call("a"), call("b"), call("c")] },
+		];
+		// As pi-ai serializes it: every call answered, the unanswered ones with "No result provided".
+		const fork = {
+			body: {
+				model: "m",
+				messages: [
+					...before,
+					{ role: "tool", tool_call_id: "a", content: "No result provided" },
+					{ role: "tool", tool_call_id: "b", content: "real output of b" },
+					{ role: "tool", tool_call_id: "c", content: [{ type: "text", text: "No result provided" }] },
+				],
+			},
+		};
+		expect(withToolResult(fork, "a", "the failing output")?.body["messages"]).toEqual([
+			...before,
+			{ role: "tool", tool_call_id: "a", content: "the failing output" },
+			{ role: "tool", tool_call_id: "b", content: "real output of b" },
+			{ role: "tool", tool_call_id: "c", content: "(this tool's result is not available yet)" },
+		]);
+		// A fork that ends in the calls themselves gets their answers too.
+		expect(withToolResult({ body: { messages: before } }, "c", "out")?.body["messages"]).toHaveLength(5);
+		expect(withToolResult(fork, "zzz", "out")).toBeUndefined();
+		expect(withToolResult({ body: { messages: [{ role: "user", content: "x" }] } }, "a", "out")).toBeUndefined();
+		expect(withToolResult({ body: {} }, "a", "out")).toBeUndefined();
+	});
+
 	it("sends priority and json_schema when supported", () => {
 		const body = buildChatBody(target({ priority: true, jsonSchema: true }), request);
 		expect(body["priority"]).toBe(2);
@@ -143,6 +213,7 @@ describe("createOpenAIClient", () => {
 			finishReason: "stop",
 			// The fake reports usage in proportion to the request and the reply (about 4 characters a token).
 			usage: { promptTokens: 8, completionTokens: 2, cachedTokens: 7 },
+			streamed: true,
 		});
 		expect(server?.requests[0]).toMatchObject({
 			model: "m",

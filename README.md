@@ -108,7 +108,7 @@ Shortens long build and test output before the model sees it. It first hides wha
 
 On a first failure, triage only moves a buried first error to the top. It steps in when a failure reports the same errors again:
 
-- It says so, names the edited files that did not change it, and adds a two-sentence hint from a sidecar that has read the code the errors point at and those edits. A hint that names files or symbols found nowhere in its evidence or the repo is dropped. A hint that takes longer than the notice waits for (6 s) still reaches the agent before its next step, unless the command has run again by then.
+- It says so, names the edited files that did not change it, and adds a two-sentence hint from a sidecar that has read the code the errors point at and those edits. A hint that names files or symbols found nowhere in its evidence or the repo is dropped. A hint that takes longer than the notice waits for (6 s) still reaches the agent before its next step, unless the command has run again by then. With `"forkHints": true` and an engine that forks for free (`dylanbrodiefafard/ninfer`), the hint is written from a fork of the agent's own conversation, so it reads everything the agent has seen, not an excerpt.
 - Fewer failing tests or a different message counts as progress, not a repeat. A test run that failed behind `| tail` still counts as a failure.
 - Once the command passes, the failure is forgotten: if it breaks again later, that is a first failure. A failure that went away and came back without a pass is described as that, with no claim about the edits.
 - Counting carries on through your own messages ("try again") and through `/reload`.
@@ -195,6 +195,8 @@ Everything is controlled from pi with the `/exo` command. Toggles last for the c
 |---|---|
 | `/exo` | Show status: config, active modules and sidecar pool statistics |
 | `/exo cache` | Show how much of each prompt the engine served from its cache: main agent and sidecars |
+| `/exo doctor` | Check the engine against what your profile says it can do: streaming, cached tokens, `ninfer.cache_write`, JSON schemas, forks, embeddings |
+| `/exo doctor thinking` | Also check whether a fork can turn thinking off and keep the cache (costs one full prefill of the conversation when it can't) |
 | `/exo ping` | Make one sidecar call (and one embedding, if configured) to check the servers |
 | `/exo off` · `/exo on` | Turn every module off, or back on |
 | `/exo <module> on\|off` | Toggle one module: `supervisor`, `tools`, `trimmer`, `triage`, `memory`, `compaction` |

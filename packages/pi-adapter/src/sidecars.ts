@@ -92,6 +92,7 @@ export function registerSidecars(pi: ExtensionAPI, options: SidecarOptions): voi
 		pool?.setMainActive(mainActive);
 		const previous = runtime.pool;
 		runtime.pool = pool;
+		runtime.engine = pool ? target : undefined;
 		runtime.embedder = embeddings
 			? createEmbedder(embeddings, { onError: (message) => onError("embeddings", message) })
 			: undefined;
@@ -169,6 +170,7 @@ export function registerSidecars(pi: ExtensionAPI, options: SidecarOptions): voi
 			}
 			const pool = runtime.pool;
 			runtime.pool = undefined;
+			runtime.engine = undefined;
 			runtime.embedder = undefined;
 			pool?.close();
 		}),

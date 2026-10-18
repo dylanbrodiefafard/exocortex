@@ -51,6 +51,8 @@ export interface ChatResponse {
 	readonly text: string;
 	readonly finishReason: string | null;
 	readonly usage: ChatUsage | null;
+	/** The engine streamed the reply (D-098); false or absent when it answered whole. */
+	readonly streamed?: boolean;
 }
 
 /**
@@ -102,7 +104,7 @@ export function buildChatBody(target: EngineTarget, request: ChatRequest): JsonO
 		...(request.thinking === undefined || base ? {} : { chat_template_kwargs: { enable_thinking: request.thinking } }),
 		...(request.priority !== undefined && target.features.priority ? { priority: request.priority } : {}),
 		...(request.cacheWrite === false && target.features.cacheReadOnly ? { ninfer: { cache_write: false } } : {}),
-		...(request.jsonSchema && target.features.jsonSchema
+		...(request.jsonSchema && constrains(target, request)
 			? {
 					response_format: {
 						type: "json_schema",
@@ -111,6 +113,73 @@ export function buildChatBody(target: EngineTarget, request: ChatRequest): JsonO
 				}
 			: {}),
 	};
+}
+
+/**
+ * Whether a structured reply is asked of the engine (`response_format`) rather than of the prompt:
+ * when the profile has F3, and not for a fork, which carries the agent's tools, which ninfer will
+ * not combine with an output constraint (its `docs/serving.md`, D-099).
+ */
+export function constrains(target: EngineTarget, request: Pick<ChatRequest, "fork">): boolean {
+	return target.features.jsonSchema && request.fork === undefined;
+}
+
+/**
+ * What pi-ai answers a tool call with when the conversation ends before its result
+ * (`pi-ai/dist/api/transform-messages.js:142`, `:197-198`): every fork taken while the agent's
+ * tool calls are being run ends in these.
+ */
+const SYNTHETIC_RESULT = "No result provided";
+const NOT_YET = "(this tool's result is not available yet)";
+
+/**
+ * A fork taken while the agent's tool calls are still being run, with one call's result in it
+ * (D-099). Pi serializes the context with every unanswered call answered "No result provided":
+ * the answers after the last assistant message with tool calls are rewritten, this call's with
+ * `content` and the others' that are not real results yet as not available. What comes before is
+ * untouched, so the engine's cache still serves it. Undefined when the fork does not end in tool
+ * calls that include this one.
+ */
+export function withToolResult(fork: ForkPrefix, toolCallId: string, content: string): ForkPrefix | undefined {
+	const messages = Array.isArray(fork.body["messages"]) ? fork.body["messages"] : [];
+	const record = (value: unknown): Readonly<Record<string, unknown>> | undefined =>
+		typeof value === "object" && value !== null && !Array.isArray(value)
+			? (value as Record<string, unknown>)
+			: undefined;
+	let at = messages.length - 1;
+	while (at >= 0 && record(messages[at])?.["role"] === "tool") at -= 1;
+	const calls = record(messages[at]);
+	if (calls?.["role"] !== "assistant" || !Array.isArray(calls["tool_calls"])) return undefined;
+	const ids = calls["tool_calls"].flatMap((call) => {
+		const id = record(call)?.["id"];
+		return typeof id === "string" ? [id] : [];
+	});
+	if (!ids.includes(toolCallId)) return undefined;
+	const answered = new Map(
+		messages.slice(at + 1).flatMap((m) => {
+			const message = record(m);
+			const id = message?.["tool_call_id"];
+			return typeof id === "string" && message ? [[id, m] as const] : [];
+		}),
+	);
+	const answers = ids.map((id): JsonValue => {
+		if (id === toolCallId) return { role: "tool", tool_call_id: id, content };
+		const earlier = answered.get(id);
+		const real = earlier !== undefined && textOf(record(earlier)?.["content"]) !== SYNTHETIC_RESULT;
+		return real && earlier !== undefined ? earlier : { role: "tool", tool_call_id: id, content: NOT_YET };
+	});
+	return { body: { ...fork.body, messages: [...messages.slice(0, at + 1), ...answers] } };
+}
+
+/** The text of a message's content, a string or text parts. */
+function textOf(content: unknown): string {
+	if (typeof content === "string") return content;
+	if (!Array.isArray(content)) return "";
+	return content
+		.map((part) =>
+			typeof part === "object" && part !== null && "text" in part ? String((part as { text: unknown }).text) : "",
+		)
+		.join("");
 }
 
 /** Fields of the main agent's request that belong to how it is answered, not to its prompt. */
@@ -129,14 +198,35 @@ const NOT_FORKED = new Set([
 function forkBase(target: EngineTarget, request: ChatRequest, fork: ForkPrefix): JsonObject {
 	const kept = Object.fromEntries(Object.entries(fork.body).filter(([key]) => !NOT_FORKED.has(key)));
 	const messages = Array.isArray(kept["messages"]) ? kept["messages"] : [];
-	const kwargs = record(kept["chat_template_kwargs"]) as JsonObject;
 	return {
 		...kept,
 		messages: [...messages, ...request.messages],
-		...(request.thinking !== undefined && target.features.thinkingToggle
-			? { chat_template_kwargs: { ...kwargs, enable_thinking: request.thinking } }
-			: {}),
+		...(request.thinking !== undefined && target.features.thinkingToggle ? thinkingOf(kept, request.thinking) : {}),
 	};
+}
+
+/**
+ * The fork's thinking switch, where the engine changes only the new turn with it (F4, D-100): a
+ * fork that does not think answers in a fraction of the tokens. The agent's request may say it in
+ * three places (pi's `qwen` format sends a top-level `enable_thinking`, with `reasoning_effort`
+ * when the model supports effort; a provider's sampling settings may add
+ * `chat_template_kwargs.enable_thinking`), and ninfer refuses any two that disagree
+ * (`conflicting_template_option`, "conflicting enable_thinking values"). So each one present is set
+ * to agree; with none present, `chat_template_kwargs.enable_thinking` says it. A fork that wants
+ * what the agent has changes nothing; one that wants thinking on where the agent's effort is
+ * "none" is left off, since no effort can be chosen for it.
+ */
+function thinkingOf(body: JsonObject, thinking: boolean): JsonObject {
+	const kwargs = record(body["chat_template_kwargs"]) as JsonObject;
+	const effort = body["reasoning_effort"];
+	const agentThinks = effort !== "none" && body["enable_thinking"] !== false && kwargs["enable_thinking"] !== false;
+	if (thinking === agentThinks || (thinking && effort === "none")) return {};
+	const said = "enable_thinking" in body || "enable_thinking" in kwargs || typeof effort === "string";
+	const fields: { [key: string]: JsonValue } = {};
+	if ("enable_thinking" in body) fields["enable_thinking"] = thinking;
+	if ("enable_thinking" in kwargs || !said) fields["chat_template_kwargs"] = { ...kwargs, enable_thinking: thinking };
+	if (typeof effort === "string") fields["reasoning_effort"] = "none";
+	return fields;
 }
 
 /** Client for any OpenAI-compatible `/chat/completions` endpoint. */
@@ -297,7 +387,7 @@ async function readStream(
 		reader.cancel().catch(() => undefined);
 	}
 	if (reply.chunks === 0) throw new InferenceError("bad_response", "stream carried no completion chunks");
-	return { text: reply.text, finishReason: reply.finishReason, usage: reply.usage };
+	return { text: reply.text, finishReason: reply.finishReason, usage: reply.usage, streamed: true };
 }
 
 /** Adds one chunk to the reply; true when it carried something the engine generated. */

@@ -108,6 +108,7 @@
 			"loopThreshold": 3, // sightings before the stronger "this approach is not working" warning
 			"maskedFailures": true, // `cargo test 2>&1 | tail` exits 0: count it as failed when its output has an error line
 			"hintTimeoutMs": 6000, // how long the notice waits for its hint (at most 6000); a later hint arrives before the model's next call
+			"forkHints": false, // D-099, off until A/B'd: ask the hint of a fork of the agent's context, which reads the whole conversation
 			"hypotheses": 0, // at the loop threshold, this many parallel sidecars propose causes from different angles
 			"benignCommands": ["grep", "egrep", "fgrep", "rg", "ag", "diff", "cmp", "test", "[", "which", "pgrep", "git diff"] // exit 1 = an answer
 		},

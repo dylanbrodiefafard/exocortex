@@ -49,6 +49,11 @@ export function registerForkTracker(pi: ExtensionAPI, options: ForkOptions): For
 	let last:
 		| { readonly body: { readonly [key: string]: JsonValue }; since: AgentMessages; answered: boolean }
 		| undefined;
+	/**
+	 * The last fork made, and the messages it was made from: asked again before the context moved
+	 * on (a triage hint, then compaction, then doctor), it is not serialized again (D-100).
+	 */
+	let made: { readonly since: AgentMessages; readonly fork: ForkPrefix } | undefined;
 
 	const guarded =
 		<A extends unknown[]>(where: string, fn: (...args: A) => void) =>
@@ -63,6 +68,7 @@ export function registerForkTracker(pi: ExtensionAPI, options: ForkOptions): For
 		};
 	const forget = guarded("fork.forget", () => {
 		last = undefined;
+		made = undefined;
 	});
 
 	pi.on(
@@ -100,11 +106,16 @@ export function registerForkTracker(pi: ExtensionAPI, options: ForkOptions): For
 			try {
 				const at = last;
 				if (!at?.answered || !sameEngine(ctx, runtime, at.body)) return undefined;
-				const since = await serialize(ctx, convertToLlm(at.since));
+				// `since` is replaced, not changed, as messages arrive: the same array is the same context.
+				if (made?.since === at.since) return made.fork;
+				const sinceThen = at.since;
+				const since = await serialize(ctx, convertToLlm(sinceThen));
 				// A request that started meanwhile owns the cache now.
-				if (!since || last !== at) return undefined;
+				if (!since || last !== at || at.since !== sinceThen) return undefined;
 				const messages = Array.isArray(at.body["messages"]) ? at.body["messages"] : [];
-				return { body: { ...at.body, messages: [...messages, ...since] } };
+				const fork = { body: { ...at.body, messages: [...messages, ...since] } };
+				made = { since: sinceThen, fork };
+				return fork;
 			} catch (error) {
 				onError("fork.prefix", error);
 				return undefined;

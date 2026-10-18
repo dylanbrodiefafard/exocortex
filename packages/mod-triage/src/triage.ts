@@ -23,6 +23,7 @@ import {
 	trailingLoop,
 	ungroundedReferences,
 	verifyingRun,
+	withToolResult,
 } from "@exocortex/core";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
@@ -32,6 +33,7 @@ import { errorSites, renderSites } from "./sites.ts";
 export const TRIAGE_ID = "triage";
 
 const DIAGNOSE_PROMPT = loadPrompt(new URL("../prompts/diagnose.v4.md", import.meta.url));
+const DIAGNOSE_FORK_PROMPT = loadPrompt(new URL("../prompts/diagnose-fork.v1.md", import.meta.url));
 const HYPOTHESIS_PROMPT = loadPrompt(new URL("../prompts/hypothesis.v3.md", import.meta.url));
 /** Diagnostic angles for parallel hypotheses (PlanSearch-style diversity, research R6.1). */
 const FRAMES = loadPrompt(new URL("../prompts/frames.v1.md", import.meta.url))
@@ -485,7 +487,7 @@ export function createTriage(raw: Readonly<Record<string, unknown>>, ctx: Module
 			const evidence = evidenceFor(sighting, draft, outlived);
 			const hypotheses = considering ? await hypothesize(failure, evidence, late.signal) : undefined;
 			if (hypotheses) return { hypotheses };
-			const hint = await diagnose(failure, evidence, late.signal);
+			const hint = await diagnose(failure, evidence, draft, late.signal);
 			return hint === undefined ? undefined : { hint };
 		};
 		const report = (error: unknown) => {
@@ -578,34 +580,66 @@ export function createTriage(raw: Readonly<Record<string, unknown>>, ctx: Module
 		return distinct.length >= 2 ? distinct : undefined;
 	}
 
-	async function diagnose(failure: Failure, evidence: Evidence, signal: AbortSignal) {
+	/**
+	 * The hint asked of a fork of the agent's own context (D-099): it reads the whole conversation
+	 * as the agent did, what was tried and why and what the user said, for the prompt's cost alone.
+	 * The fork ends in the agent's tool calls, so each is answered first: this one with its result
+	 * as the agent will see it, the others as not available yet. Undefined when there is no fork,
+	 * this call is not among them, or the fork's reply cannot be used: the isolated prompt is then asked.
+	 */
+	async function diagnoseFromFork(evidence: Evidence, draft: ToolResultDraft, previous: string, signal: AbortSignal) {
+		const pool = ctx.pool();
+		const fork = await ctx.forkPrefix();
+		if (!pool || !fork) return undefined;
+		// This call's result as the agent will see it, in place of the "No result provided" pi put there.
+		const continued = withToolResult(fork, draft.toolCallId, draft.current);
+		if (!continued) return undefined;
+		const result = await pool.run({
+			module: TRIAGE_ID,
+			priority: "interactive",
+			signal,
+			schema: DiagnosisSchema,
+			// The same kind of call as the isolated one: its time sets the same hold (D-098).
+			schemaName: "diagnosis",
+			request: {
+				fork: continued,
+				messages: [{ role: "user", content: DIAGNOSE_FORK_PROMPT.render({ ...evidence.vars, previous }) }],
+				maxTokens: SIDECAR_MAX_TOKENS,
+				// Applied only where the engine switches thinking for the new turn alone (F4, D-100).
+				thinking: settings.thinking,
+			},
+		});
+		if (!result.ok) {
+			ctx.log(`diagnosis from a fork ${result.outcome}: ${result.error}`);
+			return undefined;
+		}
+		return { ...result, read: `${texts(fork.body["messages"]).join("\n")}\n${draft.current}` };
+	}
+
+	async function diagnose(failure: Failure, evidence: Evidence, draft: ToolResultDraft, signal: AbortSignal) {
 		const pool = ctx.pool();
 		if (!settings.sidecar || !pool || failure.hintCalls >= settings.maxHintsPerSignature) return undefined;
 		if (signal.aborted) return undefined;
 		failure.hintCalls += 1;
 		unsaved = true;
 		const earlier = [...failure.hints];
+		const previous = earlier.map((h) => `- ${h}`).join("\n") || "(none)";
 		ctx.progress("Diagnosing the repeated failure…");
-		const result = await pool.run({
-			module: TRIAGE_ID,
-			priority: "interactive",
-			signal,
-			schema: DiagnosisSchema,
-			schemaName: "diagnosis",
-			request: {
-				messages: [
-					{
-						role: "user",
-						content: DIAGNOSE_PROMPT.render({
-							...evidence.vars,
-							previous: earlier.map((h) => `- ${h}`).join("\n") || "(none)",
-						}),
-					},
-				],
-				maxTokens: SIDECAR_MAX_TOKENS,
-				thinking: settings.thinking,
-			},
-		});
+		const forked = settings.forkHints ? await diagnoseFromFork(evidence, draft, previous, signal) : undefined;
+		const result =
+			forked ??
+			(await pool.run({
+				module: TRIAGE_ID,
+				priority: "interactive",
+				signal,
+				schema: DiagnosisSchema,
+				schemaName: "diagnosis",
+				request: {
+					messages: [{ role: "user", content: DIAGNOSE_PROMPT.render({ ...evidence.vars, previous }) }],
+					maxTokens: SIDECAR_MAX_TOKENS,
+					thinking: settings.thinking,
+				},
+			}));
 		if (!result.ok) {
 			ctx.log(`diagnosis ${result.outcome}: ${result.error}`);
 			return undefined;
@@ -615,7 +649,8 @@ export function createTriage(raw: Readonly<Record<string, unknown>>, ctx: Module
 			.filter(Boolean)
 			.join(" ");
 		if (hint === "") return undefined;
-		const ungrounded = ungroundedReferences(hint, evidence.text, ctx.cwd);
+		// A hint from a fork read the whole conversation: a name from it is evidence too.
+		const ungrounded = ungroundedReferences(hint, `${evidence.text}\n${forked?.read ?? ""}`, ctx.cwd);
 		if (ungrounded.length > 0) {
 			ctx.log(`dropped a hint naming unknown ${ungrounded.join(", ")}`);
 			return undefined;
@@ -632,6 +667,13 @@ export function createTriage(raw: Readonly<Record<string, unknown>>, ctx: Module
 interface Hypothesis {
 	readonly hypothesis: string;
 	readonly check: string;
+}
+
+/** Every string in a JSON value: what a request's messages say, without the JSON around it. */
+function texts(value: unknown): string[] {
+	if (typeof value === "string") return [value];
+	if (typeof value !== "object" || value === null) return [];
+	return Object.values(value).flatMap(texts);
 }
 
 export function renderHypotheses(hypotheses: readonly Hypothesis[]): string {

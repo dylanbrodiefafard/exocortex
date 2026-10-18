@@ -70,14 +70,15 @@ export default function exocortex(pi: ExtensionAPI): void {
 	// Then the recorder, registered after it, ends the trace session.
 	registerSidecars(pi, { runtime, env, onError, beforeClose: () => runtime.disposeModules() });
 	registerTraceRecorder(pi, { runtime, env, onError });
+	const fork = registerForkTracker(pi, { runtime, onError });
 	registerModuleHost(pi, {
 		runtime,
 		onError,
-		fork: registerForkTracker(pi, { runtime, onError }),
+		fork,
 		log: (message) => emit("exo.log", () => ({ message })),
 	});
 	registerCacheStats(pi, runtime, onError);
-	registerExoCommand(pi, runtime);
+	registerExoCommand(pi, runtime, { fork });
 
 	// `pi.on` is a set of per-event overloads; registering one tracer for all names needs a
 	// single erased signature. Handlers return `undefined` so they never alter pi's behavior.

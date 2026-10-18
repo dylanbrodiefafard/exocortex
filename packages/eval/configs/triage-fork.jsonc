@@ -1,0 +1,9 @@
+// Triage + D-099: the hint on a repeated failure is asked of a fork of the agent's own context,
+// so it reads the whole conversation instead of an excerpt. Needs an engine profile with
+// cacheReadOnly and cachedTokens (dylanbrodiefafard/ninfer). Compare against `triage` on the
+// error-recovery tasks: success, repeated-failure runs, and whether hinted failures cleared.
+{
+	"modules": {
+		"triage": { "enabled": true, "forkHints": true }
+	}
+}

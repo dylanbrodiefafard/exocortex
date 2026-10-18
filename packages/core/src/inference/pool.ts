@@ -44,6 +44,11 @@ export interface SidecarCall<S extends TSchema | undefined = undefined> {
 	readonly timeoutMs?: number;
 	/** Called as the reply arrives, with its characters so far: for a progress line. */
 	readonly onProgress?: (chars: number) => void;
+	/**
+	 * A diagnostic call (`/exo doctor`, D-099): it leaves the pool as it was. A fork that misses does
+	 * not turn forks off, and its tokens do not count toward the session's budget.
+	 */
+	readonly probe?: boolean;
 	/** Cancels the call (e.g. the user typed something). */
 	readonly signal?: AbortSignal;
 }
@@ -264,6 +269,26 @@ export function createSidecarPool(options: SidecarPoolOptions): SidecarPool {
 	let maxRunningObserved = 0;
 	/** Why forks are off for the rest of this pool's life: one missed the cache (D-093). */
 	let forkOff: string | undefined;
+	/** Forks that missed the cache this session; past {@link MAX_FORK_MISSES} they are refused for good. */
+	let forkMisses = 0;
+	/** The main agent ran since forks were paused: its context is in the cache again. */
+	let mainRanSinceMiss = false;
+
+	/** A fork that missed the cache pauses forks, and enough misses stop them (D-100). */
+	function noteForkReply(response: ChatResponse, ownChars: number): void {
+		noteForkTrouble(forkMiss(response, ownChars));
+	}
+
+	/** A fork that missed, or that the engine refused: forks pause, and enough of these stop them (D-100). */
+	function noteForkTrouble(miss: string | undefined): void {
+		if (!miss || forkOff !== undefined) return;
+		forkMisses += 1;
+		mainRanSinceMiss = false;
+		forkOff =
+			forkMisses >= MAX_FORK_MISSES
+				? `fork refused: ${forkMisses} forks missed the cache this session`
+				: `${miss}, until the main agent's next run puts its context back`;
+	}
 
 	/** Why a fork cannot be had from this engine now; undefined when it can. */
 	function forkRefusal(fork: ForkPrefix): string | undefined {
@@ -436,13 +461,21 @@ export function createSidecarPool(options: SidecarPoolOptions): SidecarPool {
 			};
 
 			const start = () => {
+				// A fork queued before forks were paused would pay for the agent's context again.
+				const paused = request.fork ? forkOff : undefined;
+				if (paused !== undefined) {
+					finish("error", paused);
+					return;
+				}
 				startedAt = now();
 				const chat = { liveness, ...(call.onProgress ? { onProgress: call.onProgress } : {}) };
 				execute(client, target, call, request, controller.signal, chat, (response) => {
 					// Counted as each response arrives, so a call that fails later (a repair turn that
 					// times out) still reports what it used, and the budget sees it at once.
-					tokensUsed += (response.usage?.promptTokens ?? 0) + (response.usage?.completionTokens ?? 0);
-					if (request.fork) forkOff ??= forkMiss(response);
+					if (!call.probe) {
+						tokensUsed += computedTokens(response);
+						if (request.fork) noteForkReply(response, charsOf(request.messages));
+					}
 					if (settled) return;
 					attempts += 1;
 					usage = addUsage(usage, response);
@@ -454,6 +487,10 @@ export function createSidecarPool(options: SidecarPoolOptions): SidecarPool {
 							finishReason === "length" ? "reply cut off at max_tokens (finish_reason=length)" : null,
 						),
 					(error: unknown) => {
+						// A fork the engine refuses (a 4xx: a field or a shape it does not take) will be refused again.
+						if (request.fork && !call.probe && refused(error)) {
+							noteForkTrouble(`fork refused: the engine refused one (${String(error).slice(0, 120)})`);
+						}
 						if (settled) return;
 						settle(
 							{ ok: false, outcome: failureOutcome(error), error: String(error), usage, ...timing() },
@@ -489,6 +526,12 @@ export function createSidecarPool(options: SidecarPoolOptions): SidecarPool {
 		},
 		setMainActive(active) {
 			mainActive = active;
+			// A miss pauses forks; the agent's next run caches its context again (D-100).
+			if (active && forkOff !== undefined) mainRanSinceMiss = true;
+			if (!active && mainRanSinceMiss && forkMisses < MAX_FORK_MISSES) {
+				forkOff = undefined;
+				mainRanSinceMiss = false;
+			}
 			reschedule();
 		},
 		cancel(filter) {
@@ -581,6 +624,23 @@ function latencyKey(module: string, schemaName: string | undefined): string {
 	return `${module}\0${schemaName ?? ""}`;
 }
 
+/**
+ * Forks that may miss the cache in one session. A miss pauses forks until the main agent's next
+ * run has cached its context again: the entry may have been evicted once. Misses again and again
+ * mean forks do not share the agent's prefix on this engine (D-100).
+ */
+const MAX_FORK_MISSES = 3;
+
+/**
+ * The tokens a call cost the engine: its prompt less what the cache served, and its output. A
+ * fork of a 100k-token context that the cache served is a few hundred (D-100).
+ */
+function computedTokens(response: ChatResponse): number {
+	const usage = response.usage;
+	if (!usage) return 0;
+	return usage.promptTokens - Math.min(usage.cachedTokens ?? 0, usage.promptTokens) + usage.completionTokens;
+}
+
 /** The outcome of a call that failed: an engine that stopped answering is a timeout (D-098). */
 function failureOutcome(error: unknown): Exclude<SidecarOutcome, "ok"> {
 	if (error instanceof InferenceError && error.kind === "stalled") return "timeout";
@@ -588,13 +648,31 @@ function failureOutcome(error: unknown): Exclude<SidecarOutcome, "ok"> {
 	return error.reason === "truncated" ? "truncated" : "invalid_output";
 }
 
-/** Why a fork's response shows it did not get the main agent's context from the cache; undefined when it did. */
-function forkMiss(response: ChatResponse): string | undefined {
+/**
+ * Why a fork's response shows it did not get the main agent's context from the cache; undefined
+ * when it did. The share is of the context, not of the whole prompt: the fork's own messages (a
+ * triage hint's tool output can be thousands of tokens) were never in the cache (D-100).
+ */
+function forkMiss(response: ChatResponse, ownChars: number): string | undefined {
 	const usage = response.usage;
-	if (usage && usage.cachedTokens !== null && usage.cachedTokens >= usage.promptTokens * FORK_MIN_CACHED_SHARE) {
-		return undefined;
-	}
+	const own = Math.round(ownChars / CHARS_PER_TOKEN);
+	const context = usage ? Math.max(1, usage.promptTokens - own) : 1;
+	if (usage && usage.cachedTokens !== null && usage.cachedTokens >= context * FORK_MIN_CACHED_SHARE) return undefined;
 	return `fork refused: an earlier one missed the cache (${usage?.cachedTokens ?? "?"} of ${usage?.promptTokens ?? "?"} prompt tokens cached)`;
+}
+
+/** Characters per token, roughly: a fork's own messages in tokens. */
+const CHARS_PER_TOKEN = 4;
+
+function charsOf(messages: readonly ChatRequest["messages"][number][]): number {
+	return JSON.stringify(messages).length;
+}
+
+/** An error the engine answered with a refusal of the request itself (4xx), not a failure of its own. */
+function refused(error: unknown): boolean {
+	return (
+		error instanceof InferenceError && error.kind === "http" && (error.status ?? 0) >= 400 && (error.status ?? 0) < 500
+	);
 }
 
 function addUsage(total: SidecarUsage, response: ChatResponse): SidecarUsage {

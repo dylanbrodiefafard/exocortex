@@ -86,7 +86,10 @@ const PoolConfig = Type.Object(
 		 * up (`expired_held`). Its deadline does not run while it is held (D-080). Default 10 minutes.
 		 */
 		maxHoldMs: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_TIMEOUT_MS })),
-		/** Sidecar tokens (prompt + output) allowed per session; 0 = unlimited. */
+		/**
+		 * Sidecar tokens the engine computes per session: prompt tokens its cache did not serve, plus
+		 * output (D-100). 0 = unlimited.
+		 */
 		sessionTokenBudget: Type.Integer({ minimum: 0, default: 0 }),
 		/** Hold `background` calls until the main agent is idle. */
 		backgroundWhenIdleOnly: Type.Boolean({ default: true }),

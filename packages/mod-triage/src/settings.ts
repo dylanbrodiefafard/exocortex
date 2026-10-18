@@ -32,6 +32,12 @@ export const SettingsSchema = Type.Object(
 		 * model as late help before its next call (D-098).
 		 */
 		hintTimeoutMs: Type.Integer({ minimum: 500, maximum: MAX_HOLD_MS, default: MAX_HOLD_MS }),
+		/**
+		 * D-099: ask for the hint from a fork of the agent's own context, so it reads the whole
+		 * conversation, not an excerpt of it. Needs an engine that forks for free (D-093); the
+		 * isolated prompt is asked when there is no fork or its reply cannot be used. Off until A/B'd.
+		 */
+		forkHints: Type.Boolean({ default: false }),
 		thinking: Type.Boolean({ default: false }),
 		/**
 		 * Phase 6 (D-015, research R6.1): at the loop threshold, this many isolated sidecars each propose

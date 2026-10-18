@@ -1,7 +1,14 @@
 import type { Static, TSchema } from "typebox";
 import { Value } from "typebox/value";
 import type { JsonValue } from "../trace/store.ts";
-import type { ChatMessage, ChatOptions, ChatRequest, ChatResponse, InferenceClient } from "./client.ts";
+import {
+	type ChatMessage,
+	type ChatOptions,
+	type ChatRequest,
+	type ChatResponse,
+	constrains,
+	type InferenceClient,
+} from "./client.ts";
 import type { EngineTarget } from "./engine.ts";
 
 export interface StructuredResult<S extends TSchema> {
@@ -46,7 +53,7 @@ export async function completeStructured<S extends TSchema>(
 	options?: ChatOptions,
 ): Promise<StructuredResult<S>> {
 	const schemaJson = JSON.parse(JSON.stringify(schema)) as JsonValue;
-	const messages: ChatMessage[] = target.features.jsonSchema
+	const messages: ChatMessage[] = constrains(target, request)
 		? [...request.messages]
 		: [...request.messages, { role: "user", content: jsonInstruction(schemaJson) }];
 	const responses: ChatResponse[] = [];

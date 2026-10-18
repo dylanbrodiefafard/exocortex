@@ -18,6 +18,7 @@ export {
 	type ForkPrefix,
 	type InferenceClient,
 	InferenceError,
+	withToolResult,
 } from "./inference/client.ts";
 export {
 	cosineSimilarity,

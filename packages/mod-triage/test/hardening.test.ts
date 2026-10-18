@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { JsonValue, ToolOutcome, ToolResultDraft } from "@exocortex/core";
+import type { ChatRequest, JsonValue, ToolOutcome, ToolResultDraft } from "@exocortex/core";
 import { createTestModuleContext, type SidecarReply } from "@exocortex/testkit";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { parseSettings } from "../src/settings.ts";
@@ -76,6 +76,61 @@ async function deliver(triage: Triage, d: ToolResultDraft) {
 }
 
 const never = () => new Promise<SidecarReply>(() => undefined);
+
+describe("hints from a fork of the agent's context (D-099)", () => {
+	const engine = { features: { cacheReadOnly: true, cachedTokens: true }, cachedTokens: 95 };
+	const toolCall = (id: string) => ({ id, type: "function", function: { name: "bash", arguments: "{}" } });
+	// As pi serializes a context mid-batch: the calls, each answered "No result provided" (D-099).
+	const fork = (...ids: string[]) => ({
+		body: {
+			model: "m",
+			messages: [
+				{ role: "user", content: "make the interpreter compile; keep `self.stack` a Vec" },
+				{ role: "assistant", content: null, tool_calls: ids.map(toolCall) },
+				...ids.map((id) => ({ role: "tool", tool_call_id: id, content: "No result provided" })),
+			],
+		},
+	});
+	function forked(forkPrefix: ReturnType<typeof fork>, reply: (request: ChatRequest) => SidecarReply) {
+		const t = createTestModuleContext({ cwd: dir, ...engine, forkPrefix, reply: (request) => reply(request) });
+		return { t, triage: createTriage({ forkHints: true }, t.context) };
+	}
+	const FORK_HINT = {
+		diagnosis: "The push borrows `self.stack` while it is borrowed.",
+		next_action: "Clone the word first, as the user asked to keep `self.stack` a Vec.",
+	};
+
+	it("asks the fork, answering the pending tool calls first, and uses its hint", async () => {
+		const { triage, t } = forked(fork("c1", "c9"), (r) => (r.fork ? FORK_HINT : HINT));
+		await deliver(triage, draft(E0502));
+		const second = await deliver(triage, draft(E0502));
+		expect(second?.note).toBe("repeat 2 + hint");
+		expect(second?.text).toContain("Clone the word first");
+		const [asked] = t.requests;
+		expect(asked?.fork?.body["messages"]).toEqual([
+			expect.objectContaining({ role: "user" }),
+			expect.objectContaining({ role: "assistant" }),
+			{ role: "tool", tool_call_id: "c1", content: expect.stringContaining("E0502") },
+			{ role: "tool", tool_call_id: "c9", content: "(this tool's result is not available yet)" },
+		]);
+		expect(String(asked?.messages[0]?.["content"])).toContain("Stop working on the task for a moment");
+		// The JSON shape is asked of the prompt, not of the engine: a fork's tools rule that out on ninfer.
+		expect(String(asked?.messages.at(-1)?.["content"])).toContain("JSON");
+		expect(t.requests).toHaveLength(1);
+	});
+
+	it("asks with the isolated prompt when the fork is not of this call, or its reply cannot be used", async () => {
+		const other = forked(fork("c7"), () => HINT);
+		await deliver(other.triage, draft(E0502));
+		expect((await deliver(other.triage, draft(E0502)))?.note).toBe("repeat 2 + hint");
+		expect(other.t.requests.map((r) => r.fork !== undefined)).toEqual([false]);
+
+		const chatty = forked(fork("c1"), (r) => (r.fork ? "Sure, I will run cargo build again." : HINT));
+		await deliver(chatty.triage, draft(E0502));
+		expect((await deliver(chatty.triage, draft(E0502)))?.note).toBe("repeat 2 + hint");
+		expect(chatty.t.requests.map((r) => r.fork !== undefined)).toEqual([true, true, false]);
+	});
+});
 
 describe("T1: a failure that was fixed is forgotten", () => {
 	it("starts over when the command passes, so a regression is a first failure again", async () => {

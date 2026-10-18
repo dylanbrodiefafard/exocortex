@@ -137,8 +137,12 @@ describe("fork tracker (D-093)", () => {
 		const prefix = await tracker.prefix(ctx({ modelRegistry: { complete } }));
 		expect(stopped).toBe(true);
 		expect(prefix?.body["messages"]).toEqual([...PAYLOAD.messages, { role: "assistant", content: "as pi writes it" }]);
-		// Pi could not build the request, or put a system message before the messages.
+		// Asked again before the context moved on, the same fork is handed out: pi is not asked again (D-100).
 		const fails = { complete: async () => Promise.reject(new Error("no key")) };
+		expect(await tracker.prefix(ctx({ modelRegistry: fails }))).toBe(prefix);
+		// A new request: pi could not build it, or put a system message before the messages.
+		await h.pi.emit("before_provider_request", { payload: PAYLOAD });
+		await h.pi.emit("message_end", assistant("stop", "done again"));
 		expect(await tracker.prefix(ctx({ modelRegistry: fails }))).toBeUndefined();
 		const withSystem = {
 			complete: async (_m: unknown, _c: unknown, options: { onPayload: (payload: unknown) => unknown }) =>

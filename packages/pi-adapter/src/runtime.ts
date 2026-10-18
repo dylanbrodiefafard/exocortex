@@ -2,6 +2,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
 	type Dialog,
 	type Embedder,
+	type EngineTarget,
 	type ExoConfig,
 	type LoadedConfig,
 	loadConfig,
@@ -30,6 +31,8 @@ export interface Runtime {
 	record(event: Omit<TraceEventInput, "turn">): void;
 	/** The sidecar pool for the current pi session, when an engine is configured. */
 	pool: SidecarPool | undefined;
+	/** The engine the pool sends to, set with it: `/exo doctor` asks it directly. */
+	engine: EngineTarget | undefined;
 	/** Set with the pool when an embeddings server is configured. */
 	embedder: Embedder | undefined;
 	/** Prompt-cache use of the main agent and the sidecars this session (D-095). */
@@ -116,6 +119,7 @@ export function createRuntime(options: RuntimeOptions): Runtime {
 			this.traceSession?.append(this.turn === undefined ? event : { ...event, turn: this.turn });
 		},
 		pool: undefined,
+		engine: undefined,
 		embedder: undefined,
 		cacheStats: createCacheStats(),
 		overrides: { allOff: false, modules: {} },

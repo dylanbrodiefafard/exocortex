@@ -469,7 +469,8 @@ describe("the summary as a fork of the main agent's context (D-093)", () => {
 		expect(t.requests).toHaveLength(1);
 		const [sent] = t.requests;
 		expect(sent?.fork).toBe(fork);
-		expect(sent?.thinking).toBeUndefined();
+		// Asked off; the client applies it only where the engine keeps the prefix with it (F4, D-100).
+		expect(sent?.thinking).toBe(false);
 		expect(sent?.messages).toHaveLength(1);
 		const prompt = String(sent?.messages[0]?.["content"]);
 		expect(prompt).toContain("do not call a tool");

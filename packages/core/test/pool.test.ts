@@ -714,4 +714,84 @@ describe("forks of the main agent's context (D-093)", () => {
 			expect(started).toHaveLength(1);
 		}
 	});
+
+	it("pauses forks after a miss until the agent's next run, and stops them after three (D-100)", async () => {
+		const { pool, started, replies } = forkPool();
+		const miss = async (label: string) => {
+			const run = pool.run(forkCall(label));
+			await flush();
+			replies.at(-1)?.(0);
+			return run;
+		};
+		for (let round = 1; round <= 3; round++) {
+			await miss(`miss ${round}`);
+			expect(await pool.run(forkCall("refused"))).toMatchObject({ ok: false });
+			// The agent runs and settles: its context is cached again.
+			pool.setMainActive(true);
+			pool.setMainActive(false);
+		}
+		const after = await pool.run(forkCall("after three"));
+		expect(after.ok ? "" : after.error).toContain("3 forks missed the cache this session");
+		expect(started).toHaveLength(3);
+	});
+
+	it("counts a fork the engine refuses, refuses a queued fork once forks pause, and judges a miss on the context (D-100)", async () => {
+		const { client, pending } = manualClient();
+		const pool = createSidecarPool({
+			client,
+			target: { ...TARGET, features: { ...ENGINE_PROFILES.generic, cacheReadOnly: true, cachedTokens: true } },
+			config: { ...POOL, maxConcurrent: 4, reservedForMain: 1 },
+			moduleLimits: () => DEFAULT_MODULE_LIMITS,
+		});
+		const first = pool.run(forkCall("refused by the engine"));
+		const queued = pool.run(forkCall("queued behind it"));
+		await flush();
+		pending[0]?.fail(new InferenceError("http", "HTTP 400: conflicting enable_thinking values", 400));
+		expect(await first).toMatchObject({ ok: false });
+		// Queued before the pause; refused when its turn came, without a request.
+		const later = await queued;
+		expect(later.ok ? "" : later.error).toContain("the engine refused one");
+		expect(pending).toHaveLength(1);
+	});
+
+	it("does not call a fork a miss because its own messages were not cached (D-100)", async () => {
+		const { pool, replies } = forkPool();
+		// 100 prompt tokens, about 60 of them the fork's own: 35 cached is all of the context.
+		const big = {
+			...forkCall("x"),
+			request: { ...forkCall("x").request, messages: [{ role: "tool", content: "e".repeat(240) }] },
+		};
+		const run = pool.run(big);
+		await flush();
+		replies[0]?.(35);
+		await run;
+		const next = pool.run(forkCall("next"));
+		await flush();
+		replies[1]?.(95);
+		expect((await next).ok).toBe(true);
+	});
+
+	it("counts only what the engine computed toward the budget (D-100)", async () => {
+		const { pool, replies } = forkPool();
+		const run = pool.run(forkCall("cached"));
+		await flush();
+		replies[0]?.(95);
+		await run;
+		// 100 prompt tokens, 95 of them cached, 5 out.
+		expect(pool.stats().sessionTokensUsed).toBe(10);
+	});
+
+	it("lets a probe miss without turning forks off, or counting toward the budget (D-099)", async () => {
+		const { pool, started, replies } = forkPool();
+		const probe = pool.run({ ...forkCall("probe"), probe: true });
+		await flush();
+		replies[0]?.(0);
+		expect((await probe).ok).toBe(true);
+		expect(pool.stats().sessionTokensUsed).toBe(0);
+		const next = pool.run(forkCall("module"));
+		await flush();
+		replies[1]?.(95);
+		expect((await next).ok).toBe(true);
+		expect(started).toHaveLength(2);
+	});
 });
