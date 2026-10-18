@@ -69,6 +69,47 @@ describe("/exo", () => {
 		expect(rebuild).toHaveBeenCalledTimes(2);
 	});
 
+	it("runs the supervisor's review when the agent is idle, and says why not otherwise (D-097)", async () => {
+		const h = setup();
+		const moduleCommand = vi.fn(async () => "Reviewing in the background");
+		h.runtime.moduleCommand = moduleCommand;
+		await h.pi.command("exo", "review");
+		expect(notices(h).at(-1)).toEqual(["Exocortex: disabled", "warning"]);
+
+		h.runtime.activate(h.dir);
+		h.runtime.moduleStatus = () => ["trimmer"];
+		await h.pi.command("exo", "review");
+		expect(notices(h).at(-1)).toEqual(["/exo review needs the supervisor: /exo supervisor on", "warning"]);
+
+		h.runtime.moduleStatus = () => ["supervisor (suggest): watching"];
+		h.pi.idle = false;
+		await h.pi.command("exo", "review");
+		expect(notices(h).at(-1)).toEqual(["The agent is working. Run /exo review once it stops.", "warning"]);
+		expect(moduleCommand).not.toHaveBeenCalled();
+
+		h.pi.idle = true;
+		await h.pi.command("exo", "review");
+		expect(moduleCommand).toHaveBeenCalledWith("supervisor", "review", expect.anything());
+		expect(notices(h).at(-1)).toEqual(["Reviewing in the background", "info"]);
+		moduleCommand.mockResolvedValueOnce(undefined as never);
+		await h.pi.command("exo", "review");
+		expect(notices(h).at(-1)).toEqual(["The review did not run.", "info"]);
+	});
+
+	it("adds a waiting follow-up to the draft, or says none is waiting (D-097)", async () => {
+		const h = setup();
+		let waiting = true;
+		h.runtime.addOffer = () => {
+			const had = waiting;
+			waiting = false;
+			return had;
+		};
+		await h.pi.command("exo", "add");
+		expect(notices(h)).toEqual([]);
+		await h.pi.command("exo", "add");
+		expect(notices(h).at(-1)).toEqual(["Nothing to add: no follow-up is waiting.", "info"]);
+	});
+
 	it("switches the supervisor on, off and between modes", async () => {
 		const h = setup();
 		await h.pi.command("exo", "supervisor on");

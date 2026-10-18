@@ -40,6 +40,8 @@ describe("eval configs", () => {
 		expect(options("supervisor-votes")).toEqual({ completeVotes: 3 });
 		expect(options("supervisor-think")).toEqual({ thinking: true });
 		expect(options("supervisor-verify")).toEqual({ verifyUncertain: true });
+		// A review asks another question than the verdict options, so `supervisor-research` leaves it out (D-097).
+		expect(options("supervisor-review")).toEqual({ review: true });
 		// preVerdict and warningSignals are one option group (R1.1/R1.2).
 		expect(options("supervisor-pre")).toEqual({ preVerdict: true, warningSignals: true });
 		expect(options("supervisor-research")).toEqual({

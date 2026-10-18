@@ -4,7 +4,7 @@ type Handler = (event: unknown, ctx: unknown) => unknown;
 type CommandSpec = Parameters<ExtensionAPI["registerCommand"]>[1];
 
 export interface UiCall {
-	readonly method: "notify" | "setStatus" | "setEditorText" | "setWorkingMessage" | "select" | "input";
+	readonly method: "notify" | "setStatus" | "setEditorText" | "setWidget" | "setWorkingMessage" | "select" | "input";
 	readonly args: readonly unknown[];
 }
 
@@ -12,6 +12,8 @@ export interface UiCall {
 export interface FakePi {
 	readonly api: ExtensionAPI;
 	readonly commands: ReadonlyMap<string, CommandSpec>;
+	/** Keyboard shortcuts registered with `registerShortcut`, by key. */
+	readonly shortcuts: ReadonlyMap<string, { handler: (ctx: ExtensionContext) => unknown }>;
 	readonly ui: UiCall[];
 	/** What the user answers to the next `select` and `input` dialogs, in order; none left means they cancel. */
 	readonly answers: string[];
@@ -19,8 +21,12 @@ export interface FakePi {
 	emit(name: string, event?: Record<string, unknown>, ctx?: ExtensionContext): Promise<unknown>;
 	/** Session entries written with `appendEntry`; `ctx.sessionManager.getBranch()` returns them. */
 	readonly entries: Record<string, unknown>[];
+	/** Messages sent with `pi.sendMessage`, with their options. */
+	readonly sent: { readonly message: unknown; readonly options: unknown }[];
 	/** What the user has typed in the editor (`getEditorText`). */
 	editorText: string;
+	/** Whether the agent is idle (`ctx.isIdle()`); true unless a test says otherwise. */
+	idle: boolean;
 	/** Sends raw terminal input to the `onTerminalInput` listeners, as the TUI does for each key. */
 	key(data: string): void;
 	/** Makes `pi` stale, as a session replacement or reload does: its methods throw from then on. */
@@ -33,10 +39,12 @@ export interface FakePi {
 export function createFakePi(options: { cwd: string; hasUI?: boolean; flags?: Record<string, unknown> }): FakePi {
 	const handlers = new Map<string, Handler[]>();
 	const commands = new Map<string, CommandSpec>();
+	const shortcuts = new Map<string, { handler: (ctx: ExtensionContext) => unknown }>();
 	const ui: UiCall[] = [];
 	const answers: string[] = [];
 	const flags = { ...options.flags };
 	const entries: Record<string, unknown>[] = [];
+	const sent: { message: unknown; options: unknown }[] = [];
 	const keyListeners = new Set<(data: string) => unknown>();
 	let stale = false;
 	const assertActive = () => {
@@ -50,6 +58,9 @@ export function createFakePi(options: { cwd: string; hasUI?: boolean; flags?: Re
 		registerCommand(name: string, spec: CommandSpec) {
 			commands.set(name, spec);
 		},
+		registerShortcut(key: string, spec: { handler: (ctx: ExtensionContext) => unknown }) {
+			shortcuts.set(key, spec);
+		},
 		registerFlag(name: string, spec: { default?: unknown }) {
 			if (!(name in flags)) flags[name] = spec.default;
 		},
@@ -61,12 +72,17 @@ export function createFakePi(options: { cwd: string; hasUI?: boolean; flags?: Re
 			assertActive();
 			entries.push({ type: "custom", customType, data });
 		},
+		sendMessage: (message: unknown, options?: unknown) => {
+			assertActive();
+			sent.push({ message, options });
+		},
 	} as unknown as ExtensionAPI;
 
 	function ctx(overrides: Partial<Record<string, unknown>> = {}) {
 		return {
 			cwd: options.cwd,
 			hasUI: options.hasUI ?? true,
+			isIdle: () => fake.idle,
 			model: undefined,
 			modelRegistry: { getApiKeyForProvider: async () => undefined },
 			signal: undefined,
@@ -85,6 +101,7 @@ export function createFakePi(options: { cwd: string; hasUI?: boolean; flags?: Re
 					return () => keyListeners.delete(handler);
 				},
 				setWorkingMessage: (...args: unknown[]) => ui.push({ method: "setWorkingMessage", args }),
+				setWidget: (...args: unknown[]) => ui.push({ method: "setWidget", args }),
 				select: async (...args: unknown[]) => {
 					ui.push({ method: "select", args });
 					return answers.shift();
@@ -101,10 +118,13 @@ export function createFakePi(options: { cwd: string; hasUI?: boolean; flags?: Re
 	const fake: FakePi = {
 		api,
 		commands,
+		shortcuts,
 		ui,
 		answers,
 		entries,
+		sent,
 		editorText: "",
+		idle: true,
 		key(data) {
 			for (const listener of [...keyListeners]) listener(data);
 		},

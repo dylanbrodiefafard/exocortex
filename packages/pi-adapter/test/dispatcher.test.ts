@@ -228,24 +228,64 @@ describe("B4: a module learns whether its result was used", () => {
 });
 
 describe("B5: a suggestion never overwrites what the user is typing", () => {
-	it("shows the suggestion and leaves the draft, and still recognises it when sent unchanged", async () => {
+	const widgets = (h: AdapterHarness) => h.pi.ui.filter((c) => c.method === "setWidget").map((c) => c.args[1]);
+
+	it("offers the follow-up above the editor, and alt+r adds it below the draft (D-097)", async () => {
+		const committed: string[] = [];
+		const h = setup({
+			a: () => ({
+				id: "a",
+				onSettle: async () => ({
+					kind: "suggest",
+					text: "run the tests",
+					summary: "tests not run",
+					commit: () => void committed.push("a"),
+				}),
+			}),
+		});
+		await h.pi.emit("session_start");
+		h.pi.editorText = "  also rename the fi  ";
+		await h.pi.emit("agent_before_settle", settleEvent());
+		expect(h.pi.ui.filter((c) => c.method === "setEditorText")).toEqual([]);
+		expect(widgets(h)).toEqual([
+			["exo: tests not run", "alt+r (or /exo add) adds the follow-up below your message · sending without it drops it"],
+		]);
+		// Not used until it is added.
+		expect(committed).toEqual([]);
+
+		await h.pi.shortcuts.get("alt+r")?.handler(h.pi.ctx());
+		expect(h.pi.ui.filter((c) => c.method === "setEditorText").map((c) => c.args[0])).toEqual([
+			"  also rename the fi\n\nrun the tests",
+		]);
+		expect(widgets(h).at(-1)).toBeUndefined();
+		expect(committed).toEqual(["a"]);
+		// Nothing left to add.
+		expect(h.runtime.addOffer(h.pi.ctx())).toBe(false);
+	});
+
+	it("drops an offer the user sends a message without, and still recognises the suggestion typed out", async () => {
 		const origins: string[] = [];
+		const committed: string[] = [];
 		const h = setup({
 			a: () => ({
 				id: "a",
 				onUserTurn: (turn) => void origins.push(turn.origin),
-				onSettle: async () => ({ kind: "suggest", text: "run the tests", summary: "tests not run" }),
+				onSettle: async () => ({
+					kind: "suggest",
+					text: "run the tests",
+					summary: "tests not run",
+					commit: () => void committed.push("a"),
+				}),
 			}),
 		});
 		await h.pi.emit("session_start");
-		h.pi.editorText = "  also rename the fi";
+		h.pi.editorText = "draft";
 		await h.pi.emit("agent_before_settle", settleEvent());
-		expect(h.pi.ui.filter((c) => c.method === "setEditorText")).toEqual([]);
-		const notice = h.pi.ui.find((c) => c.method === "notify");
-		expect(String(notice?.args[0])).toContain("run the tests");
-		expect(String(notice?.args[0])).toContain("draft");
 		await h.pi.emit("input", { text: "run the tests", source: "interactive" });
 		expect(origins).toEqual(["suggestion"]);
+		expect(widgets(h).at(-1)).toBeUndefined();
+		expect(h.runtime.addOffer(h.pi.ctx())).toBe(false);
+		expect(committed).toEqual([]);
 	});
 });
 

@@ -348,6 +348,17 @@ registerShortcut(shortcut: KeyId, options: { description?: string; handler: (ctx
   - Pass `deliverAs: "followUp"` if the agent is streaming.
 - **Watch out:** a pre-filled editor competes with real user typing. Check `getEditorText()` is empty first.
 
+### Adding to the user's draft (D-097)
+Verified in pi 1.0.2's `dist/`:
+- **`getEditorText()`** returns the draft with collapsed pastes expanded: `this.editor.getExpandedText?.() ?? this.editor.getText()` (`modes/interactive/interactive-mode.js:2045`; `pi-tui/dist/components/editor.js:900-914`).
+- **`setEditorText(text)`** is `editor.setText` (`interactive-mode.js:2044`).
+  - It pushes an undo snapshot when the text changes, so one undo (`ctrl+-`, `tui.editor.undo`) restores the draft (`editor.js:921-933`).
+  - It clears the paste-marker table. That is harmless when the text written is the expanded draft.
+  - It puts the cursor at the end (`setTextInternal`, cursor placement `"end"`, `editor.js:371-375`).
+- **`pasteToEditor(text)`** sends the text as a bracketed paste (`interactive-mode.js:2043`), which goes through `handlePaste` (`editor.js:1050`). That path can collapse a long paste into a `[paste #N]` marker, so it is the wrong tool for text the user should read.
+- **Keys:** `ctrl+y` is the editor's yank (`pi-tui/dist/keybindings.js:71`). No default binding in pi-tui or pi-coding-agent uses `alt+r`. `registerShortcut` is at `core/extensions/types.d.ts:1196`.
+- **`setWidget(key, lines | undefined, { placement })`**: `core/extensions/types.d.ts:101`. `undefined` removes the widget.
+
 ---
 
 ## 7. Slash commands

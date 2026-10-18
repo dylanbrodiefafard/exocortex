@@ -64,7 +64,14 @@
 			"verdictStyle": "holistic", // or "per-criterion": each item judged with a quoted evidence line
 			"finalMessage": "message", // or "claims": show only the agent's success claims, marked unverified
 			"completeVotes": 1, // >1: re-ask on "complete"; any dissent = uncertain
-			"verifyUncertain": false // on "uncertain": ask the agent once to check what the evidence does not show
+			"verifyUncertain": false, // on "uncertain": ask the agent once to check what the evidence does not show
+			// D-097: on "complete", review the changes for bugs and follow up with what survives a check.
+			// It runs in the background with no time limit; Escape or a new message stops it.
+			// `/exo review` runs the same review at any time, with this option on or off.
+			"review": false,
+			"reviewPasses": 5, // independent passes; a bug fewer than two report is dropped
+			"reviewMaxFindings": 3, // findings followed up at most, most severe first
+			"reviewMaxChars": 48000 // what each pass reads of the change (~4 chars per token)
 		},
 		"trimmer": {
 			"enabled": false,

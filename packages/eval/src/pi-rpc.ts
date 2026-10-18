@@ -48,6 +48,35 @@ export interface PromptResult {
 
 const DIALOG_METHODS = new Set(["select", "confirm", "input", "editor"]);
 const ABORT_GRACE_MS = 5_000;
+/** The status-line key Exocortex sets while a module's background job runs (`pi-adapter/src/modules.ts`, D-097). */
+const BACKGROUND_STATUS_KEY = "exo.background";
+
+/**
+ * Follows Exocortex's background jobs across the end of a run (D-097): a run that settles while
+ * one is running is over only when the job ends, and its suggestion is part of the run. A job that
+ * starts a turn stays listed until that turn settles, so the wait carries on into it.
+ */
+function backgroundTracker() {
+	let running = false;
+	let settledEarly = false;
+	return {
+		runStarted() {
+			settledEarly = false;
+		},
+		/** True when the run is over. */
+		runSettled(): boolean {
+			settledEarly = running;
+			return !running;
+		},
+		/** True when this status update ends a job the settled run was waiting on. */
+		status(record: Record<string, unknown>): boolean {
+			if (record["method"] !== "setStatus" || record["statusKey"] !== BACKGROUND_STATUS_KEY) return false;
+			const text = record["statusText"];
+			running = typeof text === "string" && text !== "";
+			return !running && settledEarly;
+		},
+	};
+}
 
 /**
  * Minimal driver for `pi --mode rpc`: strict LF-delimited JSONL (not `readline`, see pi's
@@ -93,7 +122,8 @@ export class PiRpcProcess {
 	}
 
 	/**
-	 * Sends a prompt and waits for `agent_settled` (or a limit). With `acceptSuggestions`, an
+	 * Sends a prompt and waits for `agent_settled` (or a limit), and for any background job an
+	 * extension started then (D-097): its suggestion is part of the run. With `acceptSuggestions`, an
 	 * extension's `set_editor_text` during the run is treated like the user pressing Enter: the
 	 * text is sent as the next prompt, within the same overall turn and time limits.
 	 */
@@ -146,23 +176,28 @@ export class PiRpcProcess {
 		const done = new Promise<{ outcome: RunOutcome; error?: string }>((resolve) => {
 			const timer = setTimeout(() => finish(accepted ? { outcome: "timeout" } : silent), limits.timeoutMs);
 			let atLimit = false;
-			const listener = (record: Record<string, unknown>) => {
-				const type = record["type"];
-				if (type === "turn_end") {
+			const background = backgroundTracker();
+			const handlers: Readonly<Record<string, (record: Record<string, unknown>) => void>> = {
+				agent_start: () => background.runStarted(),
+				turn_end: () => {
 					turns += 1;
 					// The limit is on turns the agent uses, not on finishing: an agent whose last allowed
 					// turn is its final answer settled. Only a further turn is over the limit.
 					if (turns >= limits.maxTurns) atLimit = true;
-				} else if (type === "turn_start" && atLimit) {
-					finish({ outcome: "max_turns" });
-				} else if (type === "agent_settled") {
-					finish({ outcome: "settled" });
-				} else if (type === "process_exit") {
-					finish({ outcome: "crashed", error: String(record["error"]) });
-				} else if (type === "extension_ui_request") {
+				},
+				turn_start: () => {
+					if (atLimit) finish({ outcome: "max_turns" });
+				},
+				agent_settled: () => {
+					if (background.runSettled()) finish({ outcome: "settled" });
+				},
+				process_exit: (record) => finish({ outcome: "crashed", error: String(record["error"]) }),
+				extension_ui_request: (record) => {
 					this.handleUiRequest(record, uiRequests);
-				}
+					if (background.status(record)) finish({ outcome: "settled" });
+				},
 			};
+			const listener = (record: Record<string, unknown>) => handlers[String(record["type"])]?.(record);
 			const finish = (result: { outcome: RunOutcome; error?: string }) => {
 				clearTimeout(timer);
 				this.listeners.delete(listener);

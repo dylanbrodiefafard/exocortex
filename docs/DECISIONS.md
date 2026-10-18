@@ -1974,6 +1974,63 @@ Open check: Exocortex's injected `custom_message` reaches ninfer as a second con
   - Confidence that rises and decays with use: `helped`/`hurt` credit and `retireUnhelpful` (D-072).
   - Saving on a correction: D-064 learns from corrections, at two sessions unless said as a standing rule. That threshold is a precision choice and was left as it is.
 
+### D-097 — Supervisor: a bug review once the task is complete, run in the background, and `/exo review` · accepted (2026-10-17; owner's request; amends D-071's "an unconditional review on every stop", D-039's settle step and D-078's rule that all module work runs inside a budgeted hook)
+- **Context:** the verdict asks whether the request was done. Nothing asked whether what was done is correct: a bug in a finished change, a caller left behind, an edge case the request names and the code gets wrong. D-071 set aside an unconditional review on every stop, because it would put a message in the editor after every task. This review speaks only when a bug survives its own check.
+- **What others do** (read at the sources named; a research pass, verified where marked in its notes):
+  - **Cursor's Bugbot** (`cursor.com/blog/building-bugbot`, 2026-01-15) runs eight parallel passes, each with the diff in a random order: a different order "nudged the model toward different lines of reasoning". It buckets similar bugs, drops those only one pass found (majority voting) and runs a validator model on the rest. Its resolution rate rose from 52% to over 70%. Its later agentic design needs tools.
+  - **Claude Code's `/code-review`** (`anthropics/claude-code`, `plugins/code-review/commands/code-review.md`) has parallel bug finders, then one validator per finding that keeps only what it confirms. Its list of what is not a bug is taken here: pre-existing issues, code that looks wrong but is correct, nitpicks, what a linter reports, deliberately silenced code. An older version scored issues 0–100 and dropped those under 80. The yes/no validator replaced it.
+  - **SWR-Bench** (arXiv 2509.01494, numbers read in the HTML) found low precision to be the main weakness of LLM review. Running the review n times helps, with little gain past n = 5.
+  - **Greptile** ("make LLMs shut up", 2024-12) found that an LLM rating severity 1–10 filtered "nearly random". The check here therefore asks whether a finding is true, not how much it matters.
+  - **Qodo PR-Agent** requires "a realistic trigger scenario" per issue and says "an empty list is acceptable". It extends each hunk to its enclosing function.
+- **Decision:**
+  1. **Option `review`, off (D-046's rule).** On a `complete` verdict, when the agent changed something and is not waiting on the user, the task's change is reviewed, once per task. Its follow-up is a suggestion or, in auto mode, a continuation like any other, and counts toward `maxContinuations`.
+     - **It runs in the background, with no time limit** (owner's call: nobody knows how long a review takes). The settle hook returns the verdict's action at once ("supervisor: complete · reviewing the changes") and pi hands the session back.
+     - An earlier draft ran the review inside the settle hook, beside the verdict, under a 120 s `reviewTimeoutMs`. Settle holds the session and has a 5-minute host budget, and a review past that budget would also have lost the verdict's own follow-up. That setting is gone.
+     - **New host capability: `ModuleContext.background(label, job)`.** The job gets a signal the host aborts when the user sends a message (what the job read is about to change), presses Escape, the session ends or is replaced, or the module instance is rebuilt or switched off. A module has at most one job; starting another aborts the first.
+     - **While it runs**, the status line shows `exo: <label>… (Esc stops)` (key `exo.background`).
+     - **When it ends**, the host applies its action as a settle action: a suggestion goes in the editor, a notice on the status line. An aborted job applies nothing.
+     - **A suggestion that arrives while the user is typing** (from a job or a settle hook) is offered, not shown once and lost.
+       - A widget above the editor names it: "`alt+r` (or `/exo add`) adds the follow-up below your message · sending without it drops it".
+       - Adding sets the editor to the draft, then a blank line, then the follow-up (PI_API_NOTES §6, "Adding to the user's draft"). The user's text is kept as written, and one undo takes the follow-up back out.
+       - `pasteToEditor` is not used: it can collapse a long paste into a `[paste #N]` marker.
+       - The supervisor reads draft plus follow-up as an edited suggestion (D-010), so the task continues and the user's own lines join its request.
+       - Sending a message without adding it drops the offer, since the task has moved on.
+     - **An action is committed only when it is used**: put in the editor, sent, or added from an offer. An offer never taken is never committed. The review marks its bugs as reported in its commit, so `/exo review` can find again a bug the user never took.
+     - **A continuation** can no longer ride the settle boundary, which has passed. The host sends it with `pi.sendMessage(…, {triggerTurn: true})` (PI_API_NOTES §5: "Not streaming, `triggerTurn: true`: starts a new run immediately"). It counts toward the host's consecutive-continuation limit like any other. With the agent already running, it is offered as a suggestion instead.
+     - **A job that started a turn stays listed** ("continuing after …") until that turn settles, so the status line has no gap between them.
+     - **No UI (print mode), no job:** `background` returns false and the review does not run.
+     - **The rule in AGENTS.md** that every hook has a time budget still holds: the hook returns at once, and the job outside it is bounded by the user, not a clock.
+  2. **What a pass reads:**
+     - the user's request;
+     - `git diff --function-context` since the task's starting commit, so each changed function is shown whole, plus new files;
+     - the other places (`git grep -w`) that use a function whose declaration the change rewrote or removed, outside the lines the change added (CodeRabbit's caller context, without a code graph).
+
+     The diff comes last, after the shared request and uses, and each pass rotates the order of its files. Each file gets a fair share of `reviewMaxChars` (`fitDiff`).
+  3. **Find:** `reviewPasses` (default 5) parallel calls of `review-find.v1`. The first runs at temperature 0.2, the rest at 0.7. Each finding gives a file, one line the change added quoted verbatim, a title, a concrete scenario and a severity.
+  4. **Code decides what is a candidate:**
+     - A finding that quotes no line the change added is dropped. That removes pre-existing issues and invented lines. A finding that names the wrong file is moved to the one file that has its line.
+     - Findings on the same line, or in the same file with much the same title (word overlap ≥ 0.5), are one bug. The number of passes behind it is its vote.
+     - Fewer than two votes is dropped (Bugbot), unless only one pass answered.
+     - A bug an earlier review of the task reported (same file and line) is not reported again (Bugbot's dedupe). Up to 50 such bugs are kept with the session.
+  5. **Check:** one `review-verify.v1` call per candidate, at most `2 × reviewMaxFindings`, in parallel. It is told to try to disprove the report and answers `real`, `not_a_bug` or `unsure`. Only `real` is kept; `unsure` is not acted on. It may correct the scenario.
+  6. **Kept:** at most `reviewMaxFindings` (3), high severity first, then votes. The follow-up lists each bug with its file, line and scenario, and asks the agent to fix the real ones and say why any is not. The agent has the tools to tell, and a false report it can push back on costs less than one it must obey.
+  7. **`/exo review`** (or `/exo supervisor review`) starts the same background review on demand, with the option on or off, while the agent is idle. It replies at once, and the findings follow as the settle review's do. With no task, it reviews uncommitted changes against `HEAD`, has no request, and its findings are only offered: there is nothing to count them against. It doesn't use up the once-per-task settle review.
+  8. **Trace:** `exo.review` records the trigger, passes asked and answered, findings proposed, anchored, distinct and repeated, each check's verdict and reason, and what was kept. A review that was stopped is not recorded.
+  9. **Eval:** the RPC driver (`pi-rpc.ts`) treats a run that settles while `exo.background` is set as still going. It collects the job's suggestion as part of the run, or follows the turn the job starts until that turn settles, within the run's turn and time limits.
+- **Cost:** about 5 find calls and up to 6 checks, each reading up to ~12k tokens. They run after the agent stopped, while the GPU is otherwise idle. The user is not held while they run.
+- **Not done:**
+  - **An agentic reviewer** that reads files and runs code (Bugbot's later design). It would be a second agent loop in the pool, as D-071 said of a judge with tools.
+  - **An LLM call to merge buckets** (Bugbot) and a union of all passes (SWR-Bench's Multi-Review). Code groups the findings, and voting favours precision over recall here.
+  - **Learning from rejected findings** (Greptile: block a finding close to three that developers dismissed). The trace has what is needed to measure it first: findings the agent answered "not a bug".
+  - **Reviewing on `git commit`.** The settle review and `/exo review` cover it for now.
+- **Open risks:**
+  - Untested with a real model. The A/B is `supervisor-review` against `supervisor` (AB_PLAN §2): a task that passed and now fails is a fix made for a bug that was not there.
+  - **Same model, same blind spots.** The passes and the check share the agent's weights. Votes and a sceptical check cut noise, but they don't add knowledge.
+  - **A long change is read in part.** Each file gets an equal share of `reviewMaxChars` and the rest is marked as not shown. A bug past the cut is not found.
+  - **An offer the user overlooks** is dropped with their next message. The widget stays above the editor until then, and `/exo review` can find the bugs again.
+  - **A user who reads the code and waits, typing nothing,** gets the findings late into their thinking. That is the cost of not holding the session.
+  - **`declaredName` is a set of patterns.** A declaration it misses gets no caller lookup, and a word that is also a common identifier finds unrelated uses. Up to 8 uses are shown per name.
+
 ---
 
 ## Open questions (carried from brief §10, updated)

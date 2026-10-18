@@ -1,3 +1,4 @@
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
 	type Dialog,
 	type Embedder,
@@ -48,6 +49,8 @@ export interface Runtime {
 	 * lets the module ask the user questions.
 	 */
 	moduleCommand: (id: string, args: string, dialog?: Dialog) => Promise<string | undefined>;
+	/** Adds a follow-up offered beside the user's draft to it (D-097); false when none is offered (set by the module host). */
+	addOffer: (ctx: ExtensionContext) => boolean;
 	/** Flushes and closes the store; `activate` opens it again. */
 	shutdown(): void;
 }
@@ -121,6 +124,7 @@ export function createRuntime(options: RuntimeOptions): Runtime {
 		moduleStatus: () => [],
 		moduleIds: () => [],
 		moduleCommand: async () => undefined,
+		addOffer: () => false,
 		shutdown() {
 			try {
 				store?.close();

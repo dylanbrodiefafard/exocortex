@@ -158,6 +158,10 @@ export function summarizeEvent(event: Pick<StoredTraceEvent, "kind" | "data">): 
 				.filter((v) => v !== undefined && v !== "")
 				.map((v) => (typeof v === "string" ? v : JSON.stringify(v)))
 				.join(" · ");
+		case "exo.review": {
+			const kept = Array.isArray(d["kept"]) ? d["kept"].length : 0;
+			return `${str(d["trigger"])}: ${kept} kept of ${str(d["distinct"])} proposed by ${str(d["answered"])}/${str(d["passes"])} passes`;
+		}
 		case "exo.ledger":
 			return d["is_task"] === false ? "not a task" : snippet(JSON.stringify(d["criteria"] ?? d));
 		case "model.change":

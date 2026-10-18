@@ -818,3 +818,133 @@ describe("progress while a hook holds pi", () => {
 		expect(statuses(headless.h)).toEqual([]);
 	});
 });
+
+describe("background jobs (D-097)", () => {
+	const flush = () => new Promise((resolve) => setImmediate(resolve));
+
+	/** A module that starts a job when the agent settles; the test decides when and how it ends. */
+	function jobModule(probe: Probe & { signal?: AbortSignal; started?: boolean | undefined }) {
+		let finish: (action: SettleAction | undefined) => void = () => {};
+		let fail: (error: Error) => void = () => {};
+		const factory = probeModule("a", probe, () => {
+			probe.started = probe.context?.background("reviewing", (signal) => {
+				probe.signal = signal;
+				return new Promise((resolve, reject) => {
+					finish = resolve;
+					fail = reject;
+				});
+			});
+			return undefined;
+		});
+		return { factory, finish: (action?: SettleAction) => finish(action), fail: (error: Error) => fail(error) };
+	}
+	const status = (h: AdapterHarness) =>
+		h.pi.ui.filter((c) => c.method === "setStatus" && c.args[0] === "exo.background").map((c) => c.args[1]);
+
+	it("applies the job's action when it ends, and shows it running meanwhile", async () => {
+		const probe = newProbe();
+		const job = jobModule(probe);
+		const { h } = setup({ a: job.factory }, { a: { enabled: true } });
+		await h.pi.emit("session_start");
+		expect(await h.pi.emit("agent_before_settle", settleEvent())).toBeUndefined();
+		expect(status(h)).toEqual(["exo: reviewing… (Esc stops)"]);
+		job.finish({ kind: "suggest", text: "fix the bug", summary: "review found a bug" });
+		await flush();
+		expect(h.pi.ui).toContainEqual({ method: "setEditorText", args: ["fix the bug"] });
+		expect(status(h)).toEqual(["exo: reviewing… (Esc stops)", undefined]);
+		// Sent unchanged, it is the module's suggestion, not the user's wording.
+		await h.pi.emit("input", { text: "fix the bug", source: "interactive" });
+		expect(probe.turns.at(-1)).toEqual({ text: "fix the bug", origin: "suggestion" });
+	});
+
+	it("offers its follow-up beside a draft the user is typing, instead of replacing it", async () => {
+		const probe = newProbe();
+		const job = jobModule(probe);
+		const { h } = setup({ a: job.factory }, { a: { enabled: true } });
+		await h.pi.emit("session_start");
+		await h.pi.emit("agent_before_settle", settleEvent());
+		h.pi.editorText = "and also";
+		job.finish({ kind: "suggest", text: "fix the bug", summary: "review found a bug" });
+		await flush();
+		expect(h.pi.ui.some((c) => c.method === "setEditorText")).toBe(false);
+		expect(h.pi.ui.find((c) => c.method === "setWidget")?.args[1]).toEqual([
+			"exo: review found a bug",
+			"alt+r (or /exo add) adds the follow-up below your message · sending without it drops it",
+		]);
+		expect(h.runtime.addOffer(h.pi.ctx())).toBe(true);
+		expect(h.pi.ui).toContainEqual({ method: "setEditorText", args: ["and also\n\nfix the bug"] });
+	});
+
+	it("is stopped by a message from the user and by Escape, and then applies nothing", async () => {
+		const probe = newProbe() as Probe & { signal?: AbortSignal };
+		const job = jobModule(probe);
+		const { h } = setup({ a: job.factory }, { a: { enabled: true } });
+		await h.pi.emit("session_start");
+		await h.pi.emit("agent_before_settle", settleEvent());
+		await h.pi.emit("input", { text: "something else", source: "interactive" });
+		expect(probe.signal?.aborted).toBe(true);
+		job.finish({ kind: "suggest", text: "stale", summary: "stale" });
+		await flush();
+		expect(h.pi.ui.some((c) => c.method === "setEditorText")).toBe(false);
+
+		await h.pi.emit("agent_before_settle", settleEvent());
+		h.pi.key("\x1b");
+		expect(probe.signal?.aborted).toBe(true);
+	});
+
+	it("starts a new turn for a continuation while the agent is idle, and offers it otherwise", async () => {
+		const probe = newProbe();
+		const job = jobModule(probe);
+		const { h } = setup({ a: job.factory }, { a: { enabled: true } });
+		await h.pi.emit("session_start");
+		await h.pi.emit("agent_before_settle", settleEvent());
+		job.finish({ kind: "continue", text: "fix the bug", summary: "review found a bug" });
+		await flush();
+		expect(h.pi.sent).toEqual([
+			{
+				message: { customType: "exo.a", content: "fix the bug", display: true, details: { exo: { module: "a" } } },
+				options: { triggerTurn: true },
+			},
+		]);
+		// Listed until the turn it started settles, so nothing waiting on it sees a gap.
+		expect(status(h).at(-1)).toBe("exo: continuing after reviewing");
+
+		await h.pi.emit("agent_before_settle", settleEvent());
+		h.pi.idle = false;
+		job.finish({ kind: "continue", text: "fix it too", summary: "review found another" });
+		await flush();
+		expect(h.pi.sent).toHaveLength(1);
+		expect(h.pi.ui).toContainEqual({ method: "setEditorText", args: ["fix it too"] });
+	});
+
+	it("reports a job that throws, and cannot start without a UI", async () => {
+		const probe = newProbe() as Probe & { started?: boolean | undefined };
+		const job = jobModule(probe);
+		const { h } = setup({ a: job.factory }, { a: { enabled: true } });
+		await h.pi.emit("session_start");
+		await h.pi.emit("agent_before_settle", settleEvent());
+		job.fail(new Error("boom"));
+		await flush();
+		expect(h.errors.map((e) => e.where)).toContain("a.background");
+
+		const headless = newProbe() as Probe & { started?: boolean | undefined };
+		const { h: h2 } = setup({ a: jobModule(headless).factory }, { a: { enabled: true } }, { hasUI: false });
+		await h2.pi.emit("session_start");
+		await h2.pi.emit("agent_before_settle", settleEvent());
+		expect(headless.started).toBe(false);
+	});
+
+	it("stops a module's job when another starts and when the session ends", async () => {
+		const probe = newProbe() as Probe & { signal?: AbortSignal };
+		const job = jobModule(probe);
+		const { h } = setup({ a: job.factory }, { a: { enabled: true } });
+		await h.pi.emit("session_start");
+		await h.pi.emit("agent_before_settle", settleEvent());
+		const first = probe.signal;
+		await h.pi.emit("agent_before_settle", settleEvent());
+		expect(first?.aborted).toBe(true);
+		const second = probe.signal;
+		await h.pi.emit("session_shutdown");
+		expect(second?.aborted).toBe(true);
+	});
+});

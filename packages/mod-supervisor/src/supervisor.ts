@@ -14,6 +14,7 @@ import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 import { acceptRequestCheck, checkOutcome, plainTestOrBuild, standing } from "./checks.ts";
 import { buildEvidence, type CheckResult, diffFingerprint, touchedFiles } from "./evidence.ts";
+import { findingKey, type ReviewResult, reviewChange, reviewMessage, reviewRecord, reviewSummary } from "./review.ts";
 import { parseSettings, type SupervisorSettings } from "./settings.ts";
 import {
 	admitClaims,
@@ -143,7 +144,16 @@ interface Task {
 	readonly snapshots: Map<number, Promise<string | undefined>>;
 	/** The agent was already asked to check what the verdict could not see (once per task). */
 	verifyAsked: boolean;
+	/** The task's work was reviewed once it was complete (once per task, D-097). */
+	reviewed: boolean;
+	/** Bugs a review of this task already reported ({@link findingKey}): not reported again. */
+	readonly reported: Set<string>;
 }
+
+type ReviewTrigger = "settle" | "command";
+
+/** Bugs a task remembers having reported; older ones may be reported again. */
+const MAX_REPORTED = 50;
 
 /** What is kept with the session so a rebuilt module carries on with the same task (D-078, D-084). */
 const SavedSchema = Type.Object({
@@ -159,6 +169,8 @@ const SavedSchema = Type.Object({
 	lastContinuationDiff: Type.Union([Type.String(), Type.Null()]),
 	noProgressStreak: Type.Integer({ minimum: 0 }),
 	verifyAsked: Type.Boolean(),
+	reviewed: Type.Optional(Type.Boolean()),
+	reported: Type.Optional(Type.Array(Type.String(), { maxItems: MAX_REPORTED })),
 });
 
 /** Enough for one criterion per requirement of a long specification (D-071; the brief had 7). */
@@ -222,11 +234,46 @@ export function createSupervisor(raw: Readonly<Record<string, unknown>>, ctx: Mo
 				lastContinuationDiff: current.lastContinuationDiff ?? null,
 				noProgressStreak: current.noProgressStreak,
 				verifyAsked: current.verifyAsked,
+				reviewed: current.reviewed,
+				reported: [...current.reported].slice(-MAX_REPORTED),
 			});
 		} catch (error) {
 			ctx.log(`supervisor state not saved: ${String(error)}`);
 		}
 	};
+
+	/**
+	 * Starts a review of the task's change as a background job (D-097): no time limit, stopped by
+	 * the host when the user sends a message or presses Escape. Its findings come back as a
+	 * follow-up like the verdict's. False when the host cannot run it.
+	 */
+	const startReview = (current: Task | undefined, requests: readonly string[], trigger: ReviewTrigger): boolean =>
+		ctx.background("reviewing the changes", async (signal) => {
+			const result = await runReview(ctx, settings, current, requests, signal);
+			if (signal.aborted) return undefined;
+			if (result === undefined) {
+				return { kind: "notify", summary: "supervisor: the review got no answer from the engine", level: "warning" };
+			}
+			keepReview(ctx, current, result, trigger);
+			if (result === "no_changes") {
+				return { kind: "notify", summary: "supervisor: no changes to review since the task began", level: "info" };
+			}
+			if (current) await persist(current);
+			if (result.findings.length === 0) {
+				return { kind: "notify", summary: `supervisor: ${reviewSummary(result)}`, level: "info" };
+			}
+			const diffHash = (await workspaceFingerprint(ctx, await current?.startRef)) ?? "";
+			const action = reviewFollowUp(ctx, settings, current, result, diffHash);
+			if (current) await persist(current);
+			return {
+				...action,
+				// Used: sent, put in the editor, or added to the user's draft. A later review does not repeat it.
+				commit: () => {
+					for (const finding of result.findings) current?.reported.add(findingKey(finding));
+					if (current) void persist(current);
+				},
+			};
+		});
 
 	return {
 		id: SUPERVISOR_ID,
@@ -276,6 +323,8 @@ export function createSupervisor(raw: Readonly<Record<string, unknown>>, ctx: Mo
 				lastContinuationDiff: undefined,
 				noProgressStreak: 0,
 				verifyAsked: false,
+				reviewed: false,
+				reported: new Set(),
 				snapshots: new Map(),
 			};
 			next.ledger = Promise.resolve(earlier?.ledger)
@@ -289,6 +338,8 @@ export function createSupervisor(raw: Readonly<Record<string, unknown>>, ctx: Mo
 						next.lastContinuationDiff ??= earlier.lastContinuationDiff;
 						next.noProgressStreak = earlier.noProgressStreak;
 						next.verifyAsked ||= earlier.verifyAsked;
+						next.reviewed ||= earlier.reviewed;
+						for (const key of earlier.reported) next.reported.add(key);
 					}
 					anchor = next;
 					void persist(next);
@@ -359,8 +410,28 @@ export function createSupervisor(raw: Readonly<Record<string, unknown>>, ctx: Mo
 				},
 			});
 			const action = act(ctx, settings, current, verdict, evidence);
+			// The review runs after the session is handed back, for as long as it takes (D-097).
+			const reviewing =
+				settings.review &&
+				verdict.verdict === "complete" &&
+				!verdict.asked_user &&
+				!current.reviewed &&
+				!evidence.noChanges &&
+				startReview(current, ledger.requests, "settle");
 			await persist(current);
-			return action;
+			return reviewing && action?.kind === "notify"
+				? { ...action, summary: `${action.summary} · reviewing the changes` }
+				: action;
+		},
+
+		async command(args: string) {
+			if (args.trim() !== "review") return undefined;
+			const current = task ?? anchor;
+			const ledger = await current?.ledger;
+			if (!startReview(current, ledger?.requests ?? [], "command")) {
+				return "Review: it runs in the background, which needs pi's interactive UI.";
+			}
+			return "Reviewing the changes in the background. The findings will go in your editor; Escape or a new message stops the review.";
 		},
 
 		status() {
@@ -402,6 +473,8 @@ function restoreTask(saved: unknown): Task | undefined {
 		lastContinuationDiff: saved.lastContinuationDiff ?? undefined,
 		noProgressStreak: saved.noProgressStreak,
 		verifyAsked: saved.verifyAsked,
+		reviewed: saved.reviewed ?? false,
+		reported: new Set(saved.reported ?? []),
 		snapshots: new Map(),
 	};
 }
@@ -499,17 +572,8 @@ function act(
 	const { diffHash } = evidence;
 	const missing = items(verdict.missing);
 	const unverified = items(verdict.unverified);
-	const follow = (text: string, summary: string, data: { readonly [key: string]: string[] }): SettleAction => {
-		if (settings.mode === "auto") {
-			task.continuations += 1;
-			task.lastContinuationDiff = diffHash;
-			ctx.record({ kind: "exo.action", data: { action: "continued", continuation: task.continuations, ...data } });
-			return { kind: "continue", text, summary };
-		}
-		task.pending = { text, diffHash };
-		ctx.record({ kind: "exo.action", data: { action: "suggested", ...data } });
-		return { kind: "suggest", text, summary };
-	};
+	const follow = (text: string, summary: string, data: { readonly [key: string]: string[] }): SettleAction =>
+		followUp(ctx, settings, task, { text, summary, data, diffHash });
 	// Whether the agent is waiting on the user is the verdict's call (D-062): it can tell a blocking
 	// question from an offer of more work, which a pattern on the last line cannot.
 	if (verdict.verdict === "incomplete" && verdict.asked_user) {
@@ -531,7 +595,108 @@ function act(
 	if (verdict.verdict === "failed") {
 		return { kind: "notify", summary: `supervisor: looks failed: ${verdict.reason}`.slice(0, 200), level: "warning" };
 	}
+
 	return { kind: "notify", summary: `supervisor: ${verdict.verdict}`, level: "info" };
+}
+
+/**
+ * The task's change reviewed for bugs (D-097): everything since the task began, tracked files with
+ * each changed function whole, and new files. "no_changes" when there is nothing to review;
+ * undefined when no pass answered or the review was stopped. Changes nothing: see {@link keepReview}.
+ */
+async function runReview(
+	ctx: ModuleContext,
+	settings: SupervisorSettings,
+	task: Task | undefined,
+	requests: readonly string[],
+	signal: AbortSignal,
+): Promise<ReviewResult | "no_changes" | undefined> {
+	try {
+		const startRef = await task?.startRef;
+		const base = isCommitId(startRef) ? startRef : "HEAD";
+		const [tracked, untracked] = await Promise.all([git(ctx, `diff --function-context ${base}`), untrackedFiles(ctx)]);
+		const shown = await newFileDiffs(ctx.cwd, untracked ?? [], {
+			touched: touchedFiles(task?.tools ?? []),
+			maxFiles: MAX_NEW_FILES,
+			maxBytes: settings.reviewMaxChars,
+		});
+		const diff = [tracked?.trimEnd() ?? "", ...shown.diffs].filter(Boolean).join("\n");
+		if (diff === "") return "no_changes";
+		const result = await reviewChange(ctx, settings, { requests, diff, reported: task?.reported ?? new Set() }, signal);
+		return signal.aborted ? undefined : result;
+	} catch (error) {
+		ctx.log(`review failed: ${String(error)}`);
+		return undefined;
+	}
+}
+
+/**
+ * A follow-up to the agent (brief §6.1 step 4): in auto mode a continuation, otherwise a
+ * suggestion the user sends or edits. Either one counts toward the task's continuations once it
+ * is used, and records the diff it was made on, for the no-progress guard.
+ */
+function followUp(
+	ctx: ModuleContext,
+	settings: SupervisorSettings,
+	task: Task,
+	follow: {
+		readonly text: string;
+		readonly summary: string;
+		readonly data: { readonly [key: string]: string[] };
+		readonly diffHash: string;
+	},
+): SettleAction {
+	const { text, summary, data, diffHash } = follow;
+	if (settings.mode === "auto") {
+		task.continuations += 1;
+		task.lastContinuationDiff = diffHash;
+		ctx.record({ kind: "exo.action", data: { action: "continued", continuation: task.continuations, ...data } });
+		return { kind: "continue", text, summary };
+	}
+	task.pending = { text, diffHash };
+	ctx.record({ kind: "exo.action", data: { action: "suggested", ...data } });
+	return { kind: "suggest", text, summary };
+}
+
+/**
+ * What a review that found bugs asks of the agent (D-097). Without a task (a `/exo review` before
+ * any request) it is only offered: there is nothing to count it against.
+ */
+function reviewFollowUp(
+	ctx: ModuleContext,
+	settings: SupervisorSettings,
+	task: Task | undefined,
+	result: ReviewResult,
+	diffHash: string,
+): SettleAction {
+	const text = reviewMessage(result.findings);
+	const summary = `supervisor: ${reviewSummary(result)}`;
+	if (!task) return { kind: "suggest", text, summary };
+	if (task.continuations >= settings.maxContinuations) {
+		ctx.record({ kind: "exo.action", data: { action: "skipped", reason: "max_continuations" } });
+		return { kind: "notify", summary: `${summary} (not sent: the task is at its follow-up limit)`, level: "info" };
+	}
+	return followUp(ctx, settings, task, {
+		text,
+		summary,
+		data: { findings: result.findings.map((f) => `${f.file}: ${f.title}`) },
+		diffHash,
+	});
+}
+
+/**
+ * A review whose result is used: traced. Its bugs are remembered as reported only once its
+ * follow-up is used (see `reviewFollowUp`), so a later review may find again what the user never took.
+ */
+function keepReview(
+	ctx: ModuleContext,
+	task: Task | undefined,
+	result: ReviewResult | "no_changes",
+	trigger: ReviewTrigger,
+): void {
+	if (result === "no_changes") return;
+	if (task && trigger === "settle") task.reviewed = true;
+	ctx.record({ kind: "exo.review", data: { trigger, ...reviewRecord(result) } });
 }
 
 /** The user-role follow-up (brief §6.1 step 4): short and specific. */

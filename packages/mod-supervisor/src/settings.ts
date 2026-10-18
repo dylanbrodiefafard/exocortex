@@ -48,6 +48,21 @@ export const SettingsSchema = Type.Object(
 		 * evidence does not show, instead of staying quiet.
 		 */
 		verifyUncertain: Type.Boolean({ default: false }),
+		/**
+		 * D-097: once the verdict is `complete`, review the task's changes for bugs and follow up with
+		 * the findings that survive a check of their own. It runs in the background with no time
+		 * limit; Escape or a new message stops it. `/exo review` runs it at any time.
+		 */
+		review: Type.Boolean({ default: false }),
+		/**
+		 * Independent passes over the changes, each reading the files in another order. A bug fewer than
+		 * two passes report is dropped (Cursor's Bugbot); SWR-Bench found little gain past five.
+		 */
+		reviewPasses: Type.Integer({ minimum: 1, maximum: 8, default: 5 }),
+		/** Findings followed up at most, most severe first. */
+		reviewMaxFindings: Type.Integer({ minimum: 1, maximum: 10, default: 3 }),
+		/** How much of the changes a pass reads, in characters (~4 per token). */
+		reviewMaxChars: Type.Integer({ minimum: 2000, default: 48_000 }),
 	},
 	{ additionalProperties: true },
 );

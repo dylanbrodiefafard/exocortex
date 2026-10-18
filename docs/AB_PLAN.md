@@ -58,7 +58,7 @@ npm run eval -- --model ninfer/coding --tags hard --config all-off,supervisor --
 
 ```sh
 npm run eval -- --model ninfer/coding --tags hard --repeat 5 \
-  --config supervisor,supervisor-think,supervisor-pre,supervisor-items,supervisor-claims,supervisor-votes,supervisor-verify
+  --config supervisor,supervisor-think,supervisor-pre,supervisor-items,supervisor-claims,supervisor-votes,supervisor-verify,supervisor-review
 ```
 
 Each config turns on one option (D-056), so every row of the report is one option against `supervisor`.
@@ -69,6 +69,7 @@ Each config turns on one option (D-056), so every row of the report is one optio
   - `supervisor-think` has the strongest prior: non-thinking judges were near chance on pairwise code judging. If GPU time is short, run `supervisor,supervisor-think` first.
   - `supervisor-claims` (`finalMessage: "claims"`) is a real test, not a confirmation. CodeJudgeBench found judges do better *with* the judged response's full text, so stripping the narrative could lower precision. `supervisor-items` no longer sets it (D-056), so per-criterion verdicts are judged on their own.
   - `supervisor-verify` (D-071) turns an `uncertain` verdict into one request to the agent to check the unshown items. **Primary for this row:** Δ success. It costs a continuation, so it changes a default only if success rises without turns and wall-clock rising beyond what that one continuation explains. If `uncertain` is rare in the `supervisor` row, it has nothing to act on. It is also the only config that acts on a stale or piped test run (the agent is asked to run its tests again), so compare its "lucky passes" with `supervisor`'s.
+  - `supervisor-review` (D-097) reviews the changes for bugs once the verdict is `complete`. **Primary for this row:** Δ success, read with the hidden checks: a task that passed in `supervisor` and fails here is a fix made for a bug that was not there. The `exo.review` events give, per run, findings proposed, those that survived the vote and the check, and those kept. It changes a default only if success rises and no task regresses beyond noise.
   - `completeVotes` stays the logprob-free confidence route: logprobs are anti-calibrated on Qwen 3.5 27B (VERDI, verified).
 
 ## 3. Phase 4 modules (D-042 to D-045)

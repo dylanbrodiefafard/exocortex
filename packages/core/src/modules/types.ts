@@ -55,6 +55,15 @@ export interface ModuleContext {
 	readonly progress: (message: string) => void;
 	/** Debug log (no-op unless the harness's debug output is on). */
 	readonly log: (message: string) => void;
+	/**
+	 * Runs work that would hold the session too long, without holding it (D-097). It has no time
+	 * limit: `job`'s signal is aborted when the user sends a message, presses Escape, or the
+	 * session or this module instance goes away. The action it returns is then applied as a settle
+	 * action is (a `continue` starts a new turn if the agent is still idle); none is applied after
+	 * an abort. One job per module: starting another aborts the one running. False when it cannot
+	 * run (no UI to stop it from, or the module is gone).
+	 */
+	readonly background: (label: string, job: (signal: AbortSignal) => Promise<SettleAction | undefined>) => boolean;
 }
 
 /**

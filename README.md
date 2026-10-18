@@ -67,6 +67,18 @@ When the agent stops, the supervisor compares what you asked for (your message, 
 
 If something is missing, it puts a follow-up listing it in your editor. Press Enter to send it, or edit it first. `/exo supervisor auto` lets it send the follow-up itself, at most 3 times per task.
 
+**Review.** With `"review": true`, once the supervisor finds the task complete it also reviews the changes for bugs, the way Cursor's Bugbot and Claude Code's code review do:
+- Five independent passes read the change, each with the files in a different order. Each changed function is shown whole, along with the other places that use a function whose signature changed.
+- A finding counts only if it quotes a line the change added and at least two passes report it.
+- A separate call then tries to disprove each one. Only findings it can't disprove are kept, at most 3, most severe first.
+- What survives goes in your editor, with room for the agent to say a finding is not a bug.
+
+The review runs in the background with no time limit, so you get the session back as soon as the verdict is in. The status line shows it running. Escape or sending a new message stops it, since the code it read is about to change.
+
+If the review finishes while you're typing, your draft is left alone. A line above the editor says what was found, and `alt+r` (or `/exo add`) adds the findings below your message. If you send without them, they're dropped. The same applies to any follow-up that arrives while you're typing.
+
+A task is reviewed once, and a bug already reported is not reported again. `/exo review` runs the same review whenever you ask, with the option on or off.
+
 ### Tools
 
 Makes pi's own `read`, `edit` and `write` more useful to the model. It adds no tool: it adds to the result that just came back.
@@ -183,6 +195,8 @@ Everything is controlled from pi with the `/exo` command. Toggles last for the c
 | `/exo off` · `/exo on` | Turn every module off, or back on |
 | `/exo <module> on\|off` | Toggle one module: `supervisor`, `tools`, `trimmer`, `triage`, `memory`, `compaction` |
 | `/exo supervisor suggest\|auto` | Draft the follow-up in your editor, or send it automatically |
+| `/exo review` | Review the changes made so far for bugs in the background; the findings go in your editor |
+| `/exo add` · `alt+r` | Add a follow-up that arrived while you were typing below your message |
 | `/exo memory preferences` | List learned preferences |
 | `/exo memory forget <id>` | Remove a preference |
 | `/exo memory restore <id>` | Bring back a removed preference |

@@ -6,7 +6,7 @@ import type { Runtime } from "./runtime.ts";
 
 const PING_TIMEOUT_MS = 30_000;
 
-const COMMANDS = ["status", "cache", "ping", "on", "off"];
+const COMMANDS = ["status", "cache", "review", "add", "ping", "on", "off"];
 /** Modes some modules accept besides on/off. */
 const MODULE_MODES: Readonly<Record<string, readonly string[]>> = { supervisor: ["suggest", "auto"] };
 
@@ -15,6 +15,9 @@ const MODULE_MODES: Readonly<Record<string, readonly string[]>> = { supervisor: 
  * - `/exo` or `/exo status`: config state, modules and sidecar pool statistics;
  * - `/exo cache`: how much of each prompt the engine served from its prefix cache, for the main
  *   agent and each module's sidecar calls (D-095);
+ * - `/exo review`: the supervisor reviews the changes made so far for bugs, and puts what it finds
+ *   in the editor (D-097); `/exo supervisor review` is the same;
+ * - `/exo add`: adds a follow-up that arrived while the user was typing below their draft (D-097);
  * - `/exo ping`: one tiny sidecar call (and one embedding, if configured), to check the servers are reachable;
  * - `/exo off` / `/exo on`: kill switch for every module (brief §5.3), this session only;
  *   toggles are kept in the session (an `exo.overrides` entry), so `/reload` and `/resume` keep them;
@@ -28,30 +31,54 @@ const MODULE_MODES: Readonly<Record<string, readonly string[]>> = { supervisor: 
 export function registerExoCommand(pi: ExtensionAPI, runtime: Runtime): void {
 	const subcommands = () => [...COMMANDS, ...runtime.moduleIds()];
 	pi.registerCommand("exo", {
-		description: "Exocortex: status | cache | ping | on | off | <module> on|off | supervisor suggest|auto",
+		description:
+			"Exocortex: status | cache | review | add | ping | on | off | <module> on|off | supervisor suggest|auto",
 		getArgumentCompletions: (prefix) =>
 			subcommands()
 				.filter((name) => name.startsWith(prefix.trim()))
 				.map((name) => ({ value: name, label: name })),
 		handler: async (args, ctx) => {
+			const own: Readonly<Record<string, () => void | Promise<void>>> = {
+				ping: () => ping(runtime, ctx),
+				status: () => say(ctx, status(runtime)),
+				cache: () => say(ctx, runtime.config?.enabled ? cacheReport(runtime.cacheStats) : "Exocortex: disabled"),
+				review: () => review(runtime, ctx),
+				add: () => {
+					if (!runtime.addOffer(ctx)) say(ctx, "Nothing to add: no follow-up is waiting.");
+				},
+				on: () => switchAll(pi, runtime, ctx, "on"),
+				off: () => switchAll(pi, runtime, ctx, "off"),
+			};
 			try {
 				const [sub = "status", arg, ...rest] = args.trim().split(/\s+/).filter(Boolean);
-				if (sub === "ping") await ping(runtime, ctx);
-				else if (sub === "status") say(ctx, status(runtime));
-				else if (sub === "cache")
-					say(ctx, runtime.config?.enabled ? cacheReport(runtime.cacheStats) : "Exocortex: disabled");
-				else if (sub === "on" || sub === "off") {
-					runtime.overrides.allOff = sub === "off";
-					runtime.rebuildModules();
-					persistOverrides(pi, runtime);
-					say(ctx, `Exocortex modules ${sub === "off" ? "off" : "back on"} for this session.`);
-				} else if (runtime.moduleIds().includes(sub)) await moduleCommand(pi, runtime, ctx, sub, arg, rest);
+				const run = Object.hasOwn(own, sub) ? own[sub] : undefined;
+				if (run) await run();
+				else if (runtime.moduleIds().includes(sub)) await moduleCommand(pi, runtime, ctx, sub, arg, rest);
 				else say(ctx, `Unknown /exo subcommand "${sub}". Try: ${subcommands().join(", ")}`, "warning");
 			} catch (error) {
 				say(ctx, `/exo failed: ${String(error)}`, "error");
 			}
 		},
 	});
+}
+
+/** `/exo on` / `/exo off`: the kill switch for every module, kept in the session. */
+function switchAll(pi: ExtensionAPI, runtime: Runtime, ctx: ExtensionCommandContext, sub: "on" | "off"): void {
+	runtime.overrides.allOff = sub === "off";
+	runtime.rebuildModules();
+	persistOverrides(pi, runtime);
+	say(ctx, `Exocortex modules ${sub === "off" ? "off" : "back on"} for this session.`);
+}
+
+/** `/exo review`: the supervisor's review of the changes so far (D-097), when the agent is not working. */
+async function review(runtime: Runtime, ctx: ExtensionCommandContext): Promise<void> {
+	if (!runtime.config?.enabled || runtime.overrides.allOff) return say(ctx, "Exocortex: disabled", "warning");
+	if (!runtime.moduleStatus().some((s) => s.startsWith("supervisor"))) {
+		return say(ctx, "/exo review needs the supervisor: /exo supervisor on", "warning");
+	}
+	if (!ctx.isIdle()) return say(ctx, "The agent is working. Run /exo review once it stops.", "warning");
+	const reply = await runtime.moduleCommand("supervisor", "review", dialogFor(ctx));
+	say(ctx, reply ?? "The review did not run.");
 }
 
 /** A module answers its own subcommands (`/exo memory preferences`); anything else is a toggle. */

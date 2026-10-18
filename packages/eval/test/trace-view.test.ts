@@ -93,6 +93,15 @@ describe("summarizeEvent", () => {
 			'suggested · ["a"]',
 		);
 		expect(summarizeEvent({ kind: "exo.ledger", data: { is_task: false } })).toBe("not a task");
+		expect(
+			summarizeEvent({
+				kind: "exo.review",
+				data: { trigger: "settle", kept: [{ title: "x" }], distinct: 3, answered: 5, passes: 5 },
+			}),
+		).toBe("settle: 1 kept of 3 proposed by 5/5 passes");
+		expect(summarizeEvent({ kind: "exo.review", data: { trigger: "command" } })).toBe(
+			"command: 0 kept of - proposed by -/- passes",
+		);
 		expect(summarizeEvent({ kind: "model.change", data: { previous: null, model: "p/m" } })).toBe("- → p/m");
 		expect(summarizeEvent({ kind: "agent.settled", data: {} })).toBe("{}");
 	});

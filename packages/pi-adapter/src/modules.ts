@@ -71,6 +71,26 @@ const MODULES: Readonly<Record<string, ModuleFactory>> = {
 
 /** Hard cap on how long settle hooks may hold pi before it settles (checks + verdict). */
 const SETTLE_BUDGET_MS = 5 * 60_000;
+/**
+ * A module's background job (D-097). One that ended by starting a turn stays listed until that
+ * turn settles, so the status line (and the eval driver reading it) never shows a gap between them.
+ */
+interface Job {
+	readonly stop: AbortController;
+	readonly label: string;
+	startedTurn: boolean;
+}
+
+/** Widget key of a follow-up offered beside the user's draft (D-097). */
+const OFFER_WIDGET_KEY = "exo.offer";
+/**
+ * Adds an offered follow-up to the draft. Free in pi 1.0.2: `ctrl+y` is the editor's yank
+ * (`pi-tui/dist/keybindings.js:71`); no default binding uses `alt+r`.
+ */
+const OFFER_SHORTCUT = "alt+r";
+
+/** Status-line key set while a module's background job runs (D-097); the eval driver waits on it. */
+const BACKGROUND_STATUS_KEY = "exo.background";
 /** Hard cap on how long tool-result rewrites may hold the agent loop, across all modules. */
 const REWRITE_BUDGET_MS = 20_000;
 /** Hard cap on how long modules may look before a tool runs, across all modules: the tool waits (D-094). */
@@ -167,6 +187,16 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 	let settling: AbortController | undefined;
 	/** Tool results are handled one after another: each waits for the one before it. */
 	let toolResults: Promise<unknown> = Promise.resolve();
+	/** Each module's background job now running (D-097), by module id. */
+	const jobs = new Map<string, Job>();
+	/** The session's latest context: where a background job's result is shown. */
+	let lastCtx: ExtensionContext | undefined;
+	/**
+	 * A follow-up that arrived while the user was typing (D-097): kept beside their draft until they
+	 * add it ({@link OFFER_SHORTCUT}, `/exo add`) or send a message. Its action is committed only
+	 * when added, so a module can tell a follow-up the user never took.
+	 */
+	let offer: { readonly id: string; readonly action: SettleAction & { readonly kind: "suggest" } } | undefined;
 
 	const modules = (): ExoModule[] => slots.map((slot) => slot.module);
 	const reporter = (where: string) => (error: unknown) => onError(where, error);
@@ -205,6 +235,7 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 
 	/** Disposes one instance and turns its context off. Never rejects. */
 	async function retire(slot: Slot): Promise<void> {
+		jobs.get(slot.id)?.stop.abort();
 		try {
 			await slot.module.dispose?.();
 		} catch (error) {
@@ -216,6 +247,7 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 
 	async function disposeAll(): Promise<void> {
 		settling?.abort();
+		stopJobs();
 		const retiring = slots;
 		slots = [];
 		if (retiring.length === 0) return;
@@ -228,6 +260,21 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 	runtime.disposeModules = disposeAll;
 	runtime.moduleStatus = () => modules().map((m) => m.status?.() ?? m.id);
 	runtime.moduleIds = () => Object.keys(factories);
+	runtime.addOffer = (ctx) => addOffer(ctx);
+	try {
+		pi.registerShortcut(OFFER_SHORTCUT, {
+			description: "Exocortex: add the offered follow-up below your message",
+			handler: (ctx) => {
+				try {
+					addOffer(ctx);
+				} catch (error) {
+					onError("modules.addOffer", error);
+				}
+			},
+		});
+	} catch (error) {
+		onError("modules.registerShortcut", error);
+	}
 	runtime.moduleCommand = async (id, args, dialog) => {
 		try {
 			return await modules()
@@ -265,7 +312,133 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 				}
 			},
 			log: (message) => options.log(`${id}: ${message}`),
+			background: (label, job) => startJob(id, life, label, job),
 		};
+	}
+
+	/**
+	 * Runs a module's background job (D-097): no time limit, stopped by a message, Escape, or the
+	 * session or module going away. Its action is applied when it ends, unless it was stopped.
+	 */
+	function startJob(
+		id: string,
+		life: { readonly over: boolean },
+		label: string,
+		job: (signal: AbortSignal) => Promise<SettleAction | undefined>,
+	): boolean {
+		const ctx = lastCtx;
+		if (life.over || !ctx?.hasUI) return false;
+		jobs.get(id)?.stop.abort();
+		const entry: Job = { stop: new AbortController(), label, startedTurn: false };
+		jobs.set(id, entry);
+		showJobs(ctx);
+		const unwatch = watchEscape(ctx, () => entry.stop.abort());
+		void (async () => {
+			try {
+				const action = await job(entry.stop.signal);
+				if (action && !entry.stop.signal.aborted && !life.over) entry.startedTurn = deliver(id, action, ctx);
+			} catch (error) {
+				onError(`${id}.background`, error);
+			} finally {
+				unwatch();
+				if (jobs.get(id) === entry && !entry.startedTurn) jobs.delete(id);
+				showJobs(ctx);
+			}
+		})();
+		return true;
+	}
+
+	/** Shows a follow-up above the editor, with how to add it; undefined takes the last one away. */
+	function showOffer(ctx: ExtensionContext, next: typeof offer): void {
+		offer = next;
+		try {
+			const lines = next && [
+				`exo: ${next.action.summary}`,
+				`${OFFER_SHORTCUT} (or /exo add) adds the follow-up below your message · sending without it drops it`,
+			];
+			ctx.ui.setWidget(OFFER_WIDGET_KEY, lines, { placement: "aboveEditor" });
+		} catch (error) {
+			onError("modules.showOffer", error);
+		}
+	}
+
+	/**
+	 * Adds the offered follow-up below the user's draft, which stays as they wrote it. One undo
+	 * (`ctrl+-`) takes it back out (`setEditorText`, `pi-tui/dist/components/editor.js:921-933`).
+	 * False when nothing is offered.
+	 */
+	function addOffer(ctx: ExtensionContext): boolean {
+		const taken = offer;
+		if (!taken || !ctx.hasUI) return false;
+		const draft = ctx.ui.getEditorText().trimEnd();
+		ctx.ui.setEditorText(draft === "" ? taken.action.text : `${draft}\n\n${taken.action.text}`);
+		showOffer(ctx, undefined);
+		commit(taken.id, taken.action);
+		return true;
+	}
+
+	/** The user sent a message or the session changed: an offer not taken is dropped. */
+	function dropOffer(ctx: ExtensionContext | undefined): void {
+		if (offer && ctx) showOffer(ctx, undefined);
+		offer = undefined;
+	}
+
+	/** The turn a job started has ended: the job is no longer waited on. */
+	function endStartedTurns(ctx: ExtensionContext): void {
+		const ended = [...jobs].filter(([, job]) => job.startedTurn);
+		for (const [id] of ended) jobs.delete(id);
+		if (ended.length > 0) showJobs(ctx);
+	}
+
+	/** Stops every job, and forgets those whose turn started: what they read is about to change. */
+	function stopJobs(): void {
+		if (jobs.size === 0) return;
+		for (const [id, job] of jobs) {
+			job.stop.abort();
+			if (job.startedTurn) jobs.delete(id);
+		}
+		if (lastCtx) showJobs(lastCtx);
+	}
+
+	/** The jobs on the status line (`exo.background`); the eval driver waits while it is set. */
+	function showJobs(ctx: ExtensionContext): void {
+		try {
+			if (!ctx.hasUI) return;
+			const running = [...jobs.values()].filter((j) => !j.startedTurn).map((j) => j.label);
+			const continued = [...jobs.values()].filter((j) => j.startedTurn).map((j) => j.label);
+			const text =
+				running.length > 0
+					? `exo: ${running.join(", ")}… (Esc stops)`
+					: continued.length > 0
+						? `exo: continuing after ${continued.join(", ")}`
+						: undefined;
+			ctx.ui.setStatus(BACKGROUND_STATUS_KEY, text);
+		} catch (error) {
+			// A context from a session that was replaced: there is nothing to show it on.
+			onError("modules.showJobs", error);
+		}
+	}
+
+	/**
+	 * A background job's action, applied as a settle action is. A continuation starts a new turn,
+	 * since the boundary that could carry one has passed; with the agent busy it is offered instead.
+	 * True when it started a turn.
+	 */
+	function deliver(id: string, action: SettleAction, ctx: ExtensionContext): boolean {
+		const now = action.kind === "continue" && !ctx.isIdle() ? { ...action, kind: "suggest" as const } : action;
+		const applied = apply(id, now, ctx);
+		if (!applied.used || applied.offered) return false;
+		const entry = applied.result?.entries?.[0];
+		let started = false;
+		if (now.kind === "continue" && entry?.type === "custom_message") {
+			pi.sendMessage(
+				{ customType: entry.customType, content: entry.content, display: entry.display, details: entry.details },
+				{ triggerTurn: true },
+			);
+			started = true;
+		}
+		commit(id, action);
+		return started;
 	}
 
 	/** Writes a module's state as an `exo.<module>.state` session entry (never sent to the model). */
@@ -342,6 +515,9 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 		"session_start",
 		guarded("session_start", async (_event, ctx) => {
 			// A new session, or the same one reloaded: modules start over from what the session holds.
+			stopJobs();
+			dropOffer(lastCtx);
+			lastCtx = ctx;
 			await disposeAll();
 			cwd = ctx.cwd;
 			sessionId = ctx.sessionManager.getSessionId();
@@ -363,6 +539,9 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 	pi.on(
 		"input",
 		guarded("input", (event) => {
+			// What a background job read, and what an offered follow-up was about, is about to change.
+			stopJobs();
+			dropOffer(lastCtx);
 			const accepted = suggested !== undefined && sameText(suggested, event.text);
 			suggested = undefined;
 			if (event.source !== "extension") continuations = 0;
@@ -649,6 +828,8 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 	 * Nothing is applied after that: pi would persist a continuation and then not continue.
 	 */
 	async function settle(event: AgentBeforeSettleEvent, ctx: ExtensionContext) {
+		lastCtx = ctx;
+		endStartedTurns(ctx);
 		const asked = modules().filter((m) => m.onSettle);
 		if (asked.length === 0) return undefined;
 		const info = { outcome: event.outcome, lastAssistantText: lastAssistantText(event) };
@@ -670,7 +851,7 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 				if (stop.signal.aborted) break;
 				if (!action) continue;
 				const applied = apply(module.id, action, ctx);
-				if (applied.used) commit(module.id, action);
+				if (applied.used && !applied.offered) commit(module.id, action);
 				if (action.kind !== "notify") return applied.result; // one actionable result per settle
 			}
 			return undefined;
@@ -706,17 +887,17 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 		moduleId: string,
 		action: SettleAction,
 		ctx: ExtensionContext,
-	): { readonly used: boolean; readonly result?: BoundaryResult } {
+	): { readonly used: boolean; readonly offered?: boolean; readonly result?: BoundaryResult } {
 		switch (action.kind) {
 			case "suggest": {
 				// Nothing can show it: the module is not told it was used.
 				if (!ctx.hasUI) return { used: false };
 				suggested = action.text;
-				// The user is typing: their draft stays, the suggestion is shown beside it.
+				// The user is typing: their draft stays, and the follow-up waits beside it until they add it.
 				if (ctx.ui.getEditorText().trim() !== "") {
-					hold.settled(ctx, `exo: ${action.summary} (suggestion shown)`);
-					ctx.ui.notify(`${action.summary}. Suggested follow-up (your draft is untouched):\n${action.text}`, "info");
-					return { used: true };
+					showOffer(ctx, { id: moduleId, action });
+					hold.settled(ctx, `exo: ${action.summary} (${OFFER_SHORTCUT} adds it to your message)`);
+					return { used: true, offered: true };
 				}
 				hold.settled(ctx, `exo: ${action.summary} (suggestion in editor)`);
 				ctx.ui.setEditorText(action.text);

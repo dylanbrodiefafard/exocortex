@@ -31,6 +31,13 @@ export interface FakePiBehavior {
 	/** Ask for the editor text to be set to this before settling, the first time only. */
 	readonly suggestOnce?: string;
 	/**
+	 * The first time only, settle with a background job running (D-097), then a little later set the
+	 * editor text to this and end the job.
+	 */
+	readonly backgroundSuggestOnce?: string;
+	/** The first time only, settle with a background job running, which then starts one more turn. */
+	readonly backgroundContinueOnce?: boolean;
+	/**
 	 * Take this long to exit once stdin closes, as pi does while a `session_shutdown` handler
 	 * waits (PI_API_NOTES §16), then write `shutdown-done` in the working directory, holding the
 	 * drain time it was asked for (`EXO_SHUTDOWN_DRAIN_MS`).
@@ -81,6 +88,26 @@ function handle(command) {
 	if (behavior.neverSettle) return;
 	if (behavior.suggestOnce && prompts === 1) {
 		out({ type: "extension_ui_request", id: "ui-1", method: "set_editor_text", text: behavior.suggestOnce });
+	}
+	const status = (text) =>
+		out({ type: "extension_ui_request", id: "ui-s", method: "setStatus", statusKey: "exo.background", statusText: text });
+	if ((behavior.backgroundSuggestOnce || behavior.backgroundContinueOnce) && prompts === 1) {
+		status("exo: reviewing the changes… (Esc stops)");
+		out({ type: "agent_settled" });
+		setTimeout(() => {
+			if (behavior.backgroundSuggestOnce) {
+				out({ type: "extension_ui_request", id: "ui-2", method: "set_editor_text", text: behavior.backgroundSuggestOnce });
+				status(undefined);
+				return;
+			}
+			status("exo: continuing after reviewing the changes");
+			out({ type: "agent_start" });
+			out({ type: "turn_start", turnIndex: 1 });
+			out({ type: "turn_end", turnIndex: 1 });
+			status(undefined);
+			out({ type: "agent_settled" });
+		}, 200);
+		return;
 	}
 	out({ type: "agent_settled" });
 }

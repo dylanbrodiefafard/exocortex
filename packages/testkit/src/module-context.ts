@@ -9,6 +9,7 @@ import {
 	type JsonValue,
 	type ModuleContext,
 	runShellCommand,
+	type SettleAction,
 	SIDECAR_MAX_TOKENS,
 	type TraceEventInput,
 } from "@exocortex/core";
@@ -30,6 +31,14 @@ export interface TestModuleContext {
 	 * context with `savedState: first.states.at(-1)` (and the same `sessionId`).
 	 */
 	readonly states: JsonValue[];
+	/** Every background job the module started (D-097), run at once: `stop` aborts it, `done` is its action. */
+	readonly jobs: TestJob[];
+}
+
+interface TestJob {
+	readonly label: string;
+	readonly stop: AbortController;
+	readonly done: Promise<SettleAction | undefined>;
 }
 
 /**
@@ -56,6 +65,7 @@ export function createTestModuleContext(options: {
 	const logs: string[] = [];
 	const progress: string[] = [];
 	const states: JsonValue[] = [];
+	const jobs: TestJob[] = [];
 	const { reply } = options;
 	const client: InferenceClient | undefined = reply && {
 		async chat(request, signal) {
@@ -111,6 +121,7 @@ export function createTestModuleContext(options: {
 		logs,
 		progress,
 		states,
+		jobs,
 		context: {
 			cwd: options.cwd,
 			sessionId: options.sessionId ?? "test-session",
@@ -123,6 +134,13 @@ export function createTestModuleContext(options: {
 			runCommand: (command, opts) => runShellCommand(command, { cwd: options.cwd, ...opts }),
 			progress: (message) => progress.push(message),
 			log: (message) => logs.push(message),
+			background: (label, job) => {
+				// As the real host does: one job per module, a new one stops the last.
+				jobs.at(-1)?.stop.abort();
+				const stop = new AbortController();
+				jobs.push({ label, stop, done: job(stop.signal) });
+				return true;
+			},
 		},
 	};
 }

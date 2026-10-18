@@ -100,6 +100,24 @@ describe("PiRpcProcess limits", () => {
 		});
 		expect(result).toMatchObject({ outcome: "settled", turns: 2, acceptedSuggestions: 1 });
 	});
+
+	it("waits for a background job after the run settles: its suggestion is accepted (D-097)", async () => {
+		const result = await start({ backgroundSuggestOnce: "fix the bug the review found" }).prompt("go", {
+			maxTurns: 5,
+			timeoutMs: 5_000,
+			acceptSuggestions: true,
+		});
+		expect(result).toMatchObject({ outcome: "settled", turns: 2, acceptedSuggestions: 1 });
+	});
+
+	it("follows the turn a background job starts until that turn settles (D-097)", async () => {
+		const result = await start({ backgroundContinueOnce: true }).prompt("go", {
+			maxTurns: 5,
+			timeoutMs: 5_000,
+			acceptSuggestions: true,
+		});
+		expect(result).toMatchObject({ outcome: "settled", turns: 2, acceptedSuggestions: 0 });
+	});
 });
 
 describe("PiRpcProcess close (E2, D-086)", () => {

@@ -87,6 +87,7 @@ function context(script: Script | undefined): ModuleContext {
 		record: (event) => records.push(event),
 		runCommand: (command, options) => runShellCommand(command, { cwd: repo, ...options }),
 		log: () => {},
+		background: () => false,
 	};
 }
 

@@ -30,6 +30,8 @@ export const TRACE_EVENT_KINDS = [
 	"exo.ledger",
 	/** A module's judgement of the agent's work: the labels memory learns from (brief §6.1). */
 	"exo.verdict",
+	/** A review of the task's changes: the findings proposed, how each was checked, and those kept (D-097). */
+	"exo.review",
 	/** A module acting on the session: suggestion, continuation, acceptance, or a deliberate skip. */
 	"exo.action",
 	/** A module rewrote a tool result; the original is the preceding `tool.result` event. */
