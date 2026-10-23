@@ -193,6 +193,11 @@ export interface CompactionRequest {
 	readonly filesRead: readonly string[];
 	readonly filesModified: readonly string[];
 	readonly tokensBefore: number;
+	/**
+	 * The main model's context window in tokens, or null when the harness does not know it. A
+	 * sidecar on the same engine has the same window: a transcript is cut only past it (D-111).
+	 */
+	readonly contextWindow: number | null;
 	/** Extra instructions the user gave (e.g. `/compact focus on the parser`). */
 	readonly customInstructions: string | null;
 	/**
@@ -214,6 +219,13 @@ export interface CompactionSummary extends Committable {
 	/** The text that replaces the summarized span in the context. */
 	readonly summary: string;
 	/**
+	 * `facts`: the module could not write the handover, and `summary` holds only what it tracked
+	 * (the user's requests, files, commands). The harness then writes its own summary and puts
+	 * this after it, so those facts are not lost with the module's summary (D-111). A module's
+	 * summary is whole when left out.
+	 */
+	readonly part?: "facts";
+	/**
 	 * Structured data to keep with the compaction (the facts behind the summary). The model never
 	 * sees it; the module gets it back as {@link CompactionRequest.previousDetails} next time.
 	 * A `module` key is reserved for the harness adapter.
@@ -226,6 +238,15 @@ export interface SettleInfo {
 	readonly outcome: "completed" | "aborted" | "error";
 	/** Text of the final assistant message (empty if none). */
 	readonly lastAssistantText: string;
+	/**
+	 * The text of every assistant message since the user's last message, oldest first; the last is
+	 * {@link SettleInfo.lastAssistantText}. A module's own follow-ups and late notes do not end the
+	 * span: they are not the user's. Only text parts, no reasoning, and messages with no text are
+	 * left out. Absent when the harness cannot tell.
+	 */
+	readonly assistantTexts?: readonly string[];
+	/** The main model's context window in tokens, when the harness knows: what budgets may be sized from. */
+	readonly contextWindow?: number;
 	/**
 	 * How full the context is, when the harness knows: its tokens, and the count at which the
 	 * harness compacts on its own (D-098).
@@ -243,8 +264,14 @@ export type SettleAction = (
 	| { readonly kind: "suggest"; readonly text: string; readonly summary: string }
 	| { readonly kind: "continue"; readonly text: string; readonly summary: string }
 	| { readonly kind: "notify"; readonly summary: string; readonly level: "info" | "warning" }
-) &
-	Committable;
+) & {
+	/**
+	 * As {@link Committable.commit}, told how the action was delivered: a `continue` that arrives
+	 * while the user has started the agent again is offered as a `suggest` instead, and is committed
+	 * as one (the user may still send it). Left out, it was delivered as its own kind.
+	 */
+	readonly commit?: (delivered?: SettleAction["kind"]) => void;
+};
 
 /**
  * One module instance per harness session; hooks are optional and must never throw.
@@ -277,13 +304,20 @@ export interface ExoModule {
 	 */
 	rewriteToolResult?(draft: ToolResultDraft, signal: AbortSignal): Promise<ToolRewrite | undefined>;
 	/**
+	 * The agent stopped: told to every module, before any `onSettle` and whatever they return
+	 * (D-106). For work that reacts to the stop without acting on the session (an early summary,
+	 * bookkeeping). Must return at once; anything slow runs in the background.
+	 */
+	onSettled?(info: SettleInfo): void;
+	/**
 	 * Awaited by the harness before it settles, within a time budget. `signal` also aborts when
 	 * the user interrupts or leaves the session; a result returned after that is dropped.
 	 */
 	onSettle?(info: SettleInfo, signal: AbortSignal): Promise<SettleAction | undefined>;
 	/**
-	 * Writes the compaction summary (brief §6.5). The first module returning one wins; undefined
-	 * leaves compaction to the harness's default.
+	 * Writes the compaction summary (brief §6.5). The first whole summary wins; without one, the
+	 * first `part: "facts"` summary follows the harness's own (D-111); undefined leaves compaction
+	 * to the harness's default.
 	 */
 	compact?(request: CompactionRequest, signal: AbortSignal): Promise<CompactionSummary | undefined>;
 	/** The harness compacted the conversation: text added earlier may no longer be in the context. */

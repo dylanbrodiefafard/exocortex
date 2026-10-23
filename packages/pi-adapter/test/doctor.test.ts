@@ -132,8 +132,13 @@ describe("/exo doctor (D-099)", () => {
 			const pool = createSidecarPool({
 				client: createOpenAIClient(target(baseUrl, features)),
 				target: target(baseUrl, features),
-				config: { maxConcurrent: 4, reservedForMain: 1, sessionTokenBudget: 0, backgroundWhenIdleOnly: true },
-				moduleLimits: () => ({ maxTokensPerCall: 64 }),
+				config: {
+					maxConcurrent: 4,
+					reservedForMain: 1,
+					sessionTokenBudget: 0,
+					backgroundWhenIdleOnly: true,
+					thinking: "auto",
+				},
 			});
 			const findings = await runDoctor({
 				engine: target(baseUrl, features),
@@ -173,8 +178,13 @@ describe("/exo doctor (D-099)", () => {
 			const pool = createSidecarPool({
 				client: createOpenAIClient(target(baseUrl, features)),
 				target: target(baseUrl, features),
-				config: { maxConcurrent: 4, reservedForMain: 1, sessionTokenBudget: 0, backgroundWhenIdleOnly: true },
-				moduleLimits: () => ({ maxTokensPerCall: 64 }),
+				config: {
+					maxConcurrent: 4,
+					reservedForMain: 1,
+					sessionTokenBudget: 0,
+					backgroundWhenIdleOnly: true,
+					thinking: "auto",
+				},
 			});
 			const findings = await runDoctor({
 				engine: target(baseUrl, features),
@@ -199,8 +209,13 @@ describe("/exo doctor (D-099)", () => {
 		const pool = createSidecarPool({
 			client: createOpenAIClient(target(baseUrl, features)),
 			target: target(baseUrl, features),
-			config: { maxConcurrent: 4, reservedForMain: 1, sessionTokenBudget: 0, backgroundWhenIdleOnly: true },
-			moduleLimits: () => ({ maxTokensPerCall: 64 }),
+			config: {
+				maxConcurrent: 4,
+				reservedForMain: 1,
+				sessionTokenBudget: 0,
+				backgroundWhenIdleOnly: true,
+				thinking: "auto",
+			},
 		});
 		const base = { engine: target(baseUrl, features), profile: "p", pool, embedder: undefined, fork: async () => fork };
 		const plain = await runDoctor(base);

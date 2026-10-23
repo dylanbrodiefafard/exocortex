@@ -31,8 +31,13 @@ export interface ForkTracker {
 
 /** How long pi may take to serialize a few messages; it looks up the model's key first. */
 const SERIALIZE_TIMEOUT_MS = 2_000;
-/** An assistant message that ended this way is in the engine's cache to its last token. */
-const ANSWERED = new Set(["stop", "toolUse"]);
+/**
+ * An assistant message that ended this way left the engine's cache holding the request before it.
+ * A reply cut off at `max_tokens` is one (D-103): measured on ninfer, the next request found the
+ * whole earlier prompt cached after one, as after a reply that stopped. One that failed or was
+ * interrupted may have stopped anywhere.
+ */
+const ANSWERED = new Set(["stop", "toolUse", "length"]);
 
 /**
  * Follows the main agent's requests so a sidecar call can continue from its context (D-093).
@@ -84,7 +89,7 @@ export function registerForkTracker(pi: ExtensionAPI, options: ForkOptions): For
 			if (!last) return;
 			const message = event.message;
 			if (message.role === "assistant") {
-				// A reply that was cut off or failed leaves the cache somewhere this cannot know.
+				// A reply that failed or was interrupted leaves the cache somewhere this cannot know.
 				if (last.answered || !ANSWERED.has(message.stopReason)) {
 					last = undefined;
 					return;

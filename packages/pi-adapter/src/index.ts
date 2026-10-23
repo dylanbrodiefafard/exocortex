@@ -59,7 +59,23 @@ export default function exocortex(pi: ExtensionAPI): void {
 			// Nowhere left to report a failure to log (an unwritable EXO_DEBUG_FILE).
 		}
 	};
-	const onError = (where: string, error: unknown): void => emit("exo.error", () => ({ where, error: String(error) }));
+	/**
+	 * Also kept for `/exo status` and the trace, not only the debug stream (D-106). Never throws.
+	 * A problem with the trace itself is not written to the trace: a failed write would report
+	 * itself by writing again, without end.
+	 */
+	const keep = (where: string, message: string, error: boolean): void => {
+		try {
+			runtime.problems.add(where, message, error);
+			if (!where.startsWith("trace")) runtime.record({ kind: "exo.problem", data: { where, message, error } });
+		} catch {
+			// The runtime is not built yet, or the trace is gone: the debug stream still has it.
+		}
+	};
+	const onError = (where: string, error: unknown): void => {
+		emit("exo.error", () => ({ where, error: String(error) }));
+		keep(where, String(error), true);
+	};
 
 	const runtime = createRuntime({ env, onError, moduleSettings: MODULE_SETTINGS });
 	// The order at shutdown (D-078, D-086), all inside the sidecars' handler, which is the first:
@@ -75,7 +91,16 @@ export default function exocortex(pi: ExtensionAPI): void {
 		runtime,
 		onError,
 		fork,
-		log: (message) => emit("exo.log", () => ({ message })),
+		log: (message) => {
+			emit("exo.log", () => ({ message }));
+			// Module notes arrive as "<module>: <what happened>".
+			const at = message.indexOf(": ");
+			keep(
+				at > 0 && at < 24 ? message.slice(0, at) : "module",
+				at > 0 && at < 24 ? message.slice(at + 2) : message,
+				false,
+			);
+		},
 	});
 	registerCacheStats(pi, runtime, onError);
 	registerExoCommand(pi, runtime, { fork });

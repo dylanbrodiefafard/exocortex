@@ -100,9 +100,11 @@ describe("a mistyped module or setting (D7, D-033)", () => {
 		exocortex(pi.api);
 		await pi.emit("session_start", { reason: "startup" });
 		const notices = pi.ui.filter((call) => call.method === "notify").map((call) => String(call.args[0]));
-		expect(notices).toHaveLength(1);
-		expect(notices[0]).toContain("engine, modules.supervisor.checks, modules.memory.dbPath, modules.trimmer.saveDir");
-		expect(notices[0]).not.toMatch(/disabled/);
+		// What was left out, once; and since that left no engine, that the supervisor cannot work (D-106).
+		expect(notices).toHaveLength(2);
+		expect(notices[0]).toMatch(/no sidecar engine.*supervisor cannot work without one/);
+		expect(notices[1]).toContain("engine, modules.supervisor.checks, modules.memory.dbPath, modules.trimmer.saveDir");
+		expect(notices[1]).not.toMatch(/disabled/);
 	});
 
 	it("says nothing about a valid config, with or without `enabled`", async () => {

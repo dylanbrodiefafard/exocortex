@@ -305,8 +305,12 @@ Verified in pi 1.0.2's `dist/`:
 
 ### Context usage (D-098)
 - `ctx.getContextUsage()` returns `{ tokens: number | null, contextWindow, percent }` (`core/extensions/types.d.ts:197-203`, `:248`). `tokens` is null right after a compaction, until the next reply.
-- Pi auto-compacts when `contextTokens > contextWindow - reserveTokens` (`core/compaction/compaction.js:173-176`). `reserveTokens` defaults to 16,384 (`:55`).
-- The setting is not exposed to extensions outside `session_before_compact`, whose `preparation.settings` has it.
+- Pi auto-compacts when `contextTokens > contextWindow - reserveTokens` (`core/compaction/compaction.js:173-176`). `reserveTokens` defaults to 16,384 (`core/settings-manager.js:10-13`, `DEFAULT_COMPACTION_TOKEN_SETTINGS`).
+- The extension context does not carry the setting; `session_before_compact`'s `preparation.settings` has it as pi used it. **Reading it before a compaction (D-111):** pi exports `SettingsManager` and `getAgentDir` (`dist/index.d.ts:2,22`).
+  - `SettingsManager.create(cwd, agentDir?, { projectTrusted? })` (`core/settings-manager.d.ts:194`, `.js:199-224`) reads `<agentDir>/settings.json` and `<cwd>/.pi/settings.json` as pi does. A project file is skipped when `projectTrusted` is false; pass `ctx.isProjectTrusted()` (`core/extensions/types.d.ts:238`).
+  - Reading takes pi's file lock only when the file exists, and writes nothing (`FileSettingsStorage.withLock`, `.js:126-152`). `getAgentDir()` honours `PI_CODING_AGENT_DIR` (`config.js:438,453-457`).
+  - `getCompactionSettings(model?)` returns `{enabled, reserveTokens, keepRecentTokens}`: a `compaction.modelOverrides["provider/id"]` value, then the plain setting, then the default (`.js:608-639`). `enabled` defaults to true (`:597-599`). Invalid values throw.
+  - Settings given only on pi's command line, or changed in this session's memory, are not in the files. The adapter takes `preparation.settings` from the first compaction on.
 
 ### Designed continuation hook
 `agent_before_settle` (and `turn_end`) return `{entries: [{type: "custom_message", ...}], continue: true}` to append context and force **one** more model request (`extensions.md:117`; `agent-session.ts:1846-1870`).
@@ -445,6 +449,12 @@ registerCommand(name: string, options: {
 - **Return values:**
   - `{cancel: true}` cancels the compaction.
   - `{compaction: {summary, firstKeptEntryId, tokensBefore, usage?, details?}}` supplies a custom summary (`CompactionResult`, `compaction.ts:105-114`). Example: `ce/examples/extensions/custom-compaction.ts:79-104`.
+- **Pi's own summary from an extension (D-111).** Pi exports the function it runs when no extension supplies a summary: `compact(preparation, model, apiKey, headers?, customInstructions?, signal?, thinkingLevel?, streamFn?, env?, retry?, callbacks?, sessionId?): Promise<CompactionResult>` (`dist/index.d.ts:6`; `core/compaction/compaction.d.ts:144`, `.js:685-723`).
+  - Pi calls it from `_runDefaultCompaction` (`core/agent-session.js:2108-2112`) after resolving auth and routing a virtual model (`_getSummarizationRequestAuth`, `:236`).
+  - With a `streamFn`, each request is `(await streamFn(model, context, options)).result()` (`completeSummarization`, `.js:477-489`). `(m, c, o) => ctx.modelRegistry.streamSimple(m, c, o)` resolves auth at request time and routes a virtual model (`core/model-runtime.js:447-466,489-515`), so `apiKey` and `headers` can be left undefined.
+  - It summarizes `messagesToSummarize` with the update prompt when `previousSummary` is set, and a split turn's prefix in a second call, joined by `---` and `**Turn Context (split turn):**` (`.js:690-702`). It appends `<read-files>`/`<modified-files>` and returns `details: {readFiles, modifiedFiles}` (`:706-721`).
+  - The answer's limit is `0.8 × reserveTokens`, capped by the model's `maxTokens` (`:512`). A reply with `stopReason` `error` or `length` throws (`getSummarizationFailure`, `:454-461`), as does a tool call.
+  - Without `retry`, a failed request is not retried (`pi-ai/dist/utils/retry.js:131`). Pi passes `settingsManager.getRetrySettings()` (`core/settings-manager.js:659-666`: `{enabled, maxRetries: 3, baseDelayMs: 2000, maxAgentDelayMs: 60000}` by default), and the adapter passes the same.
 - **What is kept:**
   - the summary, as a user-role `compactionSummary` (`messages.ts:176-183`);
   - entries from `firstKeptEntryId` onward;
@@ -587,6 +597,7 @@ The default active tools are `read, bash, edit, write`. `grep, find, ls` and `po
   - The text is the **last** 2,000 lines or 50 KB, whichever is hit first (`truncate.js:10-11`; `output-accumulator.js:70-74` uses `truncateTail`). The start of a long output never reaches the model.
   - Once either limit is passed, every raw chunk is also written to a temp file (`output-accumulator.js:46-54`, `:205-207`), and the file is closed before the result is built (`bash.js:224-231`: `finishOutput` awaits `closeTempFile`). So at `tool_result` time `details.fullOutputPath` names a complete file.
   - The file holds the command's raw output only. The notice `\n\n[Showing lines S-E of T (50.0KB limit). Full output: <path>]` (`bash.js:246-249`) and the status `\n\nCommand exited with code N` (`bash.js:254`, `:297`) are appended to the text afterwards, in that order, and are not in the file.
+  - A timeout, an abort or a missing exit code **throws** with the same text and notice, then `Command timed out after N seconds`, `Command aborted` or `Command terminated without an exit code` (`bash.js:266-282`). A thrown result has no `details` or `structuredContent`, so the notice in the text is the only place the saved file is named. Exocortex reads it from there (`fullOutputPathOf`, D-110).
 
 ### Other tools
 - **`read`:** `ReadToolDetails {truncation?}`.
@@ -647,6 +658,8 @@ Read in the installed 1.0.2 build under `node_modules/@earendil-works/`. Paths a
 ### `agent_before_settle` payload
 - `event.outcome` is `"completed" | "aborted" | "error"` (`core/extensions/types.d.ts:719`, `:753-758`). It is derived from the last assistant message's `stopReason` at each `turn_end` (`core/agent-session.js:475-477`) and starts as `"completed"` (`:125`).
 - `event.context.llmMessages` is `convertToLlm` over the projection of the persisted session plus the drafts returned so far (`core/agent-session.js:603-614`; type `BoundaryContextPreview`, `types.d.ts:746-752`). Custom messages appear in it with role `user` (§3), so the last `assistant` entry is the agent's final message.
+- `event.context.contextMessages` is the same projection before `convertToLlm` (`core/agent-session.js:603-614`): there a custom message keeps role `"custom"` with its `customType` (`core/messages.js:57-66`), and summaries have roles `"compactionSummary"` / `"branchSummary"` (`core/messages.js:40-55`). The adapter reads the agent's replies since the user's last message from it (`assistantTextsOfRun`), so an Exocortex follow-up or late note does not end the span.
+- The main model's context window is `ctx.getContextUsage()?.contextWindow` (`core/extensions/types.d.ts:248`, `ContextUsage` at `:197-203`), or `ctx.model?.contextWindow` (`:227`; pi-ai `Model.contextWindow`).
 
 ### `input.streamingBehavior`
 - Set only when the input arrives while the agent runs (`this.isStreaming ? options?.streamingBehavior : undefined`, `core/agent-session.js:1502`; type at `types.d.ts:881-882`): `"steer"` or `"followUp"`. Undefined means a new prompt on an idle agent. `before_agent_start` does not fire for a steered or follow-up message (§3).

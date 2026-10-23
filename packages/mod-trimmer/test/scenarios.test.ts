@@ -8,7 +8,9 @@ import { createTrimmer } from "../src/trimmer.ts";
 /**
  * Long, real-shaped outputs for the D-016 toolchains, each with one failure the agent needs
  * (D-083). Every scenario says which lines must survive: the failing test's name, where it
- * failed and what it said. `maxChars` is checked on each, at the default and at a tight setting.
+ * failed and what it said. `maxChars` is checked on each, at a budget smaller than the output and
+ * at a tight one. The default thresholds (D-110) are far above these outputs; the selection is
+ * what is tested here, as it runs on an output pi cut.
  */
 
 let dir: string;
@@ -18,7 +20,9 @@ beforeEach(() => {
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
 const signal = new AbortController().signal;
-const DEFAULT_MAX_CHARS = 24_000;
+const MAX_CHARS = 24_000;
+/** Less than the whole output: an output that fits is shown whole (D-110). */
+const budgetFor = (log: string) => Math.min(MAX_CHARS, Math.floor(log.length * 0.75));
 const TIGHT_MAX_CHARS = 4_000;
 
 /** Distinct letters per index, so generated lines differ in more than their numbers. */
@@ -37,7 +41,10 @@ const repeat = (n: number, line: (i: number) => string | readonly string[]) =>
 
 async function trim(log: string, command: string, settings: Record<string, unknown> = {}): Promise<string> {
 	const { context } = createTestModuleContext({ cwd: dir });
-	const trimmer = createTrimmer({ saveDir: join(dir, "saved"), ...settings }, context);
+	const trimmer = createTrimmer(
+		{ saveDir: join(dir, "saved"), minChars: 8_000, maxChars: budgetFor(log), ...settings },
+		context,
+	);
 	const rewrite = await trimmer.rewriteToolResult?.(
 		{
 			toolName: "bash",
@@ -427,7 +434,7 @@ describe("what a trimmed output must still show", () => {
 			expect(scenario.log.length).toBeGreaterThan(8_000);
 			const text = await trim(scenario.log, scenario.command);
 			for (const line of scenario.needed) expect(text, line).toContain(line);
-			expect(text.length).toBeLessThanOrEqual(DEFAULT_MAX_CHARS);
+			expect(text.length).toBeLessThanOrEqual(MAX_CHARS);
 			expect(text.length).toBeLessThan(scenario.log.length);
 		});
 

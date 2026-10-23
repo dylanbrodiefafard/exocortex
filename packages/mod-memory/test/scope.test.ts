@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { createMemory } from "../src/memory.ts";
 import { normalizeRemote, repoScope } from "../src/scope.ts";
 import { openMemoryStore } from "../src/store.ts";
-import { edit, fail, idle, pass, SETTLED, signal, workspace } from "./helpers.ts";
+import { edit, fail, idle, LESSON, pass, SETTLED, signal, workspace } from "./helpers.ts";
 
 const space = workspace();
 
@@ -19,7 +19,11 @@ const TIMED_OUT: CommandOutput = { exitCode: null, timedOut: true, durationMs: 5
 
 /** A context whose git answers are scripted: the first for the remote, the second for the root tree. */
 function withGit(answers: readonly (CommandOutput | Error)[]) {
-	const t = createTestModuleContext({ cwd: space.dir(), reply: () => ({ preferences: [] }) });
+	const t = createTestModuleContext({
+		cwd: space.dir(),
+		reply: (request) =>
+			String(request.messages[0]?.["content"]).includes("Failing run:") ? LESSON : { preferences: [] },
+	});
 	const left = [...answers];
 	const context: ModuleContext = {
 		...t.context,
@@ -69,13 +73,13 @@ describe("repo scope (M12)", () => {
 	it("learns and recalls nothing in a session whose repo it could not name", async () => {
 		// A card that a path scope would find.
 		const store = openMemoryStore(space.dbPath());
-		const known = createMemory({ dbPath: space.dbPath(), distill: false }, withGit([]).context);
+		const known = createMemory({ dbPath: space.dbPath() }, withGit([]).context);
 		for (const tool of [fail(), edit, pass()]) known.onToolResult?.(tool);
 		await idle(80);
 		expect(store.cards()).toHaveLength(1);
 
 		const { t, context } = withGit([TIMED_OUT]);
-		const memory = createMemory({ dbPath: space.dbPath(), distill: false, preferences: true }, context);
+		const memory = createMemory({ dbPath: space.dbPath(), preferences: true }, context);
 		for (const tool of [fail("make", "main.c:3:1: error: unknown type name 'u8'"), edit, pass("make")]) {
 			memory.onToolResult?.(tool);
 		}
@@ -90,7 +94,10 @@ describe("repo scope (M12)", () => {
 			signal,
 		);
 		expect(rewrite).toBeUndefined();
-		expect(t.records.map((r) => r.data)).toEqual([{ action: "scope_unknown" }]);
+		expect(t.records.map((r) => r.data)).toEqual([
+			{ action: "scope_unknown" },
+			{ action: "skipped", reason: "scope_unknown", signature: expect.stringContaining("unknown type name") },
+		]);
 		expect(memory.status?.()).toContain("repo unknown: not learning");
 	});
 
@@ -102,7 +109,7 @@ describe("repo scope (M12)", () => {
 			// The first lookup times out; the retry's git never answers.
 			runCommand: () => (calls++ === 0 ? Promise.resolve(TIMED_OUT) : new Promise<CommandOutput>(() => undefined)),
 		};
-		const memory = createMemory({ dbPath: space.dbPath(), distill: false }, context);
+		const memory = createMemory({ dbPath: space.dbPath() }, context);
 		await idle(20);
 		memory.onUserTurn?.({ text: "fix the build", origin: "user" });
 		const started = Date.now();
@@ -115,7 +122,7 @@ describe("repo scope (M12)", () => {
 
 	it("asks git again at the user's next message, and learns once it answers (D-098)", async () => {
 		const { context } = withGit([TIMED_OUT, ran("git@github.com:owner/repo.git")]);
-		const memory = createMemory({ dbPath: space.dbPath(), distill: false }, context);
+		const memory = createMemory({ dbPath: space.dbPath() }, context);
 		await idle(20);
 		expect(memory.status?.()).toContain("repo unknown");
 		memory.onUserTurn?.({ text: "fix the build", origin: "user" });

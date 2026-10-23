@@ -89,8 +89,9 @@ export async function runLoadTest(options: LoadTestOptions): Promise<LoadTestRep
 			timeoutMs: options.sidecarTimeoutMs,
 			sessionTokenBudget: 0,
 			backgroundWhenIdleOnly: true,
+			// Load, not judgment: the sidecars it measures answer short and do not think.
+			thinking: "never",
 		},
-		moduleLimits: () => ({ maxTokensPerCall: options.sidecarMaxTokens }),
 	});
 	pool.setMainActive(true);
 	log(`phase 2/2: ${options.mainRequests} main requests with ${options.sidecarBacklog} sidecars kept in flight`);
@@ -234,6 +235,7 @@ function keepSaturated(pool: SidecarPool, options: LoadTestOptions) {
 		const promise = pool
 			.run({
 				module: "loadtest",
+				kind: "pick",
 				priority: PRIORITIES[n % PRIORITIES.length] ?? "interactive",
 				request: {
 					messages: [
@@ -243,7 +245,6 @@ function keepSaturated(pool: SidecarPool, options: LoadTestOptions) {
 						},
 					],
 					maxTokens: options.sidecarMaxTokens,
-					thinking: false,
 				},
 			})
 			.then(async (result) => {

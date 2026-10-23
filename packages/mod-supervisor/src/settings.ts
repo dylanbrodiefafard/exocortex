@@ -6,7 +6,11 @@ export const SettingsSchema = Type.Object(
 	{
 		/** `suggest`: pre-fill the user's next message (D-010). `auto`: continue on its own (opt-in). */
 		mode: Type.Union([Type.Literal("suggest"), Type.Literal("auto")], { default: "suggest" }),
-		/** Continuations (accepted suggestions or auto) per task before the supervisor stays quiet. */
+		/**
+		 * Auto mode: continuations per task. At the limit the supervisor still judges the work and
+		 * says what it found, but leaves the follow-up to the user (D-107). Suggestions are not
+		 * counted: the user sends each one.
+		 */
 		maxContinuations: Type.Integer({ minimum: 0, default: 3 }),
 		/** Check commands to run as evidence at settle, e.g. ["npm test"] (D-011). The user's to set: they are run (D-087). */
 		checks: Type.Array(Type.String({ minLength: 1 }), { default: [], ...USER_ONLY }),
@@ -17,45 +21,18 @@ export const SettingsSchema = Type.Object(
 		 * once the agent stops, and Escape or a new message stops them (D-098).
 		 */
 		checkTimeoutMs: Type.Optional(Type.Integer({ minimum: 1000 })),
-		/** Sidecar thinking (Qwen `enable_thinking`). Off by default: short JSON tasks (D-008). */
-		thinking: Type.Boolean({ default: false }),
-		/**
-		 * Evidence budget for the verdict prompt, in characters (~4 per token). The verdict runs while
-		 * the main agent is idle, so its prefill delays nothing but the verdict (D-071).
-		 */
-		maxEvidenceChars: Type.Integer({ minimum: 1000, default: 40_000 }),
-		// Research options (docs/RESEARCH.md §1), all off by default so each can be A/B'd (D-046).
-		/**
-		 * R1.1: a failing check means `incomplete` and no change at all means `uncertain`, without a
-		 * verdict call. After a failing check a small sidecar call still reads whether the agent is
-		 * waiting on the user (D-091).
-		 */
-		preVerdict: Type.Boolean({ default: false }),
-		/**
-		 * R1.2 #4–#7: add test-tampering, stub, unsupported-claim and narrow-test warnings to the
-		 * evidence. The claims are read from the agent's final message by a sidecar (D-091).
-		 */
-		warningSignals: Type.Boolean({ default: false }),
-		/** R1.4: judge each checklist item with a quoted evidence line, and derive the verdict in code. */
-		verdictStyle: Type.Union([Type.Literal("holistic"), Type.Literal("per-criterion")], { default: "holistic" }),
-		/**
-		 * What the verdict reads of the agent's final message. `message`: the message itself, the start
-		 * and end of a very long one (D-089). `claims` (R1.3): only its unverified claims, as a sidecar read them (D-091).
-		 */
-		finalMessage: Type.Union([Type.Literal("message"), Type.Literal("claims")], { default: "message" }),
-		/** R1.5: re-ask this many times in total when the verdict is `complete`; any dissent → `uncertain`. */
-		completeVotes: Type.Integer({ minimum: 1, maximum: 5, default: 1 }),
 		/**
 		 * D-071: when the verdict is `uncertain`, ask the agent once per task to check the items the
-		 * evidence does not show, instead of staying quiet.
+		 * evidence does not show, instead of only saying so (on by default since D-107).
 		 */
-		verifyUncertain: Type.Boolean({ default: false }),
+		verifyUncertain: Type.Boolean({ default: true }),
 		/**
-		 * D-097: once the verdict is `complete`, review the task's changes for bugs and follow up with
-		 * the findings that survive a check of their own. It runs in the background with no time
-		 * limit; Escape or a new message stops it. `/exo review` runs it at any time.
+		 * D-097: once the verdict is `complete` or `uncertain` and the task changed files, review the
+		 * changes for bugs and follow up with the findings that survive a check of their own (once per
+		 * task; on by default since D-107). It runs in the background with no time limit; Escape or a
+		 * new message stops it. `/exo review` runs it at any time.
 		 */
-		review: Type.Boolean({ default: false }),
+		review: Type.Boolean({ default: true }),
 		/**
 		 * Independent passes over the changes, each reading the files in another order. A bug fewer than
 		 * two passes report is dropped (Cursor's Bugbot); SWR-Bench found little gain past five.
@@ -63,15 +40,21 @@ export const SettingsSchema = Type.Object(
 		reviewPasses: Type.Integer({ minimum: 1, maximum: 8, default: 5 }),
 		/** Findings followed up at most, most severe first. */
 		reviewMaxFindings: Type.Integer({ minimum: 1, maximum: 10, default: 3 }),
-		/** How much of the changes a pass reads, in characters (~4 per token). */
-		reviewMaxChars: Type.Integer({ minimum: 2000, default: 48_000 }),
-		/**
-		 * D-101: the review's passes and checks think before they answer, whatever `thinking` says.
-		 * Without it Qwen3.8 passed an off-by-one in 13 passes of 13; with it, 5 of 5 found it.
-		 */
-		reviewThinking: Type.Boolean({ default: true }),
 	},
-	{ additionalProperties: true },
+	{
+		additionalProperties: true,
+		// D-106, D-107: read without these, with a notice. The evidence and review budgets now come from the context window.
+		retired: [
+			"reviewThinking",
+			"preVerdict",
+			"warningSignals",
+			"verdictStyle",
+			"finalMessage",
+			"completeVotes",
+			"maxEvidenceChars",
+			"reviewMaxChars",
+		],
+	},
 );
 
 export type SupervisorSettings = Static<typeof SettingsSchema>;

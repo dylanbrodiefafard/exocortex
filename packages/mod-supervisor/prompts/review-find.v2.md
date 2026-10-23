@@ -18,7 +18,7 @@ These are not bugs, so do not report them:
 
 For each bug:
 - `file`: the path, as in the diff header.
-- `quote`: one line the change added (a `+` line), copied exactly, without the `+`, that the bug is in or starts from. Pick a line with enough text to be unique; never `}` or a blank line. A finding without such a line is not used.
+- `quote`: one line the bug is in or starts from, copied exactly, with enough text to be unique; never `}` or a blank line. Either a line the change added (a `+` line, without the `+`), or, for a caller the change left behind, the line of that caller as the other-places block below shows it (without its `path:line:` prefix; then `file` is that caller's path). A finding that quotes neither is not used.
 - `title`: the bug in one sentence.
 - `scenario`: a concrete, realistic case: what input or state, what the code does, and what it should do instead.
 - `severity`: "high" (wrong results, a crash or data loss on a path that will be used), "medium" (wrong on an edge or error case), "low" (wrong only in an unusual case).

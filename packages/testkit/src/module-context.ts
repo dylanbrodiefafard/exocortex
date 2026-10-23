@@ -11,12 +11,19 @@ import {
 	type ModuleContext,
 	runShellCommand,
 	type SettleAction,
-	SIDECAR_MAX_TOKENS,
 	type TraceEventInput,
 } from "@exocortex/core";
 
-/** A sidecar reply: an object (sent as JSON), raw text, or an error to throw. */
-export type SidecarReply = object | string | Error;
+/** A sidecar reply: an object (sent as JSON), raw text, a reply cut off at its limit, or an error to throw. */
+export type SidecarReply = object | string | TruncatedReply | Error;
+
+/** Text the engine stopped at `max_tokens` (`finish_reason: "length"`). */
+export class TruncatedReply {
+	readonly text: string;
+	constructor(text: string) {
+		this.text = text;
+	}
+}
 
 export interface TestModuleContext {
 	readonly context: ModuleContext;
@@ -92,12 +99,13 @@ export function createTestModuleContext(options: {
 			});
 			const value = await Promise.race([reply(request, requests.length - 1), aborted]);
 			if (value instanceof Error) throw new InferenceError("http", value.message);
-			const text = typeof value === "string" ? value : JSON.stringify(value);
+			const cut = value instanceof TruncatedReply;
+			const text = cut ? value.text : typeof value === "string" ? value : JSON.stringify(value);
 			// The whole reply arrives as one piece, as from an engine that streams it in one chunk.
 			chatOptions?.onProgress?.(text.length);
 			return {
 				text,
-				finishReason: "stop",
+				finishReason: cut ? "length" : "stop",
 				usage: { promptTokens: 100, completionTokens: 20, cachedTokens: options.cachedTokens ?? null },
 			};
 		},
@@ -118,8 +126,8 @@ export function createTestModuleContext(options: {
 				timeoutMs: 5_000,
 				sessionTokenBudget: 0,
 				backgroundWhenIdleOnly: true,
+				thinking: "auto",
 			},
-			moduleLimits: () => ({ maxTokensPerCall: SIDECAR_MAX_TOKENS }),
 		});
 	const { embed } = options;
 	const embedder: Embedder | undefined = embed && {

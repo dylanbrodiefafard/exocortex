@@ -20,7 +20,9 @@ const asLines = (texts: readonly string[]): Line[] => texts.map((text, i) => ({ 
 function trimLines(texts: readonly string[], options: TrimOptions, isNumbered = false) {
 	const lines = asLines(texts);
 	// Nothing hidden or collapsed, so a block's place in the output is its place in the lines.
-	const prepared: Prepared = { lines, totalLines: lines.length, routineLines: 0, blocks: findBlocks(texts) };
+	const blocks = findBlocks(texts);
+	const whole = new Set(blocks.flatMap((b) => b.keys));
+	const prepared: Prepared = { lines, totalLines: lines.length, routineLines: 0, blocks, whole };
 	return renderSelection(prepared, selectLines(prepared, options), {
 		maxLineChars: options.maxLineChars,
 		numbered: isNumbered,
@@ -36,22 +38,26 @@ describe("prepareLines", () => {
 			"ok",
 			"Downloading 100%",
 			"step 1/9",
-			"[… 3 more similar lines …]",
+			"[… 2 more similar lines …]",
+			"step 4/9",
 			"done",
 		]);
-		expect(prepared.lines[3]).toMatchObject({ first: 4, last: 6, similar: 3 });
+		expect(prepared.lines[3]).toMatchObject({ first: 4, last: 5, similar: 2 });
 		expect(prepared).toMatchObject({ totalLines: 7, routineLines: 0 });
-		// With line numbers, the marker says which lines of the full output it stands for.
+		// With line numbers, the marker says which lines of the full output it stands for; the run's last value stays (D-110).
 		const all = new Set(prepared.lines.keys());
 		expect(renderSelection(prepared, all, { maxLineChars: 50, numbered: true }).text).toContain(
-			"step 1/9\n[… lines 4–6: 3 more similar …]\ndone",
+			"step 1/9\n[… lines 4–5: 2 more similar …]\nstep 4/9\ndone",
 		);
 		expect(renderSelection(prepared, all, { maxLineChars: 50, numbered: false }).text).toContain(
-			"step 1/9\n[… 3 more similar lines …]\ndone",
+			"step 1/9\n[… 2 more similar lines …]\nstep 4/9\ndone",
 		);
-		const pair = prepareLines("tick 1\ntick 2\nend", { ...OPTIONS, collapseRuns: 2 });
-		expect(renderSelection(pair, new Set([0, 1, 2]), { maxLineChars: 50, numbered: true }).text).toBe(
-			"tick 1\n[… line 2: 1 more similar …]\nend",
+		// A run of four is the shortest that collapses: its first and last line stay.
+		const short = prepareLines("tick 1\ntick 2\ntick 3\nend", { ...OPTIONS, collapseRuns: 2 });
+		expect(short.lines).toHaveLength(4);
+		const four = prepareLines("tick 1\ntick 2\ntick 3\ntick 4\nend", { ...OPTIONS, collapseRuns: 2 });
+		expect(renderSelection(four, new Set(four.lines.keys()), { maxLineChars: 50, numbered: true }).text).toBe(
+			"tick 1\n[… lines 2–3: 2 more similar …]\ntick 4\nend",
 		);
 	});
 	it("never collapses an error, a line with a source position, or a line of a failure's block (R1)", () => {
@@ -81,7 +87,12 @@ describe("prepareLines", () => {
 			"    ledger::tests::settle_2",
 		);
 		// What is neither still collapses.
-		expect(prepareLines("retry 1\nretry 2\nretry 3\nend", OPTIONS).lines).toHaveLength(3);
+		expect(prepareLines("retry 1\nretry 2\nretry 3\nretry 4\nend", OPTIONS).lines.map((l) => l.text)).toEqual([
+			"retry 1",
+			"[… 2 more similar lines …]",
+			"retry 4",
+			"end",
+		]);
 	});
 	it("keeps a failing Go test's own lines out of the routine ones", () => {
 		const text = [
@@ -158,13 +169,15 @@ describe("selectLines and renderSelection", () => {
 	});
 
 	it("names hidden routine lines and collapsed runs by their place in the full output", () => {
-		const prepared = prepareLines("ok 1 - a\nnot ok 2 - b\nok 3 - c\nx 1\nx 2\nx 3\ny\nz\nw\nv\nu\nt", OPTIONS);
-		const keep = new Set([0, 4, 5, 6, 7, 8]);
+		const prepared = prepareLines("ok 1 - a\nnot ok 2 - b\nok 3 - c\nx 1\nx 2\nx 3\nx 4\ny\nz\nw\nv\nu\nt", OPTIONS);
+		const keep = new Set([0, 2, 5, 6, 7, 8, 9]);
 		const text = renderSelection(prepared, keep, { maxLineChars: 50, numbered: true }).text;
 		expect(text.split("\n")).toEqual([
 			"[… line 1 omitted …]",
 			"not ok 2 - b",
-			"[… lines 3–7 omitted …]",
+			"[… lines 3–4 omitted …]",
+			"[… lines 5–6: 2 more similar …]",
+			"[… lines 7–8 omitted …]",
 			"z",
 			"w",
 			"v",

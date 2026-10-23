@@ -64,13 +64,21 @@ describe("fork tracker (D-093)", () => {
 		expect(h.errors).toEqual([]);
 	});
 
+	it("continues after a reply cut off at max_tokens: the engine cached the request before it (D-103)", async () => {
+		const { h, tracker, ctx } = setup();
+		await h.pi.emit("before_provider_request", { payload: PAYLOAD });
+		await h.pi.emit("message_end", assistant("length"));
+		expect(await tracker.prefix(ctx())).toBeDefined();
+		h.cleanup();
+	});
+
 	it("gives none when the cache cannot be known to end where the messages do", async () => {
 		const answered = async (h: AdapterHarness, stopReason = "stop") => {
 			await h.pi.emit("before_provider_request", { payload: PAYLOAD });
 			await h.pi.emit("message_end", assistant(stopReason));
 		};
-		// A reply that was cut off, failed or was interrupted.
-		for (const stopReason of ["length", "error", "aborted"]) {
+		// A reply that failed or was interrupted.
+		for (const stopReason of ["error", "aborted"]) {
 			const { h, tracker, ctx } = setup();
 			await answered(h, stopReason);
 			expect(await tracker.prefix(ctx())).toBeUndefined();

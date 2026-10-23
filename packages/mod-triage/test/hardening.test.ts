@@ -3,11 +3,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ChatRequest, JsonValue, ToolOutcome, ToolResultDraft } from "@exocortex/core";
 import { createTestModuleContext, type SidecarReply } from "@exocortex/testkit";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { parseSettings } from "../src/settings.ts";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createTriage } from "../src/triage.ts";
 
-/** Regression tests for the hardening pass (HARDENING_PLAN section T, D-082). */
+/** Regression tests for the hardening pass (HARDENING_PLAN section T, D-082) and for D-108. */
 
 let dir: string;
 beforeEach(() => {
@@ -63,9 +62,9 @@ function setup(
 type Triage = ReturnType<typeof createTriage>;
 
 /** One tool result as the host delivers it, without telling the module its rewrite was used. */
-async function offer(triage: Triage, d: ToolResultDraft, sig: AbortSignal = signal) {
+async function offer(triage: Triage, d: ToolResultDraft) {
 	triage.onToolResult?.(d);
-	return triage.rewriteToolResult?.(d, sig);
+	return triage.rewriteToolResult?.(d, signal);
 }
 
 /** One tool result whose rewrite reached the model. */
@@ -75,9 +74,22 @@ async function deliver(triage: Triage, d: ToolResultDraft) {
 	return rewrite;
 }
 
-const never = () => new Promise<SidecarReply>(() => undefined);
+const sent = (t: { late: string[] }, n: number) => vi.waitFor(() => expect(t.late).toHaveLength(n));
+const pause = (ms = 60) => new Promise((resolve) => setTimeout(resolve, ms));
 
-describe("hints from a fork of the agent's context (D-099)", () => {
+/** A reply that waits until released, as a slow engine does. */
+function gated() {
+	const waiting: (() => void)[] = [];
+	return {
+		reply: () => new Promise<SidecarReply>((resolve) => waiting.push(() => resolve(HINT))),
+		release: () => {
+			for (const go of waiting.splice(0)) go();
+		},
+		waiting,
+	};
+}
+
+describe("hints from a fork of the agent's context (D-099, the default since D-108)", () => {
 	const engine = { features: { cacheReadOnly: true, cachedTokens: true }, cachedTokens: 95 };
 	const toolCall = (id: string) => ({ id, type: "function", function: { name: "bash", arguments: "{}" } });
 	// As pi serializes a context mid-batch: the calls, each answered "No result provided" (D-099).
@@ -93,19 +105,19 @@ describe("hints from a fork of the agent's context (D-099)", () => {
 	});
 	function forked(forkPrefix: ReturnType<typeof fork>, reply: (request: ChatRequest) => SidecarReply) {
 		const t = createTestModuleContext({ cwd: dir, ...engine, forkPrefix, reply: (request) => reply(request) });
-		return { t, triage: createTriage({ forkHints: true }, t.context) };
+		return { t, triage: createTriage({}, t.context) };
 	}
 	const FORK_HINT = {
 		diagnosis: "The push borrows `self.stack` while it is borrowed.",
 		next_action: "Clone the word first, as the user asked to keep `self.stack` a Vec.",
 	};
 
-	it("asks the fork, answering the pending tool calls first, and uses its hint", async () => {
+	it("asks the fork, answering the pending tool calls first, and sends its hint", async () => {
 		const { triage, t } = forked(fork("c1", "c9"), (r) => (r.fork ? FORK_HINT : HINT));
 		await deliver(triage, draft(E0502));
-		const second = await deliver(triage, draft(E0502));
-		expect(second?.note).toBe("repeat 2 + hint");
-		expect(second?.text).toContain("Clone the word first");
+		await deliver(triage, draft(E0502));
+		await sent(t, 1);
+		expect(t.late[0]).toContain("Clone the word first");
 		const [asked] = t.requests;
 		expect(asked?.fork?.body["messages"]).toEqual([
 			expect.objectContaining({ role: "user" }),
@@ -119,15 +131,27 @@ describe("hints from a fork of the agent's context (D-099)", () => {
 		expect(t.requests).toHaveLength(1);
 	});
 
+	it("shows the fork the result as the agent sees it, notice included", async () => {
+		const { triage, t } = forked(fork("c1"), () => FORK_HINT);
+		for (let i = 0; i < 2; i++) await deliver(triage, draft(E0502));
+		await sent(t, 1);
+		await deliver(triage, draft(E0502));
+		await vi.waitFor(() => expect(t.requests).toHaveLength(2));
+		const tool = (t.requests[1]?.fork?.body["messages"] as { content: string }[] | undefined)?.at(-1);
+		expect(tool?.content).toContain("[exo triage: this has now failed 3 times");
+	});
+
 	it("asks with the isolated prompt when the fork is not of this call, or its reply cannot be used", async () => {
 		const other = forked(fork("c7"), () => HINT);
 		await deliver(other.triage, draft(E0502));
-		expect((await deliver(other.triage, draft(E0502)))?.note).toBe("repeat 2 + hint");
+		await deliver(other.triage, draft(E0502));
+		await sent(other.t, 1);
 		expect(other.t.requests.map((r) => r.fork !== undefined)).toEqual([false]);
 
 		const chatty = forked(fork("c1"), (r) => (r.fork ? "Sure, I will run cargo build again." : HINT));
 		await deliver(chatty.triage, draft(E0502));
-		expect((await deliver(chatty.triage, draft(E0502)))?.note).toBe("repeat 2 + hint");
+		await deliver(chatty.triage, draft(E0502));
+		await sent(chatty.t, 1);
 		expect(chatty.t.requests.map((r) => r.fork !== undefined)).toEqual([true, true, false]);
 	});
 });
@@ -136,22 +160,23 @@ describe("T1: a failure that was fixed is forgotten", () => {
 	it("starts over when the command passes, so a regression is a first failure again", async () => {
 		const { triage } = setup({ sidecar: false });
 		await deliver(triage, draft(E0502));
-		expect((await deliver(triage, draft(E0502)))?.note).toBe("repeat 2");
+		await deliver(triage, draft(E0502));
 		triage.onToolResult?.(edited("lib.rs"));
 		expect(await deliver(triage, passed())).toBeUndefined();
 		for (let i = 0; i < 40; i++) await deliver(triage, passed(`ls ${i}`, "x"));
-		expect(await deliver(triage, draft(E0502))).toBeUndefined();
-		const again = await deliver(triage, draft(E0502));
-		expect(again?.note).toBe("repeat 2");
+		await deliver(triage, draft(E0502));
+		await deliver(triage, draft(E0502));
+		const third = await deliver(triage, draft(E0502));
+		expect(third?.note).toBe("repeat 3");
 		// The edit made before the pass is not one this failure outlived.
-		expect(again?.text).not.toContain("did not change it");
+		expect(third?.text).not.toContain("did not change it");
 	});
 
 	it("takes a pass of the same run behind a pipe, and no other command's pass", async () => {
 		const failing = "test parse ... FAILED\nerror: test failed, to rerun pass `--lib`";
 		const run = (command: string, output: string, ok: boolean) =>
 			draft(output, { input: { command }, isError: !ok, exitCode: ok ? 0 : 101 });
-		const { triage } = setup({ sidecar: false });
+		const { triage } = setup({ sidecar: false, loopThreshold: 2 });
 		await deliver(triage, run("cargo test", failing, false));
 		await deliver(triage, run("cargo fmt", "", true));
 		expect((await deliver(triage, run("cargo test", failing, false)))?.note).toBe("repeat 2");
@@ -159,38 +184,69 @@ describe("T1: a failure that was fixed is forgotten", () => {
 		expect(await deliver(triage, run("cargo test", failing, false))).toBeUndefined();
 	});
 
+	it("forgets every test command's failures when any test run passes (D-108)", async () => {
+		const failing = "FAILED tests/test_a.py::test_x - assert 1 == 2\n=== 1 failed in 0.1s ===";
+		const run = (command: string, output: string, ok: boolean) =>
+			draft(output, { input: { command }, isError: !ok, exitCode: ok ? 0 : 1 });
+		const { triage } = setup({ sidecar: false, loopThreshold: 2 });
+		await deliver(triage, run("pytest tests/ 2>&1 | tail -20", failing, false));
+		await deliver(triage, run("python -m pytest -q", "1 passed in 0.1s", true));
+		// Not "the same errors as before": what failed before passed since.
+		expect(await deliver(triage, run("pytest tests/", failing, false))).toBeUndefined();
+		// A build passing forgets only its own failures.
+		await deliver(triage, run("pytest tests/", failing, false));
+		await deliver(triage, run("make", "", true));
+		expect((await deliver(triage, run("pytest tests/", failing, false)))?.note).toBe("repeat 3");
+	});
+
+	it("keeps the failures on a narrowed pass of other tests, or a pass that ran no test (D-108 amendment)", async () => {
+		const failing = "FAILED tests/test_a.py::test_x - assert 1 == 2\n=== 1 failed in 0.1s ===";
+		const run = (command: string, output: string, ok: boolean) =>
+			draft(output, { input: { command }, isError: !ok, exitCode: ok ? 0 : 1 });
+		const { triage } = setup({ sidecar: false, loopThreshold: 2 });
+		await deliver(triage, run("pytest tests/", failing, false));
+		await deliver(triage, run("pytest tests/test_b.py::test_y", "1 passed in 0.1s", true));
+		await deliver(triage, run("python -m pytest -k nothing_here", "1 passed in 0.1s", true));
+		await deliver(
+			triage,
+			run("cargo test nomatch", "running 0 tests\ntest result: ok. 0 passed; 0 failed; 5 filtered out", true),
+		);
+		await deliver(triage, run("go test -run TestNone ./...", "ok  \tpkg\t0.01s [no tests to run]", true));
+		expect((await deliver(triage, run("pytest tests/", failing, false)))?.note).toBe("repeat 2");
+		// A narrowed pass that names the failing test fixes it.
+		await deliver(triage, run("pytest tests/test_a.py::test_x", "1 passed in 0.1s", true));
+		expect(await deliver(triage, run("pytest tests/", failing, false))).toBeUndefined();
+	});
+
 	it("gives a new hint allowance and forgets the old hints after a pass", async () => {
 		const prompts: string[] = [];
-		const { triage } = setup({ maxHintsPerSignature: 1 }, (prompt) => {
+		const { triage, t } = setup({ maxHintsPerSignature: 1 }, (prompt) => {
 			prompts.push(prompt);
 			return HINT;
 		});
 		await deliver(triage, draft(E0502));
-		expect((await deliver(triage, draft(E0502)))?.note).toBe("repeat 2 + hint");
+		await deliver(triage, draft(E0502));
+		await sent(t, 1);
 		await deliver(triage, passed());
 		await deliver(triage, draft(E0502));
-		expect((await deliver(triage, draft(E0502)))?.note).toBe("repeat 2 + hint");
+		await deliver(triage, draft(E0502));
+		await sent(t, 2);
 		expect(prompts[1]).toContain("Advice already given for this failure:\n(none)");
 	});
 
 	it("does not say the edits changed nothing when the failure went away and came back", async () => {
 		const prompts: string[] = [];
-		const { triage } = setup({}, (prompt) => {
+		const { triage, t } = setup({}, (prompt) => {
 			prompts.push(prompt);
-			return HINT;
+			return { ...HINT, next_action: `Try ${prompts.length}.` };
 		});
 		await deliver(triage, draft(E0502));
 		triage.onToolResult?.(edited("lib.rs"));
 		// Another failure: the edit did change what the build reports.
 		expect(await deliver(triage, draft(E0308))).toBeUndefined();
 		triage.onToolResult?.(edited("other.rs"));
-		const back = await deliver(triage, draft(E0502));
-		expect(back?.note).toBe("repeat 2 + hint");
-		expect(back?.text).toContain(
-			"[exo triage: this failed with the same errors as an earlier run (first: error[E0502]: cannot borrow `self.stack` as mutable), after other results in between; it has now failed this way 2 times.",
-		);
-		expect(back?.text).not.toContain("did not change it");
-		expect(back?.text).not.toContain("as before");
+		expect(await deliver(triage, draft(E0502))).toBeUndefined();
+		await sent(t, 1);
 		expect(prompts[0]).toContain("but not in a row");
 		expect(prompts[0]).not.toContain("did not change them");
 		expect(prompts[0]).toContain("Edits made since this failure was last seen");
@@ -200,6 +256,7 @@ describe("T1: a failure that was fixed is forgotten", () => {
 		const standing = await deliver(triage, draft(E0502));
 		expect(standing?.text).toContain("with the same errors as before");
 		expect(standing?.text).toContain("The edits made since (third.rs) did not change it.");
+		await vi.waitFor(() => expect(prompts).toHaveLength(2));
 		expect(prompts[1]).toContain("did not change them");
 	});
 });
@@ -221,7 +278,7 @@ describe("T2: a failed edit is known by the text it looked for", () => {
 	});
 
 	it("still calls the same text a repeat, whatever it was to be replaced with", async () => {
-		const { triage } = setup({ sidecar: false });
+		const { triage } = setup({ sidecar: false, loopThreshold: 2 });
 		await deliver(triage, failedEdit("fn main() {", "a"));
 		expect((await deliver(triage, failedEdit("fn main() {", "b")))?.note).toBe("repeat 2");
 	});
@@ -230,21 +287,22 @@ describe("T2: a failed edit is known by the text it looked for", () => {
 describe("T3: a message from the user does not start a new task", () => {
 	it("keeps counting, and shows the sidecar the request and the follow-up", async () => {
 		const prompts: string[] = [];
-		const { triage } = setup({}, (prompt) => {
+		const { triage, t } = setup({}, (prompt) => {
 			prompts.push(prompt);
 			return HINT;
 		});
 		triage.onUserTurn?.({ text: "implement the forth interpreter", origin: "user" });
 		await deliver(triage, draft(E0502));
 		triage.onUserTurn?.({ text: "try again", origin: "user" });
-		expect((await deliver(triage, draft(E0502)))?.note).toBe("repeat 2 + hint");
+		await deliver(triage, draft(E0502));
+		await sent(t, 1);
 		expect(prompts[0]).toContain("[1] implement the forth interpreter");
 		expect(prompts[0]).toContain("[2] try again");
 	});
 
 	it("keeps the latest messages within the limit, the newest whole when it fits", async () => {
 		const prompts: string[] = [];
-		const { triage } = setup({}, (prompt) => {
+		const { triage, t } = setup({}, (prompt) => {
 			prompts.push(prompt);
 			return HINT;
 		});
@@ -253,6 +311,7 @@ describe("T3: a message from the user does not start a new task", () => {
 		triage.onUserTurn?.({ text: "ignored", origin: "suggestion" });
 		await deliver(triage, draft(E0502));
 		await deliver(triage, draft(E0502));
+		await sent(t, 1);
 		const goal = /<<<\n([\s\S]*?)\n>>>/.exec(prompts[0] ?? "")?.[1] ?? "";
 		expect(goal.length).toBeLessThan(6_200);
 		expect(goal).toContain("follow-up 7");
@@ -282,34 +341,24 @@ describe("T3: a message from the user does not start a new task", () => {
 describe("T4: after a compaction", () => {
 	it("forgets the hints it gave and its hint allowance, and keeps the counts", async () => {
 		const prompts: string[] = [];
-		const { triage } = setup({ maxHintsPerSignature: 1 }, (prompt) => {
+		const { triage, t } = setup({ maxHintsPerSignature: 1 }, (prompt) => {
 			prompts.push(prompt);
 			return HINT;
 		});
 		await deliver(triage, draft(E0502));
-		expect((await deliver(triage, draft(E0502)))?.note).toBe("repeat 2 + hint");
+		await deliver(triage, draft(E0502));
+		await sent(t, 1);
 		expect((await deliver(triage, draft(E0502)))?.note).toBe("repeat 3");
-		expect(triage.onCompacted).toBeTypeOf("function");
+		await pause();
+		expect(prompts).toHaveLength(1);
 		triage.onCompacted?.();
 		// The same hint again: the first is no longer in the context.
-		const after = await deliver(triage, draft(E0502));
-		expect(after?.note).toBe("repeat 4 + hint");
+		expect((await deliver(triage, draft(E0502)))?.note).toBe("repeat 4");
+		await sent(t, 2);
 		expect(prompts[1]).toContain("Advice already given for this failure:\n(none)");
 	});
 
-	it("offers hypotheses again and repeats a loop notice that is no longer in the context", async () => {
-		const answers = [
-			{ hypothesis: "The borrow of `self.stack` in lib.rs outlives the push.", check: "Read lib.rs." },
-			{ hypothesis: "Cargo builds a stale target.", check: "Run cargo clean." },
-		];
-		let asked = 0;
-		const { triage } = setup({ hypotheses: 2, sidecar: false }, () => answers[asked++ % 2] ?? {});
-		for (let i = 0; i < 2; i++) await deliver(triage, draft(E0502));
-		expect((await deliver(triage, draft(E0502)))?.note).toBe("repeat 3 + 2 hypotheses");
-		expect((await deliver(triage, draft(E0502)))?.note).toBe("repeat 4");
-		triage.onCompacted?.();
-		expect((await deliver(triage, draft(E0502)))?.note).toBe("repeat 5 + 2 hypotheses");
-
+	it("repeats a loop notice that is no longer in the context", async () => {
 		const loop = setup().triage;
 		const read = draft("x", { toolName: "read", input: { path: "a.rs" }, isError: false, exitCode: null });
 		const same = () => deliver(loop, read);
@@ -322,107 +371,106 @@ describe("T4: after a compaction", () => {
 	});
 });
 
-describe("T5: the notice does not wait on the sidecar, and state follows what was used", () => {
-	it("refuses timeouts longer than its share of the host's time for a rewrite", () => {
-		expect(parseSettings({ hintTimeoutMs: 6_000, hypothesisTimeoutMs: 6_000 }).problems).toEqual([]);
-		expect(parseSettings({ hintTimeoutMs: 20_000 }).problems.join()).toContain("/hintTimeoutMs");
-		expect(parseSettings({ hypothesisTimeoutMs: 20_000 }).problems.join()).toContain("/hypothesisTimeoutMs");
-		const { settings } = parseSettings({});
-		expect(Math.max(settings.hintTimeoutMs, settings.hypothesisTimeoutMs)).toBeLessThanOrEqual(6_000);
+describe("T5: a diagnosis never holds the agent, and is stopped only when it can no longer help (D-108)", () => {
+	it("is kept through a rerun that fails again, which starts no second one", async () => {
+		const engine = gated();
+		const { triage, t } = setup({}, engine.reply);
+		await deliver(triage, draft(E0502));
+		await deliver(triage, draft(E0502));
+		await vi.waitFor(() => expect(engine.waiting).toHaveLength(1));
+		// The same command again, failing the same way and then another way: the diagnosis goes on.
+		await deliver(triage, draft(E0502, { toolCallId: "c3" }));
+		await deliver(triage, draft(E0308, { toolCallId: "c4" }));
+		engine.release();
+		await sent(t, 1);
+		expect(t.requests).toHaveLength(1);
+		expect(t.late[0]).toContain("(the same errors 2 times)");
 	});
 
-	it("skips the diagnosis when the hypotheses used the time, and still gives the notice", async () => {
-		const { triage, t } = setup({ hypotheses: 2, hypothesisTimeoutMs: 500, hintTimeoutMs: 500 }, never);
-		await deliver(triage, draft(E0502));
-		await deliver(triage, draft(E0502, { toolCallId: "c2" }));
-		const asked = t.requests.length;
-		const started = Date.now();
-		const third = await deliver(triage, draft(E0502));
-		expect(third?.note).toBe("repeat 3");
-		expect(third?.text).toContain("this has now failed 3 times");
-		expect(t.requests.length - asked).toBe(2);
-		expect(Date.now() - started).toBeLessThan(900);
+	it("is stopped when the command passes, the user speaks or the context is compacted", async () => {
+		for (const stop of [
+			(triage: Triage) => deliver(triage, passed()),
+			async (triage: Triage) => triage.onUserTurn?.({ text: "stop", origin: "user" }),
+			async (triage: Triage) => triage.onCompacted?.(),
+		]) {
+			const engine = gated();
+			const { triage, t } = setup({}, engine.reply);
+			await deliver(triage, draft(E0502));
+			await deliver(triage, draft(E0502));
+			await vi.waitFor(() => expect(t.requests).toHaveLength(1));
+			await stop(triage);
+			engine.release();
+			await pause();
+			expect(t.late).toEqual([]);
+		}
 	});
 
-	it("gives the notice at its own deadline however long the sidecar call is held", async () => {
-		const { triage } = setup({ hintTimeoutMs: 500 }, never);
-		await deliver(triage, draft(E0502));
-		const started = Date.now();
-		const second = await deliver(triage, draft(E0502));
-		expect(second?.note).toBe("repeat 2");
-		expect(Date.now() - started).toBeLessThan(900);
+	it("stops the diagnosis of every test command when a test run passes", async () => {
+		const engine = gated();
+		const { triage, t } = setup({}, engine.reply);
+		const failing = (command: string) =>
+			draft("FAILED tests/t.py::test_x - assert 1 == 2", { input: { command }, exitCode: 1 });
+		await deliver(triage, failing("pytest tests/"));
+		await deliver(triage, failing("pytest tests/"));
+		await vi.waitFor(() => expect(t.requests).toHaveLength(1));
+		await deliver(triage, passed("python -m pytest -x", "3 passed in 0.2s"));
+		engine.release();
+		await pause();
+		expect(t.late).toEqual([]);
 	});
 
-	it("returns the notice at once when the host aborts", async () => {
-		const { triage } = setup({}, never);
-		await deliver(triage, draft(E0502));
+	it("keeps a diagnosis through a narrowed pass of other tests", async () => {
+		const engine = gated();
+		const { triage, t } = setup({}, engine.reply);
+		const failing = draft("FAILED tests/t.py::test_x - assert 1 == 2", { input: { command: "pytest" }, exitCode: 1 });
+		await deliver(triage, failing);
+		await deliver(triage, failing);
+		await vi.waitFor(() => expect(t.requests).toHaveLength(1));
+		await deliver(triage, passed("pytest tests/t.py::test_other", "1 passed in 0.1s"));
+		engine.release();
+		await sent(t, 1);
+	});
+
+	it("starts no diagnosis when the host gave up on the result while the fork was taken", async () => {
+		const t = createTestModuleContext({ cwd: dir, reply: () => HINT });
 		const host = new AbortController();
-		setTimeout(() => host.abort(), 30);
-		const started = Date.now();
-		expect((await offer(triage, draft(E0502), host.signal))?.note).toBe("repeat 2");
-		expect(Date.now() - started).toBeLessThan(400);
+		const context = {
+			...t.context,
+			forkPrefix: async () => {
+				host.abort();
+				return undefined;
+			},
+		};
+		const triage = createTriage({}, context);
+		await deliver(triage, draft(E0502));
+		triage.onToolResult?.(draft(E0502));
+		await triage.rewriteToolResult?.(draft(E0502), host.signal);
+		await pause();
+		expect(t.requests).toEqual([]);
 	});
 
-	it("sends a hint that came after its notice as late help, and counts it once sent (D-098)", async () => {
-		const slow = () => new Promise<SidecarReply>((resolve) => setTimeout(() => resolve(HINT), 300));
-		const { triage, t } = setup({ hintTimeoutMs: 500 }, slow);
-		await deliver(triage, draft(E0502));
-		const second = await offer(triage, draft(E0502), AbortSignal.timeout(50));
-		expect(second?.note).toBe("repeat 2");
-		await new Promise((resolve) => setTimeout(resolve, 400));
-		expect(t.late).toEqual([
-			"[exo triage hint on the repeated failure of `cargo build`: The borrow of `self.stack` outlives the push. Clone the value first.]",
-		]);
-		expect(triage.status?.()).toBe("triage (1 repeats, 1 hints)");
-	});
-
-	it("drops late advice once the command ran again, and does not count advice the idle agent refused", async () => {
-		const slow = () => new Promise<SidecarReply>((resolve) => setTimeout(() => resolve(HINT), 200));
-		const { triage, t } = setup({ hintTimeoutMs: 500 }, slow);
-		await deliver(triage, draft(E0502));
-		await offer(triage, draft(E0502), AbortSignal.timeout(20));
-		// The same command ran again before the hint was ready: its output is not the one the hint read.
-		triage.onToolResult?.(draft(E0502, { toolCallId: "c3" }));
-		await new Promise((resolve) => setTimeout(resolve, 300));
-		expect(t.late).toEqual([]);
-
+	it("gives back the allowance when the idle agent cannot take the hint", async () => {
+		let calls = 0;
+		const { triage, t } = setup({ maxHintsPerSignature: 1 }, () => {
+			calls += 1;
+			return { ...HINT, next_action: `Try ${calls}.` };
+		});
 		t.idle = true;
-		await offer(triage, draft(E0502, { toolCallId: "c4" }), AbortSignal.timeout(20));
-		await new Promise((resolve) => setTimeout(resolve, 300));
-		expect(t.late).toEqual([]);
-		expect(triage.status?.()).toContain("0 hints");
-	});
-
-	it("drops late advice once the same failure is seen again, under another spelling of the command", async () => {
-		const slow = () => new Promise<SidecarReply>((resolve) => setTimeout(resolve, 200, HINT));
-		const { triage, t } = setup({ hintTimeoutMs: 500 }, slow);
 		await deliver(triage, draft(E0502));
-		await offer(triage, draft(E0502), AbortSignal.timeout(20));
-		triage.onToolResult?.(draft(E0502, { toolCallId: "c3", input: { command: "cargo build 2>&1" } }));
-		await new Promise((resolve) => setTimeout(resolve, 300));
-		expect(t.late).toEqual([]);
+		await deliver(triage, draft(E0502));
+		await vi.waitFor(() => expect(calls).toBe(1));
+		await pause();
+		t.idle = false;
+		await deliver(triage, draft(E0502));
+		await sent(t, 1);
+		expect(calls).toBe(2);
+		expect(triage.status?.()).toBe("triage (2 repeats, 1 hints)");
 	});
 
 	it("counts a failure whose rewrite the host never asked for", async () => {
-		const { triage } = setup({ sidecar: false });
+		const { triage } = setup({ sidecar: false, loopThreshold: 2 });
 		triage.onToolResult?.(draft(E0502));
 		expect((await deliver(triage, draft(E0502)))?.note).toBe("repeat 2");
-	});
-
-	it("does not remember a hint the model never saw", async () => {
-		const prompts: string[] = [];
-		const { triage } = setup({}, (prompt) => {
-			prompts.push(prompt);
-			return HINT;
-		});
-		await deliver(triage, draft(E0502));
-		// Dropped by the host: over budget, or the user interrupted.
-		expect((await offer(triage, draft(E0502)))?.note).toBe("repeat 2 + hint");
-		expect(triage.status?.()).toBe("triage (1 repeats, 0 hints)");
-		const third = await deliver(triage, draft(E0502));
-		expect(prompts[1]).toContain("Advice already given for this failure:\n(none)");
-		expect(third?.note).toBe("repeat 3 + hint");
-		expect(triage.status?.()).toBe("triage (2 repeats, 1 hints)");
 	});
 
 	it("gives a loop notice again when the first one was dropped", async () => {
@@ -447,19 +495,29 @@ describe("T6: counts outlive the instance", () => {
 		};
 		const first = setup({}, reply);
 		await deliver(first.triage, draft(E0502));
-		expect((await deliver(first.triage, draft(E0502)))?.note).toBe("repeat 2 + hint");
+		await deliver(first.triage, draft(E0502));
+		await sent(first.t, 1);
 		expect(first.t.states.length).toBeGreaterThan(0);
 
 		const second = setup({}, reply, first.t.states.at(-1));
 		const third = await deliver(second.triage, draft(E0502));
-		// The same hint again is dropped, as it would have been without the reload.
-		expect(third?.note).toBe("repeat 3");
 		expect(third?.text).toContain("this has now failed 3 times with the same errors as before");
+		await vi.waitFor(() => expect(prompts).toHaveLength(2));
 		expect(prompts[1]).toContain("Advice already given for this failure:\n- The borrow of");
+		await pause();
 		expect(await deliver(second.triage, passed())).toBeUndefined();
 
 		const afterPass = setup({ sidecar: false }, undefined, second.t.states.at(-1));
 		expect(await deliver(afterPass.triage, draft(E0502))).toBeUndefined();
+	});
+
+	it("picks up a stretch that is not converging", async () => {
+		const run = (value: number) =>
+			draft(`FAILED tests/t.py::test_x - assert ${value} == 2`, { input: { command: "pytest" }, exitCode: 1 });
+		const first = setup({ sidecar: false });
+		for (let i = 1; i <= 3; i++) await deliver(first.triage, run(i));
+		const second = setup({ sidecar: false }, undefined, first.t.states.at(-1));
+		expect((await deliver(second.triage, run(4)))?.note).toBe("not converging ×4");
 	});
 
 	it("saves only when what it keeps changed", async () => {
@@ -473,16 +531,22 @@ describe("T6: counts outlive the instance", () => {
 		expect(t.states).toHaveLength(1);
 	});
 
-	it("ignores saved state it cannot read", async () => {
-		for (const saved of ["garbage", { v: 99 }, { v: 1, edited: "x", failures: [{ id: 3 }], last: [] }, null]) {
-			const { triage } = setup({ sidecar: false }, undefined, saved as JsonValue);
+	it("ignores saved state it cannot read, an older version's included", async () => {
+		for (const saved of [
+			"garbage",
+			{ v: 99 },
+			{ v: 1, edited: 0, failures: [], last: [] },
+			{ v: 2, edited: "x", failures: [{ id: 3 }], last: [], stretches: [] },
+			null,
+		]) {
+			const { triage } = setup({ sidecar: false, loopThreshold: 2 }, undefined, saved as JsonValue);
 			expect(await deliver(triage, draft(E0502))).toBeUndefined();
 			expect((await deliver(triage, draft(E0502)))?.note).toBe("repeat 2");
 		}
 	});
 
 	it("keeps a bounded number of failures", async () => {
-		const { triage, t } = setup({ sidecar: false });
+		const { triage, t } = setup({ sidecar: false, loopThreshold: 2 });
 		for (let i = 0; i < 100; i++) await deliver(triage, draft(`error: thing_${i} is undefined`));
 		const saved = t.states.at(-1) as { failures: unknown[] };
 		expect(saved.failures.length).toBeLessThanOrEqual(64);

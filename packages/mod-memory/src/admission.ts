@@ -5,18 +5,19 @@ import { type Edit, editsOf, type FixEpisode } from "./episodes.ts";
  * Why an episode is not a fix worth a card, or undefined when nothing says so (M1). A command
  * that failed, then passed after edits, proves only that it passes now. These are the ways it
  * can pass without the edits having fixed anything, as far as code can see them:
- * - `shell_change`: a shell command changed files in between (a checkout, a stash, an install, a
- *   formatter): the pass may be its doing;
+ * - `code_replaced`: git put other code in place in between (a checkout, a stash, a reset, a
+ *   pull): the pass is its doing. Other commands that changed files (a formatter, an install, a
+ *   delete) are shown to the lesson sidecar, which judges them (D-109);
  * - `only_tests`: nothing but tests was edited, so the test was changed to agree with the code;
  * - `weakens_test`: an edit skipped a test or took assertions out.
  *
  * What code cannot see (a flaky test, an edit beside the real cause) is left to the lesson
  * sidecar's gate, and to a wrong card being credited `hurt` or superseded later.
  */
-export type Refusal = "shell_change" | "only_tests" | "weakens_test";
+export type Refusal = "code_replaced" | "only_tests" | "weakens_test";
 
 export function refusalOf(episode: FixEpisode): Refusal | undefined {
-	if (episode.changedBy !== undefined) return "shell_change";
+	if (episode.replacedBy !== undefined) return "code_replaced";
 	const edits = editsOf(episode);
 	if (edits.every((edit) => isTestPath(edit.path))) return "only_tests";
 	return edits.some(weakens) ? "weakens_test" : undefined;

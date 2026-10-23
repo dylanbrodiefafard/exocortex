@@ -203,7 +203,10 @@ function scriptKind(path: string | undefined, interpreted: boolean): RunKind | u
 /** What a run's output shows of how it ended, when its exit code does not say. */
 export type RunVerdict = "passed" | "failed" | "unknown";
 
-/** What a passing test run prints last, per runner (D-016's toolchains, CTest, GoogleTest, nextest). */
+/**
+ * What a passing test run prints last, per runner (D-016's toolchains, CTest, GoogleTest, nextest;
+ * D-108: Vitest, Jest, Mocha, node:test, Deno, and a project's own "all tests passed").
+ */
 const PASS_SUMMARY: readonly RegExp[] = [
 	/^test result: ok\./,
 	/^Summary \[.*\] \d+ tests? run: \d+ passed(?!.*\b(failed|timed out)\b)/,
@@ -213,7 +216,12 @@ const PASS_SUMMARY: readonly RegExp[] = [
 	/^=* ?\d+ passed\b(?!.*\b(failed|errors?)\b)/,
 	/^100% tests passed/,
 	/^\[\s+PASSED\s+\] \d+ tests?\./,
-	/^All tests passed\b/,
+	/^all (\d+ )?tests? passed\b/i,
+	/^(Test Files|Tests)\s+\d+ passed\b(?!.*\bfailed\b)/,
+	/^Tests:\s+(\d+ (skipped|todo|pending), )*\d+ passed, \d+ total$/,
+	/^\d+ passing \([\d.]+m?s\)$/,
+	/^(#|ℹ) fail 0$/,
+	/^ok \| \d+ passed\b.* \| 0 failed/,
 ];
 
 /** The run whose exit code the line's does not show, if the call is one: it "succeeded" with another command's status. */
@@ -232,6 +240,8 @@ export function hiddenRun(tool: Pick<ToolOutcome, "input" | "isError" | "exitCod
  *   a line that only mentions an error is not enough, since the exit code is all that says
  *   otherwise. A traceback or a panic counts unless the runner's pass summary comes after it: a
  *   passing test may log the exception it handled (D-077).
+ * - First, the run's own exit code when the line prints it (D-108): `make test 2>&1 | tail; echo
+ *   "exit=${PIPESTATUS[0]}"` or `pytest > out.txt; echo "EXIT: $?"`. Zero passed, anything else failed.
  * - `passed`: a test run, with its runner's pass summary and no such line.
  * - `unknown`: neither. A build prints nothing on success, and `| grep` or `| head` may leave the
  *   result out.
@@ -242,6 +252,8 @@ export function readHiddenRun(
 	const run = hiddenRun(tool);
 	if (!run) return undefined;
 	const lines = cleanTerminalOutput(tool.output).split("\n");
+	const echoed = echoedExitCode(String(tool.input["command"]), run, lines);
+	if (echoed !== undefined) return echoed === 0 ? "passed" : "failed";
 	const verdicts = lineVerdicts(lines);
 	if (verdicts.includes("failed")) return "failed";
 	const lastPass = lines.findLastIndex((line) => PASS_SUMMARY.some((pattern) => pattern.test(line.trim())));
@@ -264,6 +276,46 @@ export function outcomeOf(tool: Pick<ToolOutcome, "input" | "isError" | "exitCod
 	if (typeof command !== "string" || verifyingRun(command)) return "passed";
 	const commands = shellCommands(command);
 	return (commands ? commands.some((c) => c.piped) : command.includes("|")) ? "unknown" : "passed";
+}
+
+/** The variable an `echo` prints a pipeline's status with: `$?`, `${?}`, `$PIPESTATUS`, `${PIPESTATUS[1]}`. */
+const STATUS_VARIABLE = /\$\{?\?\}?|\$\{PIPESTATUS\[(\d+)\]\}|\$PIPESTATUS\b/;
+
+/**
+ * The run's exit code as the line itself prints it (D-108), when it does: an `echo` right after
+ * the run's pipeline whose one variable is `$?` with the run last in that pipeline, or
+ * `${PIPESTATUS[i]}` with the run its `i`-th command. The echo's other words are matched literally
+ * against the output, and every line they match must agree.
+ */
+function echoedExitCode(commandLine: string, run: VerifyingRun, lines: readonly string[]): number | undefined {
+	const commands = shellCommands(commandLine);
+	const at = commands?.findLastIndex((c) => c.words.join(" ") === run.bare) ?? -1;
+	if (!commands || at === -1) return undefined;
+	// The run's pipeline: the commands piped into each other around it.
+	let start = at;
+	while (start > 0 && commands[start - 1]?.piped) start -= 1;
+	let end = at;
+	while (commands[end]?.piped && end + 1 < commands.length) end += 1;
+	const echo = commands[end + 1];
+	if (!echo || commandBase(echo.words[0]) !== "echo") return undefined;
+	const text = echo.words
+		.slice(1)
+		.filter((word, i) => !(i === 0 && /^-[neE]+$/.test(word)))
+		.join(" ");
+	const variable = STATUS_VARIABLE.exec(text);
+	if (!variable) return undefined;
+	const stage = variable[0].includes("PIPESTATUS") ? Number(variable[1] ?? 0) : end - start;
+	if (start + stage !== at) return undefined;
+	const before = text.slice(0, variable.index).trim();
+	const after = text.slice(variable.index + variable[0].length).trim();
+	if (/[$`\\]/.test(before + after)) return undefined;
+	const pattern = new RegExp(`^${escapeRegExp(before)}\\s*(\\d+)\\s*${escapeRegExp(after)}$`);
+	const codes = new Set(lines.flatMap((line) => pattern.exec(line.trim())?.[1] ?? []));
+	return codes.size === 1 ? Number([...codes][0]) : undefined;
+}
+
+function escapeRegExp(text: string): string {
+	return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 /** A test or build run that failed behind a pipe (D-073): its exit code says success, its output does not. */
@@ -320,17 +372,26 @@ const MIN_PARTIAL_QUOTE = 8;
 
 export interface HiddenRunReading {
 	readonly verdict: RunVerdict;
-	/** `output`: read by {@link readHiddenRun}. `sidecar`: a model read it and its quote was found. */
-	readonly source: "output" | "sidecar";
+	/**
+	 * - `output`: read by {@link readHiddenRun}; no sidecar was asked.
+	 * - `sidecar`: a model read it: its verdict with the line it quoted, or `unknown` as its answer.
+	 * - `sidecar_failed`: the call failed (`error` says how): the output was not read (D-108).
+	 * - `sidecar_rejected`: the model answered, but its quote is not in the output, or it called
+	 *   passed an output that mentions a failure (D-062): its answer is not taken.
+	 */
+	readonly source: "output" | "sidecar" | "sidecar_failed" | "sidecar_rejected";
 	/** The line of the output the sidecar quoted as showing the verdict. */
 	readonly evidence?: string;
+	/** What the sidecar answered when its answer was not taken, or how its call failed. */
+	readonly error?: string;
 }
 
 /**
  * {@link readHiddenRun}, and for a test run it cannot read, a sidecar's reading (D-075): runners
  * and summaries the grammar does not know. The model proposes and code checks (D-062): its answer
  * counts only with a line quoted from the output, and "passed" never against a line that mentions
- * a failure. Anything else, a failed call included, is `unknown`. Never rejects.
+ * a failure. Anything else, a failed call included, is `unknown`, with `source` saying why.
+ * Never rejects.
  */
 export async function judgeHiddenRun(
 	tool: Pick<ToolOutcome, "input" | "isError" | "exitCode" | "output">,
@@ -351,6 +412,7 @@ export async function judgeHiddenRun(
 	const result = await sidecar.pool
 		.run({
 			module: sidecar.module,
+			kind: "pick",
 			priority: "interactive",
 			timeoutMs: sidecar.timeoutMs,
 			signal,
@@ -367,16 +429,24 @@ export async function judgeHiddenRun(
 					},
 				],
 				maxTokens: SIDECAR_MAX_TOKENS,
-				thinking: false,
 			},
 		})
-		.catch(() => undefined);
-	if (!result?.ok || result.value.verdict === "unknown") return unread;
+		.catch((error: unknown) => ({ ok: false as const, outcome: "error", error: String(error) }));
+	if (!result.ok) return { verdict, source: "sidecar_failed", error: `${result.outcome}: ${result.error}` };
+	if (result.value.verdict === "unknown") return { verdict, source: "sidecar" };
 	const evidence = result.value.evidence.trim();
 	const quoted = lines.some(
 		(line) => line === evidence || (evidence.length >= MIN_PARTIAL_QUOTE && line.includes(evidence)),
 	);
-	if (evidence === "" || !quoted) return unread;
-	if (result.value.verdict === "passed" && lineVerdicts(lines).some((v) => v !== undefined)) return unread;
+	const rejected = (why: string): HiddenRunReading => ({
+		verdict,
+		source: "sidecar_rejected",
+		...(evidence === "" ? {} : { evidence }),
+		error: `${result.value.verdict}: ${why}`,
+	});
+	if (evidence === "" || !quoted) return rejected("its quote is not a line of the output");
+	if (result.value.verdict === "passed" && lineVerdicts(lines).some((v) => v !== undefined)) {
+		return rejected("the output mentions a failure");
+	}
 	return { verdict: result.value.verdict, source: "sidecar", evidence };
 }

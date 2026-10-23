@@ -52,14 +52,10 @@ export const editOf = (path: string, oldText: string, newText: string): ToolOutc
 	exitCode: null,
 	output: "",
 });
-export const writeOf = (path: string, content: string): ToolOutcome => ({
-	toolName: "write",
-	input: { path, content },
-	isError: false,
-	exitCode: null,
-	output: "",
-});
 export const edit = editOf("lib.rs", "self.stack.push(x)", "let v = x.clone(); self.stack.push(v)");
+
+/** A lesson sidecar's answer that names only what the route shows. */
+export const LESSON = { lesson: "Clone the value before pushing onto `self.stack` in lib.rs.", applies_when: "" };
 
 export function draft(tool: ToolOutcome): ToolResultDraft {
 	return { ...tool, toolCallId: "c", current: tool.output, fullOutputPath: null, status: null };
@@ -84,7 +80,15 @@ export function setup(
 		...(options.savedState === undefined ? {} : { savedState: options.savedState }),
 		...(reply ? { reply: (r, index) => reply(String(r.messages[0]?.["content"]), index) } : {}),
 	});
-	const memory = createMemory({ dbPath: space.dbPath(), ...settings }, t.context);
+	const built = createMemory({ dbPath: space.dbPath(), ...settings }, t.context);
+	const memory: typeof built = {
+		...built,
+		// As the host does: every module hears of the stop before any acts on it (D-106).
+		onSettle: async (info, signal) => {
+			built.onSettled?.(info);
+			return built.onSettle?.(info, signal);
+		},
+	};
 	/** The rewrite for a failing result, taken as shown to the agent (the host commits what it hands over). */
 	const recall = async (tool: ToolOutcome) => {
 		const rewrite = await memory.rewriteToolResult?.(draft(tool), signal);

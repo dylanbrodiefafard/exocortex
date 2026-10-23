@@ -356,15 +356,15 @@ function tokensByModule(calls: readonly SidecarCallRecord[]): Record<string, num
 	return out;
 }
 
-/** Triage's rewrite note when its sidecar hint was shown (`repeat 3 + hint`, mod-triage). */
+/** Triage's rewrite note when its sidecar hint was shown with the result (`repeat 3 + hint`, before D-108). */
 const HINT_NOTE = /\+ hint$/;
 
 /**
  * Follows each failure through the run (D-057). A failure is what triage calls one: an error
  * result, a non-zero exit, or a test or build run that failed behind a pipe. It is the same
  * failure again only when it reports the same errors (D-073): a run with fewer failing tests is
- * another one. Hints are read from triage's `exo.rewrite` notes, joined to the failing result by
- * tool call id.
+ * another one. Hints are read from triage's `exo.action` hint events (D-108; `exo.rewrite` notes
+ * before it), joined to the failing result by tool call id.
  */
 function recurringErrors(events: readonly StoredTraceEvent[]): RecurringError[] {
 	const commands = commandsByCall(events);
@@ -372,6 +372,9 @@ function recurringErrors(events: readonly StoredTraceEvent[]): RecurringError[] 
 	for (const e of events) {
 		const data = record(e.data);
 		if (e.kind === "exo.rewrite" && e.module === "triage" && HINT_NOTE.test(String(data["note"])))
+			hinted.add(String(data["toolCallId"]));
+		// Since D-108 a hint arrives as late help, traced with the call whose failure it is about.
+		if (e.kind === "exo.action" && e.module === "triage" && data["action"] === "hint")
 			hinted.add(String(data["toolCallId"]));
 	}
 	const results = events.filter((e) => e.kind === "tool.result").map((e) => record(e.data));

@@ -26,7 +26,12 @@ describe("test module context: persisted state (D-078)", () => {
 	});
 });
 
-const REQUEST = { module: "test", priority: "interactive", request: { messages: [], maxTokens: 16 } } as const;
+const REQUEST = {
+	module: "test",
+	kind: "pick",
+	priority: "interactive",
+	request: { messages: [], maxTokens: 16 },
+} as const;
 const later = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 describe("createTestModuleContext", () => {

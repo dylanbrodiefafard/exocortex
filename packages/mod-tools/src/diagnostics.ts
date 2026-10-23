@@ -1,7 +1,11 @@
-import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
 import { basename, extname, relative } from "node:path";
-import { type CommandOutput, classifyErrorLine, cleanTerminalOutput, isRoutineLine } from "@exocortex/core";
+import {
+	type CommandOutput,
+	classifyErrorLine,
+	cleanTerminalOutput,
+	type ErrorLineKind,
+	isRoutineLine,
+} from "@exocortex/core";
 import type { CheckSetting } from "./settings.ts";
 
 /** One error a check reported, and what makes it the same error after lines moved. */
@@ -22,7 +26,11 @@ export interface Check {
 }
 
 /** Lines of a configured check's error kept under it (a Rust `-->` line, a code excerpt). */
-const ERROR_BLOCK_LINES = 6;
+const ERROR_BLOCK_LINES = 8;
+/** A failed check with no error line this module can read shows this many of its last lines. */
+const UNREAD_TAIL_LINES = 40;
+/** A line that starts with a place in a source file: `a.py:1:8:`, `src/a.ts:3:7`, `x.c(12,5)`. */
+const POSITION = /^\s*[^\s:()]*[\w-]\.[A-Za-z]\w{0,7}(:\d+|\(\d+[,)])/;
 /** A check's output kept for reading. */
 export const CHECK_TAIL_CHARS = 64 * 1024;
 /** Shell's "command not found": the checker is not installed. */
@@ -79,39 +87,64 @@ export function checkFor(
 	};
 }
 
-/** What a check's run says: the errors in it, or undefined when it cannot be read (timeout, not installed). */
-export function readCheck(result: CommandOutput, check: Check): Diagnostic[] | "not_installed" | undefined {
-	if (result.timedOut || result.exitCode === null) return undefined;
-	if (result.exitCode === NOT_FOUND) return "not_installed";
-	if (result.exitCode === 0) return [];
+/**
+ * What a check's run says:
+ * - `errors`: what it reported (empty when it passed). `guessed` when the run failed but printed no
+ *   error line this module knows, so its `path:line` lines, or its last lines, stand for its errors.
+ * - `not_installed`: its program is missing.
+ * - `unreadable`: it timed out, was killed, or failed without printing anything.
+ */
+export type CheckReading =
+	| { readonly kind: "errors"; readonly diagnostics: Diagnostic[]; readonly guessed: boolean }
+	| { readonly kind: "not_installed" }
+	| { readonly kind: "unreadable"; readonly why: string };
+
+export function readCheck(result: CommandOutput, check: Check): CheckReading {
+	if (result.timedOut) return { kind: "unreadable", why: "it timed out" };
+	if (result.exitCode === null) return { kind: "unreadable", why: "it was stopped before it exited" };
+	if (result.exitCode === NOT_FOUND) return { kind: "not_installed" };
+	if (result.exitCode === 0) return { kind: "errors", diagnostics: [], guessed: false };
 	const lines = cleanTerminalOutput(result.outputTail).split("\n");
+	const printed = lines.filter((line) => line.trim() !== "");
+	if (printed.length === 0) return { kind: "unreadable", why: `it exited with ${result.exitCode} and printed nothing` };
 	if (check.builtin) {
-		const text = lines
-			.filter((line) => line.trim() !== "")
-			.slice(0, ERROR_BLOCK_LINES * 2)
-			.join("\n");
-		return text === "" ? undefined : [{ key: keyOf(text), text }];
+		const text = printed.slice(0, ERROR_BLOCK_LINES * 2).join("\n");
+		return { kind: "errors", diagnostics: [{ key: keyOf(text), text }], guessed: false };
 	}
-	return errorBlocks(lines);
+	const known = errorBlocks(lines, (kind) => kind === "specific");
+	if (known.length > 0) return { kind: "errors", diagnostics: known, guessed: false };
+	// Linters print `path:line: CODE message` (ruff, pylint, `shellcheck -f gcc`, biome) with no word
+	// the error grammar knows, and a summary line ("Found 3 errors") that only mentions one.
+	const placed = errorBlocks(lines, (_kind, line) => POSITION.test(line));
+	if (placed.length > 0) return { kind: "errors", diagnostics: placed, guessed: true };
+	const generic = errorBlocks(lines, (kind) => kind === "generic");
+	if (generic.length > 0) return { kind: "errors", diagnostics: generic, guessed: false };
+	// A failure in words this module does not know: its end is what explains it.
+	const text = printed.slice(-UNREAD_TAIL_LINES).join("\n");
+	return { kind: "errors", diagnostics: [{ key: keyOf(text), text }], guessed: true };
 }
 
 /**
- * A build log's errors, each with the lines under it that belong to it. Toolchain-specific error
- * lines first; a log with none falls back to lines that only mention an error.
+ * A build log's errors, each with the lines under it that belong to it: the lines `starts` picks,
+ * each with what follows up to the next one, a blank line, or {@link ERROR_BLOCK_LINES}.
  */
-function errorBlocks(lines: readonly string[]): Diagnostic[] | undefined {
-	const kinds = lines.map((line) => (isRoutineLine(line) ? undefined : classifyErrorLine(line)));
-	const wanted = kinds.includes("specific") ? "specific" : kinds.includes("generic") ? "generic" : undefined;
-	if (!wanted) return undefined;
+function errorBlocks(
+	lines: readonly string[],
+	starts: (kind: ErrorLineKind | undefined, line: string) => boolean,
+): Diagnostic[] {
+	const picked = lines.map((line) => !isRoutineLine(line) && starts(classifyErrorLine(line), line));
 	const blocks: Diagnostic[] = [];
-	kinds.forEach((kind, index) => {
-		if (kind !== wanted) return;
+	picked.forEach((start, index) => {
+		if (!start) return;
 		const block = [lines[index] ?? ""];
 		for (let next = index + 1; next < lines.length && block.length < ERROR_BLOCK_LINES; next++) {
 			const line = lines[next] ?? "";
-			if (line.trim() === "" || kinds[next] === wanted) break;
+			if (picked[next]) break;
+			// A linter puts a blank line between its message and its code frame; a compiler does not.
+			if (line.trim() === "" && !/^\s+\S/.test(lines[next + 1] ?? "")) break;
 			block.push(line);
 		}
+		while (block.length > 1 && block.at(-1)?.trim() === "") block.pop();
 		const text = block.join("\n");
 		blocks.push({ key: keyOf(text), text });
 	});
@@ -138,13 +171,26 @@ export function newDiagnostics(before: readonly Diagnostic[], after: readonly Di
 	});
 }
 
-/** A file's content hash; "missing" for a file that is not there (a write may create it). */
-export function contentHash(absolute: string): string {
-	try {
-		return createHash("sha1").update(readFileSync(absolute)).digest("hex");
-	} catch {
-		return "missing";
+/**
+ * Whether an error names the file: some path in its text is the file's path, or ends with it, or
+ * the file's path ends with it (a tool run from another directory prints paths from there). The
+ * names must match whole: `b.rs` is not `lib.rs`.
+ */
+export function mentionsFile(text: string, absolute: string, cwd: string): boolean {
+	const rel = relative(cwd, absolute);
+	const targets = [absolute, ...(rel.startsWith("..") ? [] : [rel])];
+	for (const match of text.matchAll(PATH_IN_TEXT)) {
+		const path = (match[0] ?? "").replace(/^\.\//, "");
+		if (basename(path) !== basename(absolute)) continue;
+		if (targets.some((target) => endsWithPath(target, path) || endsWithPath(path, target))) return true;
 	}
+	return false;
+}
+
+const PATH_IN_TEXT = /[\w.@+~/-]*[\w-]\.[A-Za-z]\w{0,7}(?=[:(\s,"'`]|$)/gm;
+
+function endsWithPath(path: string, end: string): boolean {
+	return path === end || path.endsWith(`/${end}`);
 }
 
 /** `*.rs` matches a file name; a pattern with `/` matches the path from the workspace root. `**` spans directories. */

@@ -18,11 +18,22 @@ const ModuleConfig = Type.Object(
 	{
 		/** Modules are off unless this is true (D-001). */
 		enabled: Type.Optional(Type.Boolean()),
-		/** Upper bound on `max_tokens` for each of this module's sidecar calls. Default 4096. */
-		maxTokensPerCall: Type.Optional(Type.Integer({ minimum: 1 })),
 	},
 	{ additionalProperties: true },
 );
+
+/**
+ * Settings that no longer exist (D-106). A file that still sets one is read without it and the
+ * user is told once, instead of Exocortex switching itself off over a setting it dropped: a
+ * config copied from an older example would otherwise stop working on update.
+ * - Here, by section: what every module or a top-level section no longer takes.
+ * - A module names its own in its settings schema's options: `{ retired: ["oldName"] }`.
+ */
+const RETIRED_EVERYWHERE: { readonly [section: string]: readonly string[] } = {
+	/** In every module: thinking is decided per call by what the call does (D-106), and output is not capped per module. */
+	modules: ["maxTokensPerCall", "thinking"],
+	embeddings: ["timeoutMs"],
+};
 
 const FeatureFlags = Type.Object(
 	{
@@ -93,6 +104,11 @@ const PoolConfig = Type.Object(
 		sessionTokenBudget: Type.Integer({ minimum: 0, default: 0 }),
 		/** Hold `background` calls until the main agent is idle. */
 		backgroundWhenIdleOnly: Type.Boolean({ default: true }),
+		/**
+		 * Whether sidecar calls think (D-106). `auto`: calls that judge think, calls that pick do not.
+		 * `always` and `never` are for comparing in an eval.
+		 */
+		thinking: Type.Union([Type.Literal("auto"), Type.Literal("always"), Type.Literal("never")], { default: "auto" }),
 	},
 	{ default: {}, additionalProperties: false },
 );
@@ -108,8 +124,6 @@ const EmbeddingsConfig = Type.Object(
 		model: Type.Optional(Type.String({ minLength: 1 })),
 		/** Literal key, or `$NAME` / `${NAME}` to read an environment variable. */
 		apiKey: Type.Optional(Type.String()),
-		/** Deadline per call; on the hot path a slow answer is worth less than the keyword fallback. */
-		timeoutMs: Type.Integer({ minimum: 100, maximum: MAX_TIMEOUT_MS, default: 2_000 }),
 	},
 	{ default: {}, additionalProperties: false },
 );
@@ -177,6 +191,8 @@ export interface LoadedConfig {
 	 * problems: someone else's file cannot switch Exocortex off this way, only fail to steer it.
 	 */
 	readonly ignored: readonly string[];
+	/** Settings that no longer exist, as `path.to.key`: left out, not problems (D-106). */
+	readonly retired: readonly string[];
 }
 
 /** The modules that exist, by id, each with the schema of its own settings (`undefined`: any settings). */
@@ -233,10 +249,58 @@ export function loadConfig(options: LoadConfigOptions): LoadedConfig {
 		const parsed = parseConfigText(text, path, problems);
 		if (parsed) merged = deepMerge(merged, project ? projectSettings(parsed, options.modules, ignored) : parsed);
 	}
+	const retired: string[] = [];
+	merged = withoutRetired(merged, options.modules ?? {}, retired);
 	// A relative path resolves against the directory of the file that set it, and only the user's
 	// file can set one.
 	const config = validate(merged, home, dirname(userPath), options.modules, problems);
-	return { config: problems.length > 0 ? { ...config, enabled: false } : config, sources, problems, ignored };
+	return {
+		config: problems.length > 0 ? { ...config, enabled: false } : config,
+		sources,
+		problems,
+		ignored,
+		retired: [...new Set(retired)],
+	};
+}
+
+/** The settings without those that no longer exist ({@link RETIRED_EVERYWHERE}); each one left out is named in `retired`. */
+function withoutRetired(
+	merged: Record<string, unknown>,
+	modules: ModuleSettingsSchemas,
+	retired: string[],
+): Record<string, unknown> {
+	const out: Record<string, unknown> = { ...merged };
+	for (const [section, keys] of Object.entries(RETIRED_EVERYWHERE)) {
+		const value = out[section];
+		if (section === "modules" || !isPlainObject(value)) continue;
+		out[section] = dropKeys(value, keys, section, retired);
+	}
+	const entries = out["modules"];
+	if (isPlainObject(entries)) {
+		const kept: Record<string, unknown> = {};
+		for (const [id, settings] of Object.entries(entries)) {
+			const own = (modules[id] as { retired?: readonly string[] } | undefined)?.retired ?? [];
+			kept[id] = isPlainObject(settings)
+				? dropKeys(settings, [...(RETIRED_EVERYWHERE["modules"] ?? []), ...own], `modules.${id}`, retired)
+				: settings;
+		}
+		out["modules"] = kept;
+	}
+	return out;
+}
+
+function dropKeys(
+	value: Record<string, unknown>,
+	keys: readonly string[],
+	where: string,
+	retired: string[],
+): Record<string, unknown> {
+	const kept: Record<string, unknown> = {};
+	for (const [key, setting] of Object.entries(value)) {
+		if (keys.includes(key)) retired.push(`${where}.${key}`);
+		else kept[key] = setting;
+	}
+	return kept;
 }
 
 /** The merged settings as a config with defaults filled in; all defaults when they do not fit the schema. */

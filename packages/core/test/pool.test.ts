@@ -13,12 +13,11 @@ import {
 import { ENGINE_PROFILES, type EngineTarget } from "../src/inference/engine.ts";
 import {
 	createSidecarPool,
-	DEFAULT_MODULE_LIMITS,
 	holdFor,
-	type ModuleLimits,
 	type PoolStats,
 	SIDECAR_THINKING_TOKENS,
 	type SidecarCallRecord,
+	type SidecarKind,
 	type SidecarPriority,
 } from "../src/inference/pool.ts";
 
@@ -34,6 +33,7 @@ const POOL: ExoConfig["pool"] = {
 	timeoutMs: 5_000,
 	sessionTokenBudget: 0,
 	backgroundWhenIdleOnly: true,
+	thinking: "auto",
 };
 
 interface PendingCall {
@@ -69,17 +69,12 @@ function manualClient() {
 	return { client, pending, started };
 }
 
-function makePool(
-	overrides: Partial<ExoConfig["pool"]> = {},
-	limits: Partial<ModuleLimits> = {},
-	client = manualClient(),
-) {
+function makePool(overrides: Partial<ExoConfig["pool"]> = {}, client = manualClient()) {
 	const records: SidecarCallRecord[] = [];
 	const pool = createSidecarPool({
 		client: client.client,
 		target: TARGET,
 		config: { ...POOL, ...overrides },
-		moduleLimits: () => ({ ...DEFAULT_MODULE_LIMITS, ...limits }),
 		onRecord: (r) => records.push(r),
 	});
 	return { pool, records, ...client };
@@ -88,8 +83,8 @@ function makePool(
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-function call(module: string, priority: SidecarPriority = "interactive", text = module) {
-	return { module, priority, request: { messages: [{ role: "user", content: text }], maxTokens: 64 } } as const;
+function call(module: string, priority: SidecarPriority = "interactive", text = module, kind: SidecarKind = "pick") {
+	return { module, kind, priority, request: { messages: [{ role: "user", content: text }], maxTokens: 64 } } as const;
 }
 
 describe("sidecar pool scheduling", () => {
@@ -135,17 +130,16 @@ describe("sidecar pool scheduling", () => {
 		expect((await bg).ok && (await fg).ok).toBe(true);
 	});
 
-	it("sends engine priority only when supported and clamps max tokens per module", async () => {
+	it("sends engine priority only when supported, and the call's own max tokens", async () => {
 		const c = manualClient();
 		const pool = createSidecarPool({
 			client: c.client,
 			target: { ...TARGET, features: { ...TARGET.features, priority: true } },
 			config: POOL,
-			moduleLimits: () => ({ maxTokensPerCall: 16 }),
 		});
 		const result = pool.run(call("m", "background"));
 		await flush();
-		expect(c.started[0]).toMatchObject({ priority: 2, maxTokens: 16 });
+		expect(c.started[0]).toMatchObject({ priority: 2, maxTokens: 64 });
 		c.pending[0]?.reply("hi");
 		expect(await result).toMatchObject({ ok: true, value: "hi" });
 	});
@@ -231,10 +225,15 @@ describe("liveness instead of deadlines (D-098)", () => {
 					backgroundWhenIdleOnly: true,
 					firstTokenMs: 1_000,
 					stallMs: 1_000,
+					thinking: "auto",
 				},
-				moduleLimits: () => DEFAULT_MODULE_LIMITS,
 			});
-			const call = { module: "m", priority: "interactive" as const, request: { messages: [], maxTokens: 10 } };
+			const call = {
+				module: "m",
+				kind: "pick" as const,
+				priority: "interactive" as const,
+				request: { messages: [], maxTokens: 10 },
+			};
 			const slow = await pool.run({ ...call, onProgress: (chars) => progress.push(chars) });
 			expect(slow).toMatchObject({ ok: true, value: "slow but alive" });
 			expect(progress.at(-1)).toBe("slow but alive".length);
@@ -253,9 +252,10 @@ describe("liveness instead of deadlines (D-098)", () => {
 describe("holds from measured latency (D-098)", () => {
 	it("keeps each kind of call's recent times and holds half again their 90th percentile, within bounds", async () => {
 		const { client, pending } = manualClient();
-		const pool = createSidecarPool({ client, target: TARGET, config: POOL, moduleLimits: () => DEFAULT_MODULE_LIMITS });
+		const pool = createSidecarPool({ client, target: TARGET, config: POOL });
 		const call = {
 			module: "triage",
+			kind: "pick" as const,
 			priority: "interactive" as const,
 			schemaName: "diagnosis",
 			request: { messages: [], maxTokens: 10 },
@@ -279,9 +279,10 @@ describe("holds from measured latency (D-098)", () => {
 
 	it("grows a hold back when the calls it cuts off take longer, instead of cutting them for good", async () => {
 		const { client, pending } = manualClient();
-		const pool = createSidecarPool({ client, target: TARGET, config: POOL, moduleLimits: () => DEFAULT_MODULE_LIMITS });
+		const pool = createSidecarPool({ client, target: TARGET, config: POOL });
 		const call = {
 			module: "trimmer",
+			kind: "pick" as const,
 			priority: "interactive" as const,
 			schemaName: "line_selection",
 			request: { messages: [], maxTokens: 10 },
@@ -468,28 +469,44 @@ describe("pool accounting (D9)", () => {
 		expect(started).toHaveLength(1);
 	});
 
-	it("records the max_tokens that was sent, after the module's clamp", async () => {
-		const { pool, pending, records } = makePool({ sessionTokenBudget: 25 }, { maxTokensPerCall: 16 });
+	it("records the max_tokens that was sent", async () => {
+		const { pool, pending, records } = makePool({ sessionTokenBudget: 25 });
 		const first = pool.run(call("m"));
 		await flush();
-		expect(pending[0]?.request.maxTokens).toBe(16);
+		expect(pending[0]?.request.maxTokens).toBe(64);
 		pending[0]?.reply("x", 30);
 		await first;
 		await pool.run(call("m")); // over the session budget
 		expect(records.map((r) => [r.outcome, r.maxTokens])).toEqual([
-			["ok", 16],
-			["rejected_budget", 16],
+			["ok", 64],
+			["rejected_budget", 64],
 		]);
 	});
 
-	it("gives a call that thinks room for its reasoning on top of the answer's limit (D-101)", async () => {
-		const { pool, pending } = makePool({}, { maxTokensPerCall: 16 });
-		const asked = (thinking: boolean) => ({ ...call("m"), request: { ...call("m").request, thinking } });
-		const runs = [pool.run(asked(true)), pool.run(asked(false))];
+	it("lets a call that judges think, with room to reason on top of its answer; one that picks does not (D-101, D-106)", async () => {
+		const { pool, pending } = makePool();
+		const runs = [pool.run(call("m", "interactive", "j", "judge")), pool.run(call("m", "interactive", "p", "pick"))];
 		await flush();
-		expect(pending.map((p) => p.request.maxTokens)).toEqual([16 + SIDECAR_THINKING_TOKENS, 16]);
+		expect(pending.map((p) => [p.request.thinking, p.request.maxTokens])).toEqual([
+			[true, 64 + SIDECAR_THINKING_TOKENS],
+			[false, 64],
+		]);
 		for (const p of pending) p.reply();
 		await Promise.all(runs);
+	});
+
+	it("follows pool.thinking over the kind, for comparing in an eval (D-106)", async () => {
+		for (const [policy, judged, picked] of [
+			["always", true, true],
+			["never", false, false],
+		] as const) {
+			const { pool, pending } = makePool({ thinking: policy });
+			const runs = [pool.run(call("m", "interactive", "j", "judge")), pool.run(call("m", "interactive", "p", "pick"))];
+			await flush();
+			expect(pending.map((p) => p.request.thinking)).toEqual([judged, picked]);
+			for (const p of pending) p.reply();
+			await Promise.all(runs);
+		}
 	});
 
 	it("puts no limit on how many calls a module makes (D-092)", async () => {
@@ -530,23 +547,16 @@ describe("pool accounting (D9)", () => {
 		expect(pool.stats().outcomes.truncated).toBe(1);
 	});
 
-	it("resolves, never throws, when the limits callback or the recorder throws", async () => {
+	it("resolves, never throws, when the recorder throws", async () => {
 		const c = manualClient();
-		let broken = true;
 		const pool = createSidecarPool({
 			client: c.client,
 			target: TARGET,
 			config: POOL,
-			moduleLimits: () => {
-				if (broken) throw new Error("limits exploded");
-				return DEFAULT_MODULE_LIMITS;
-			},
 			onRecord: () => {
 				throw new Error("recorder exploded");
 			},
 		});
-		expect(await pool.run(call("m"))).toMatchObject({ ok: false, outcome: "error" });
-		broken = false;
 		const fine = pool.run({ ...call("m"), timeoutMs: Number.POSITIVE_INFINITY });
 		await flush();
 		c.pending[0]?.reply();
@@ -582,7 +592,6 @@ describe("sidecar pool properties", () => {
 						client: c.client,
 						target: TARGET,
 						config: { ...POOL, maxConcurrent, reservedForMain: reserved, backgroundWhenIdleOnly: false },
-						moduleLimits: () => ({ maxTokensPerCall: 64 }),
 					});
 					const results = priorities.map((p, i) => pool.run(call(`${i}`, p, `${p}:${i}`)));
 					const live = new Set<PendingCall>();
@@ -625,7 +634,6 @@ describe("Phase 2 acceptance: 20 queued jobs against an HTTP engine", { timeout:
 				client: createOpenAIClient({ ...TARGET, baseUrl: server.baseUrl }),
 				target: { ...TARGET, baseUrl: server.baseUrl },
 				config: { ...POOL, maxConcurrent: 6, reservedForMain: 2 },
-				moduleLimits: () => ({ maxTokensPerCall: 64 }),
 			});
 			const priorities: SidecarPriority[] = ["critical", "interactive", "background"];
 			const results = await Promise.all(
@@ -646,6 +654,7 @@ describe("forks of the main agent's context (D-093)", () => {
 	const forkCall = (text: string, fork = FORK) =>
 		({
 			module: text,
+			kind: "pick",
 			priority: "critical",
 			request: { fork, messages: [{ role: "user", content: text }], maxTokens: 64 },
 		}) as const;
@@ -672,7 +681,6 @@ describe("forks of the main agent's context (D-093)", () => {
 			client,
 			target: { ...TARGET, features: { ...ENGINE_PROFILES.generic, ...features } },
 			config: POOL,
-			moduleLimits: () => DEFAULT_MODULE_LIMITS,
 		});
 		return { pool, started, replies };
 	}
@@ -752,7 +760,6 @@ describe("forks of the main agent's context (D-093)", () => {
 			client,
 			target: { ...TARGET, features: { ...ENGINE_PROFILES.generic, cacheReadOnly: true, cachedTokens: true } },
 			config: { ...POOL, maxConcurrent: 4, reservedForMain: 1 },
-			moduleLimits: () => DEFAULT_MODULE_LIMITS,
 		});
 		const first = pool.run(forkCall("refused by the engine"));
 		const queued = pool.run(forkCall("queued behind it"));

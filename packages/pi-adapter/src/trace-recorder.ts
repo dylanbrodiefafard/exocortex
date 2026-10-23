@@ -37,7 +37,13 @@ export function registerTraceRecorder(pi: ExtensionAPI, options: RecorderOptions
 	pi.on(
 		"session_start",
 		guard("session_start", (event, ctx) => {
-			const { config, problems, ignored } = runtime.activate(ctx.cwd);
+			const { config, problems, ignored, retired } = runtime.activate(ctx.cwd);
+			if (retired.length > 0 && ctx.hasUI) {
+				ctx.ui.notify(
+					`Exocortex ignored settings that no longer exist: ${retired.join(", ")}. Remove them, or copy exocortex.config.example.jsonc again.`,
+					"info",
+				);
+			}
 			if (problems.length > 0 && ctx.hasUI) {
 				ctx.ui.notify(`Exocortex disabled by config problems:\n${problems.join("\n")}`, "warning");
 			}

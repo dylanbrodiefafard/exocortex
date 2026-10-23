@@ -21,7 +21,7 @@ describe("eval configs", () => {
 		for (const id of Object.keys(config.modules)) expect(KNOWN_MODULES).toContain(id);
 	});
 
-	it("each supervisor A/B config turns on one research option; only supervisor-research combines them (D-056)", () => {
+	it("supervisor-lean turns off what D-107 turned on by default, and nothing else", () => {
 		const options = (name: string) => {
 			const path = join(CONFIGS_DIR, `${name}.jsonc`);
 			const { config } = loadConfig({
@@ -35,22 +35,7 @@ describe("eval configs", () => {
 			return settings;
 		};
 		expect(options("supervisor")).toEqual({});
-		expect(options("supervisor-items")).toEqual({ verdictStyle: "per-criterion" });
-		expect(options("supervisor-claims")).toEqual({ finalMessage: "claims" });
-		expect(options("supervisor-votes")).toEqual({ completeVotes: 3 });
-		expect(options("supervisor-think")).toEqual({ thinking: true });
-		expect(options("supervisor-verify")).toEqual({ verifyUncertain: true });
-		// A review asks another question than the verdict options, so `supervisor-research` leaves it out (D-097).
-		expect(options("supervisor-review")).toEqual({ review: true });
-		// preVerdict and warningSignals are one option group (R1.1/R1.2).
-		expect(options("supervisor-pre")).toEqual({ preVerdict: true, warningSignals: true });
-		expect(options("supervisor-research")).toEqual({
-			...options("supervisor-pre"),
-			...options("supervisor-items"),
-			...options("supervisor-claims"),
-			...options("supervisor-votes"),
-			...options("supervisor-verify"),
-		});
+		expect(options("supervisor-lean")).toEqual({ review: false, verifyUncertain: false });
 	});
 
 	it("the example config is valid and documents every module", () => {

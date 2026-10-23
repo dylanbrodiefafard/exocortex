@@ -1,16 +1,12 @@
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 
-/** The longest triage may hold one tool result for its sidecar calls. */
-const MAX_HOLD_MS = 6_000;
-
 export const SettingsSchema = Type.Object(
 	{
-		/** A first error further down than this many lines is surfaced at the top of the result. */
-		buriedAfterLines: Type.Integer({ minimum: 0, default: 20 }),
 		/**
-		 * From this many sightings of one failure, the notice turns into a loop warning (research R3.4).
-		 * One failure is one set of reported errors (D-073): a run with fewer or other errors is new.
+		 * From this many sightings of one failure, the result says the approach is not working
+		 * (research R3.4); from twice as many, it asks for a hand-over to the user. One failure is one
+		 * set of reported errors (D-073): a run with fewer or other errors is new.
 		 */
 		loopThreshold: Type.Integer({ minimum: 2, default: 3 }),
 		/**
@@ -20,38 +16,24 @@ export const SettingsSchema = Type.Object(
 		loops: Type.Boolean({ default: true }),
 		/**
 		 * Count a test or build run that failed behind a pipe (`cargo test 2>&1 | tail -30` exits 0) as
-		 * a failure when its output has a toolchain's error line (D-073).
+		 * a failure when its output shows it failed (D-073).
 		 */
 		maskedFailures: Type.Boolean({ default: true }),
-		/** Ask a sidecar for a short diagnosis on repeated failures (research R3.1: never on the first). */
+		/**
+		 * Ask a sidecar for a diagnosis when a failure repeats or a run stops converging (D-108). It is
+		 * asked of a fork of the agent's own context when the engine forks for free (D-093), else of a
+		 * prompt with the evidence. It never holds the agent: the hint arrives as late help (D-098).
+		 */
 		sidecar: Type.Boolean({ default: true }),
+		/** Diagnoses asked per failure; a call that ends without an answer is not counted. */
 		maxHintsPerSignature: Type.Integer({ minimum: 0, default: 2 }),
-		/**
-		 * How long the notice waits for its hint, holding the agent loop: within this module's share of
-		 * the host's time for a rewrite (D-082). A hint not ready by then is not lost: it reaches the
-		 * model as late help before its next call (D-098).
-		 */
-		hintTimeoutMs: Type.Integer({ minimum: 500, maximum: MAX_HOLD_MS, default: MAX_HOLD_MS }),
-		/**
-		 * D-099: ask for the hint from a fork of the agent's own context, so it reads the whole
-		 * conversation, not an excerpt of it. Needs an engine that forks for free (D-093); the
-		 * isolated prompt is asked when there is no fork or its reply cannot be used. Off until A/B'd.
-		 */
-		forkHints: Type.Boolean({ default: false }),
-		thinking: Type.Boolean({ default: false }),
-		/**
-		 * Phase 6 (D-015, research R6.1): at the loop threshold, this many isolated sidecars each propose
-		 * a cause from a different angle; distinct, grounded ones are listed. 0 = off.
-		 */
-		hypotheses: Type.Integer({ minimum: 0, maximum: 5, default: 0 }),
-		/** How long a notice at the loop threshold waits for its hypotheses; later ones arrive as late help (D-098). */
-		hypothesisTimeoutMs: Type.Integer({ minimum: 500, maximum: MAX_HOLD_MS, default: MAX_HOLD_MS }),
-		/** Commands whose exit code 1 means "no match" or "differs", not failure. */
-		benignCommands: Type.Array(Type.String({ minLength: 1 }), {
-			default: ["grep", "egrep", "fgrep", "rg", "ag", "diff", "cmp", "test", "[", "which", "pgrep", "git diff"],
-		}),
 	},
-	{ additionalProperties: true },
+	{
+		additionalProperties: true,
+		// D-108: hints never hold the agent, no first-error banner, no hypotheses, a fork whenever there
+		// is one, and core's list of benign exits.
+		retired: ["buriedAfterLines", "hintTimeoutMs", "forkHints", "hypotheses", "hypothesisTimeoutMs", "benignCommands"],
+	},
 );
 
 export type TriageSettings = Static<typeof SettingsSchema>;

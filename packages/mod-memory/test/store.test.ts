@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openDatabase } from "@exocortex/core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { failureOf } from "../src/detail.ts";
 import { recall } from "../src/recall.ts";
 import { ensureSchema, keywords, openMemoryStore } from "../src/store.ts";
 
@@ -69,11 +70,13 @@ describe("memory store", () => {
 		const store = openMemoryStore(":memory:", () => now);
 		const id = store.add(card("repo-a", "sig-1"));
 		for (let i = 0; i < 3; i++) store.markInjected(id);
-		store.credit(id, "hurt");
-		store.credit(id, "hurt");
-		store.credit(id, "helped");
+		expect(store.credit(id, "hurt", "s:1")).toBe(true);
+		// One showing is credited once.
+		expect(store.credit(id, "hurt", "s:1")).toBe(false);
+		store.credit(id, "hurt", "s:2");
+		store.credit(id, "helped", "s:3");
 		expect(store.retireUnhelpful()).toBe(0);
-		store.credit(id, "hurt");
+		store.credit(id, "hurt", "s:4");
 		now = 2_000;
 		expect(store.retireUnhelpful()).toBe(1);
 		expect(store.bySignature("sig-1")).toEqual([]);
@@ -196,19 +199,20 @@ describe("preference store (D-060)", () => {
 describe("keyword recall (M5)", () => {
 	const settings = { maxCards: 2, minOverlap: 0.6, minDetail: 0.6 };
 	const lock = "timeout waiting for the lock on the build directory";
+	const LOCK_ERROR = "error: timeout waiting for a lock on the build directory";
 
 	it("does not recall a card for one shared word, or for an error line that says too little", () => {
 		const store = openMemoryStore(":memory:");
 		store.add(card("repo-a", "sig-lock", lock));
-		expect(recall(store, "repo-a", "sig-other", "error: timeout", settings)).toEqual([]);
-		expect(recall(store, "repo-a", "sig-other", "error: timeout waiting", settings)).toEqual([]);
+		expect(recall(store, "repo-a", failureOf("bash", "error: timeout"), "error: timeout", settings)).toEqual([]);
+		expect(
+			recall(store, "repo-a", failureOf("bash", "error: timeout waiting"), "error: timeout waiting", settings),
+		).toEqual([]);
 		expect(store.search("repo-a", "error: cannot open file `data.bin`", 5)).toEqual([]);
 		// Most of both lines: a similar error.
-		expect(
-			recall(store, "repo-a", "sig-other", "error: timeout waiting for a lock on the build directory", settings).map(
-				(r) => r.match,
-			),
-		).toEqual(["similar"]);
+		expect(recall(store, "repo-a", failureOf("bash", LOCK_ERROR), LOCK_ERROR, settings).map((r) => r.match)).toEqual([
+			"similar",
+		]);
 		store.close();
 	});
 
@@ -352,8 +356,8 @@ describe("store safety (M10, M8)", () => {
 		const store = openMemoryStore(":memory:", () => now++);
 		const ids = [1, 2, 3, 4].map((n) => store.add(card("repo-a", `sig-${n}`)));
 		store.add(card("repo-b", "sig-b"));
-		store.credit(ids[0] ?? 0, "helped");
-		store.credit(ids[2] ?? 0, "hurt");
+		store.credit(ids[0] ?? 0, "helped", "a");
+		store.credit(ids[2] ?? 0, "hurt", "b");
 		expect(store.trim("repo-a", 2)).toBe(2);
 		// The one that hurt goes first, then the oldest that proved nothing.
 		expect(
@@ -369,8 +373,8 @@ describe("store safety (M10, M8)", () => {
 
 	it("retires a card and finds one by id", () => {
 		const store = openMemoryStore(":memory:");
-		const id = store.add({ ...card("repo-a", "sig-1"), distilled: true });
-		expect(store.card(id)).toMatchObject({ id, distilled: true, validTo: null });
+		const id = store.add(card("repo-a", "sig-1"));
+		expect(store.card(id)).toMatchObject({ id, validTo: null });
 		expect(store.card(99)).toBeUndefined();
 		expect(store.retire(id)).toBe(true);
 		expect(store.retire(id)).toBe(false);

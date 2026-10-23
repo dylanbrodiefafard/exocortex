@@ -359,7 +359,7 @@ describe("B8: tool results are handled one at a time", () => {
 		]);
 	});
 
-	it("gives each rewriter a share of the budget, so a hanging first one does not starve the rest", async () => {
+	it("stops a hanging rewriter at its part of the guard, so the ones after it still run (D-106)", async () => {
 		const h = setup(
 			{
 				hangs: () => ({ id: "hangs", rewriteToolResult: () => never() }),
@@ -690,9 +690,9 @@ describe("B15: settle shows what it is waiting on", () => {
 		});
 		await h.pi.emit("session_start");
 		await h.pi.emit("agent_before_settle", settleEvent());
-		expect(statuses(h)).toEqual(["exo: checking the work…", "exo: running: cargo test", "exo: a: complete"]);
+		// A quick settle skips "checking the work…" (D-106); the module's own progress still shows.
+		expect(statuses(h)).toEqual(["exo: running: cargo test", "exo: a: complete"]);
 		expect(h.pi.ui.filter((c) => c.method === "setWorkingMessage").map((c) => c.args)).toEqual([
-			["checking the work…"],
 			["running: cargo test"],
 			[],
 		]);

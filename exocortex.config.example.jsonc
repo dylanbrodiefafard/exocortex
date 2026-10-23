@@ -1,22 +1,15 @@
 // Exocortex configuration (JSONC). Copy to ~/.exocortex/config.jsonc. EXO_CONFIG=<path> replaces
-// that file. A project's own <repo>/.exocortex/config.jsonc may switch Exocortex and modules on or
-// off and tune them. "trace", "engine", "pool", "embeddings", the supervisor's "checks", memory's
-// "dbPath" and the trimmer's "saveDir" count only in your own file: set in a project's file they
-// are left out and pi tells you which (D-087). Unknown keys, modules or module settings, and
-// invalid values, disable Exocortex entirely (fail closed) and pi shows a warning.
+// that file. A project's own <repo>/.exocortex/config.jsonc may switch modules on or off and tune
+// them; what says where things go or what is run counts only in your own file (D-087).
+//
+// Set only what you want different: everything left out takes its default, so a better default
+// reaches you when Exocortex updates (D-106). Each module's settings and defaults are documented in
+// packages/mod-<module>/src/settings.ts. A setting that no longer exists is ignored with a notice;
+// a misspelled one or an invalid value switches Exocortex off with a warning, so a typo cannot
+// change behaviour silently.
 {
-	// Master kill switch.
-	"enabled": true,
-
-	// Append-only SQLite trace of every session (brief §5.1). Needed by eval and, later, memory.
-	"trace": {
-		"enabled": true,
-		"dbPath": "~/.exocortex/exocortex.db", // a relative path is relative to this file's directory
-		"retentionDays": 0 // delete sessions older than this many days when pi starts; 0 = keep everything
-	},
-
-	// Where sidecar calls go. Unset fields fall back to pi's main model when it is an
-	// openai-completions provider (same endpoint, model id and API key).
+	// Where sidecar calls go. Left out, they go to pi's main model when it is an openai-completions
+	// provider (same endpoint, model and key).
 	"engine": {
 		// "baseUrl": "http://127.0.0.1:8080/v1",
 		// "model": "qwen3.8-27b",
@@ -24,118 +17,32 @@
 		// What the engine supports (docs/INFERENCE_ENGINES.md): generic | vllm | sglang | llamacpp |
 		// dylanbrodiefafard/ninfer (the fork; upstream ninfer is "generic" with "cachedTokens": true).
 		"profile": "dylanbrodiefafard/ninfer"
-		// Per-feature overrides, e.g. for a build of the fork without read-only cache requests (D-093):
-		// "features": { "cacheReadOnly": false }
 	},
 
-	// The sidecar scheduler (brief §5.2).
 	"pool": {
 		"maxConcurrent": 6, // MUST equal the engine's parallel slots (e.g. ninfer --max-concurrency); see D-038
-		"reservedForMain": 2, // slots sidecars never take
-		// No overall deadline by default (D-098): a call ends when it is done, cancelled, or the engine
-		// stops answering. "timeoutMs" adds one for calls that set none.
-		"firstTokenMs": 120000, // no first token within this (plus a slow prefill of the prompt) = engine stopped
-		"stallMs": 60000, // no token for this long = engine stopped
-		"sessionTokenBudget": 0, // sidecar tokens per session; 0 = unlimited
-		"backgroundWhenIdleOnly": true, // background work waits for the main agent to go idle
-		"maxHoldMs": 600000 // a background call waiting for that gives up after this long
+		"reservedForMain": 2 // slots sidecar calls never take
 	},
 
-	// Optional: an OpenAI-compatible /embeddings server, e.g. a small model on the CPU (D-062).
-	// Memory uses it to recognise the same error in other words; without it, keywords decide.
-	"embeddings": {
-		// "baseUrl": "http://localhost:8081/v1",
-		// "model": "your-embedding-model",
-		// "apiKey": "$EMBEDDINGS_API_KEY",
-		"timeoutMs": 2000
-	},
+	// Optional: an OpenAI-compatible /embeddings server, e.g. a small model on the CPU (D-062). Memory
+	// then recognises the same error in other words; without it, keywords decide.
+	// "embeddings": { "baseUrl": "http://localhost:8081/v1", "model": "your-embedding-model" },
 
-	// Modules are off unless enabled here. Every module also takes "maxTokensPerCall" (default 4096). Toggle live in pi with /exo on|off and /exo <module> on|off.
+	// Modules are off unless enabled here. Toggle live in pi with /exo on|off and /exo <module> on|off.
 	"modules": {
 		"supervisor": {
 			"enabled": false,
-			"mode": "suggest", // "suggest": put the follow-up in your editor; "auto": send it itself
-			"maxContinuations": 3, // follow-ups per task before it stays quiet
-			"checks": [], // commands to run as evidence when the agent stops, e.g. ["npm test"]
-			"runPromptChecks": true, // also run commands quoted verbatim in your request
-			// "checkTimeoutMs": 600000, // a limit on each check command; none by default: they run in the background
-			"maxEvidenceChars": 40000, // what the verdict reads of the diff and command output (~4 chars per token)
-			"thinking": false, // sidecar reasoning for the ledger/verdict calls
-			// Research options (docs/RESEARCH.md §1), off until A/B'd: see packages/eval/configs/supervisor-*.jsonc
-			"preVerdict": false, // a failing check = incomplete without asking for a verdict
-			"warningSignals": false, // flag skipped/deleted tests, stubs, unsupported "tests pass" claims
-			"verdictStyle": "holistic", // or "per-criterion": each item judged with a quoted evidence line
-			"finalMessage": "message", // or "claims": show only the agent's success claims, marked unverified
-			"completeVotes": 1, // >1: re-ask on "complete"; any dissent = uncertain
-			"verifyUncertain": false, // on "uncertain": ask the agent once to check what the evidence does not show
-			// D-097: on "complete", review the changes for bugs and follow up with what survives a check.
-			// It runs in the background with no time limit; Escape or a new message stops it.
-			// `/exo review` runs the same review at any time, with this option on or off.
-			"review": false,
-			"reviewPasses": 5, // independent passes; a bug fewer than two report is dropped
-			"reviewMaxFindings": 3, // findings followed up at most, most severe first
-			"reviewMaxChars": 48000, // what each pass reads of the change (~4 chars per token)
-			"reviewThinking": true // the review thinks before it answers (D-101); off misses plain bugs
-		},
-		"trimmer": {
-			"enabled": false,
-			"tools": ["bash"], // tools whose results may be trimmed (read/edit/write never are)
-			"minChars": 8000, // shorter results are left alone (~4 chars per token)
-			"headLines": 40,
-			"tailLines": 80,
-			"contextLines": 3, // kept before each error line
-			"maxBlockLines": 30, // an error's own block (snippet, traceback, notes) is kept up to this many lines
-			"hideRoutine": true, // hide passing tests and compile progress before anything else
-			// "verbatimCommands": [...], // commands whose output is never trimmed; default: cat, grep, git diff, …
-			"sidecar": false, // let a sidecar pick the lines to keep (verbatim) for still-long outputs
-			"sidecarTimeoutMs": 6000 // it holds the agent loop; on timeout the deterministic result is used
+			"mode": "suggest", // "suggest": the follow-up goes in your editor; "auto": it is sent for you
+			"checks": [] // commands run as evidence when the agent stops, e.g. ["npm test"]; your file only
 		},
 		"tools": {
 			"enabled": false,
-			// Makes pi's own read, edit and write results more useful; adds no tool (D-094).
-			"editHints": true, // a failed edit shows what the file holds where it was aimed, quoted from the file
-			"readLineNumbers": true, // number read results, cat -n style
-			"outline": true, // when a read stops early, list the declarations in the rest of the file
-			"diagnostics": true, // after an edit, show errors a check finds that were not there before it
-			"builtinChecks": true, // syntax checks for Python, Go, shell and JavaScript; nothing to install
-			"checks": [], // your own, tried first; your file only, e.g. [{ "files": "*.rs", "command": "cargo check --quiet --message-format short" }]
-			"checkHoldMs": 4000 // how long an edit's result waits for its check; a slower one's new errors arrive late
+			// Checks run after an edit, tried before the built-in syntax checks; your file only.
+			"checks": [] // e.g. [{ "files": "*.rs", "command": "cargo check --quiet --message-format short" }]
 		},
-		"triage": {
-			"enabled": false,
-			// A failure repeats when it reports the same errors again; fewer failing tests is a new failure (D-073).
-			"sidecar": true, // a two-sentence hint when the same failure repeats (never on the first)
-			"maxHintsPerSignature": 2, // sidecar hints per repeated failure; the second must differ from the first
-			"loopThreshold": 3, // sightings before the stronger "this approach is not working" warning
-			"maskedFailures": true, // `cargo test 2>&1 | tail` exits 0: count it as failed when its output has an error line
-			"hintTimeoutMs": 6000, // how long the notice waits for its hint (at most 6000); a later hint arrives before the model's next call
-			"forkHints": false, // D-099, off until A/B'd: ask the hint of a fork of the agent's context, which reads the whole conversation
-			"hypotheses": 0, // at the loop threshold, this many parallel sidecars propose causes from different angles
-			"benignCommands": ["grep", "egrep", "fgrep", "rg", "ag", "diff", "cmp", "test", "[", "which", "pgrep", "git diff"] // exit 1 = an answer
-		},
-		"memory": {
-			"enabled": false,
-			// "dbPath": "~/.exocortex/memory.db", // cards from every repo, scoped by repo (git remote)
-			"learn": true, // learn from fixes: a command fails, files change, the same command passes
-			"inject": true, // add a matching lesson to a failing tool result
-			"distill": true, // a background sidecar phrases each lesson (else a summary of the edit)
-			"maxCards": 2,
-			"minDetail": 0.6, // share of a card's names (tests, symbols, error codes) a failure must mention to count as the same problem
-			"maxInjectChars": 1600, // ~400 tokens
-			"preferences": false, // learn how you like work done and what you expect of a kind of task, from what you type and your corrections; add what a later prompt leaves unsaid (D-060, D-064)
-			"maxPreferences": 5,
-			"preferenceMinSessions": 2, // sessions an instruction must recur in, unless you said it as a standing rule
-			"preferenceSelect": true, // a sidecar picks which preferences fit each prompt (else: all, minus keyword matches)
-			"minSimilarity": 0.85 // with embeddings: how close an error must be to a card's to recall it
-		},
-		"compaction": {
-			"enabled": false,
-			"fallback": "harness", // without a sidecar summary: "harness" (pi's own) or "deterministic"
-			"maxConversationChars": 60000, // newest part of the compacted span sent to the sidecar
-			// D-098, off until A/B'd: write the summary in the background once the context passes this share
-			// of where pi compacts; compaction then only adds what came after it.
-			"earlySummary": false,
-			"earlySummaryAt": 0.7
-		}
+		"triage": { "enabled": false },
+		"memory": { "enabled": false },
+		"trimmer": { "enabled": false },
+		"compaction": { "enabled": false }
 	}
 }

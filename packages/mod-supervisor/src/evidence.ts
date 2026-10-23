@@ -11,12 +11,16 @@ export interface CheckResult {
 }
 
 export interface EvidenceInput {
-	/** `git diff --stat <start>`, or undefined outside a git repo. */
+	/** `git diff --stat <start>`, or undefined when git gave none (see `gitProblem`). */
 	readonly diffStat: string | undefined;
+	/** Why git could not say (all of) what changed, when it failed in a repository (D-107); unset outside one. */
+	readonly gitProblem?: string;
 	/** `git diff <start>` plus new files as diffs (may be long; cut per file here). */
 	readonly diff: string | undefined;
-	/** Files git does not track yet, all of them. */
+	/** Files git does not track yet that the task made, build byproducts left out. */
 	readonly untracked: readonly string[];
+	/** New files left out of `untracked` as what test and build runs leave behind (D-107). */
+	readonly byproducts?: number;
 	/** How many of those have no content in `diff` (too many to show, or not readable as text). */
 	readonly newFilesNotShown?: number;
 	readonly tools: readonly ToolOutcome[];
@@ -27,48 +31,41 @@ export interface EvidenceInput {
 	readonly warnings?: readonly string[];
 	/** The user's own check commands, which count as test runs among the agent's commands. */
 	readonly runs?: RunOptions;
+	/** The whole evidence's budget in characters, sized from the context window by the caller (D-107). */
 	readonly maxChars: number;
 }
 
-/** The evidence as the judge reads it, and the lines of it that can show an item is done. */
-export interface Evidence {
-	readonly text: string;
-	/**
-	 * Lines a `met` item may quote (D-084): an added or removed line of the diff, a line a check
-	 * command printed, or a command line with its exit code. Not the summary of changed files, the
-	 * warnings, the notes or anything the agent said: those show that something happened, not what.
-	 */
-	readonly quotable: readonly string[];
-}
-
-const RECENT_COMMANDS = 10;
-const COMMAND_CHARS = 200;
-const FAILED_OUTPUT_CHARS = 2_000;
-const CHECK_OUTPUT_CHARS = 4_000;
+const COMMAND_CHARS = 300;
+/** Commands listed at most; older ones are counted. A task of this many is rare, and each is one line. */
+const MAX_COMMANDS = 400;
+/** New files listed by name; the rest are counted. */
+const MAX_NEW_FILE_NAMES = 200;
 /** Room kept for the "more lines not shown" note under a file's cut diff. */
 const DIFF_CUT_NOTE_CHARS = 60;
-/** New files listed by name; the rest are counted. */
-const MAX_NEW_FILE_NAMES = 30;
+/** Shares of the evidence budget: the checks' output (all of them together), and the last failure's output. */
+const CHECKS_SHARE = 0.25;
+const FAILURE_SHARE = 0.05;
+/** Floors under those shares, for a small budget. */
+const MIN_CHECK_CHARS = 2_000;
+const MIN_FAILURE_CHARS = 1_000;
 
 /** One check command's result. A check that did not finish is not a failing one. */
-function checkLines(check: CheckResult): { readonly header: string; readonly output: string } {
+function checkLines(check: CheckResult, chars: number): { readonly header: string; readonly output: string } {
 	const { output } = check;
-	const shown = tail(output.outputTail, CHECK_OUTPUT_CHARS);
+	const shown = tail(output.outputTail, chars);
 	if (checkOutcome(output) !== "inconclusive") return { header: `exit code: ${output.exitCode}`, output: shown };
 	const why = output.timedOut ? `timed out after ${Math.round(output.durationMs / 1000)} s` : "it was interrupted";
 	return { header: `did not finish (${why}): this shows nothing either way`, output: shown };
 }
 
-/** The check commands just run, with what each printed. */
-function checksSection(checks: readonly CheckResult[], quotable: string[]): string {
+/** The check commands just run, with what each printed: together, a quarter of the budget. */
+function checksSection(checks: readonly CheckResult[], maxChars: number): string {
 	if (checks.length === 0) return "";
+	const each = Math.max(MIN_CHECK_CHARS, Math.floor((maxChars * CHECKS_SHARE) / checks.length));
 	return [
 		"## Check commands (run just now)",
 		...checks.map((check) => {
-			const { header, output } = checkLines(check);
-			quotable.push(`$ ${check.command}`);
-			// What a check printed before it was killed proves nothing about how it would have ended.
-			if (checkOutcome(check.output) !== "inconclusive") quotable.push(...output.split("\n"));
+			const { header, output } = checkLines(check, each);
 			return `$ ${check.command}\n${header}\n${output}`;
 		}),
 	].join("\n");
@@ -78,9 +75,12 @@ function checksSection(checks: readonly CheckResult[], quotable: string[]): stri
 function changesSection(input: EvidenceInput): string {
 	const touched = touchedFiles(input.tools);
 	const more = input.untracked.length - MAX_NEW_FILE_NAMES;
+	const byproducts = input.byproducts ?? 0;
 	const changes =
 		input.diffStat === undefined
-			? "Not a git repository: no diff available."
+			? input.gitProblem === undefined
+				? "Not a git repository: no diff available."
+				: `git failed, so what changed is not known (${input.gitProblem}). This shows nothing either way.`
 			: input.diffStat.trim() === "" && input.untracked.length === 0
 				? "No changes in the working tree."
 				: [
@@ -90,25 +90,34 @@ function changesSection(input: EvidenceInput): string {
 					]
 						.filter(Boolean)
 						.join("\n");
+	// Part of git failed (the new files, say): what it would have shown is not known (D-107).
+	const partly =
+		input.diffStat !== undefined && input.gitProblem !== undefined
+			? `git failed for part of this (${input.gitProblem}), so it may not be all that changed. This shows nothing either way.`
+			: "";
 	return [
 		"## Changes since the task started",
 		changes,
+		partly,
+		byproducts > 0
+			? `(${byproducts} new ${byproducts === 1 ? "file" : "files"} that test and build runs leave behind, such as \`__pycache__/\` and \`.pyc\`, left out)`
+			: "",
 		touched.length > 0 ? `Files the agent edited or wrote: ${touched.join(", ")}` : "",
 	]
 		.filter(Boolean)
 		.join("\n");
 }
 
-/** The agent's last commands with their exit codes, what its test runs do not show, and its last unfixed failure. */
-function commandsSection(input: EvidenceInput, quotable: string[]): string {
-	const commands = input.tools.filter((t) => typeof t.input["command"] === "string").slice(-RECENT_COMMANDS);
-	if (commands.length === 0) return "";
+/** The task's commands with their exit codes, one line each, what its test runs do not show, and its last unfixed failure. */
+function commandsSection(input: EvidenceInput): string {
+	const all = input.tools.filter((t) => typeof t.input["command"] === "string");
+	if (all.length === 0) return "";
+	const commands = all.slice(-MAX_COMMANDS);
 	// One line each: a command spanning lines could otherwise write a section of its own here.
 	const lines = commands.map(
 		(t) =>
 			`$ ${clip(String(t.input["command"]).replace(/\s*\n\s*/g, " ⏎ "), COMMAND_CHARS)}  → exit ${t.exitCode ?? (t.isError ? "error" : "?")}`,
 	);
-	quotable.push(...lines);
 	// A failure the agent has since fixed would only mislead: show it only if that command never passed again.
 	// A run that failed behind a pipe is a failure too, whatever exit code the pipe gave it.
 	const failedRun = (t: ToolOutcome) => outcomeOf(t) === "failed";
@@ -118,12 +127,14 @@ function commandsSection(input: EvidenceInput, quotable: string[]): string {
 		.slice(lastFailureAt + 1)
 		.some((t) => !failedRun(t) && t.input["command"] === failed?.input["command"]);
 	const lastFailure = fixedSince ? undefined : failed;
+	const failureChars = Math.max(MIN_FAILURE_CHARS, Math.floor(input.maxChars * FAILURE_SHARE));
 	return [
-		"## Commands the agent ran (most recent last)",
+		"## Commands the agent ran during the task (oldest first)",
+		all.length > commands.length ? `(${all.length - commands.length} earlier commands not shown)` : "",
 		...lines,
 		...testRunNotes(input.tools, input.changedSinceTests, input.runs).map((n) => `Note: ${n}.`),
 		lastFailure
-			? `Output of the last failing command (it did not pass again):\n${tail(lastFailure.output, FAILED_OUTPUT_CHARS)}`
+			? `Output of the last failing command (it did not pass again):\n${tail(lastFailure.output, failureChars)}`
 			: "",
 	]
 		.filter(Boolean)
@@ -135,14 +146,13 @@ function commandsSection(input: EvidenceInput, quotable: string[]): string {
  * what was run and with which exit codes, and the results of check commands. Ordered by
  * importance so truncation drops the least useful parts (the raw diff) first.
  */
-export function buildEvidence(input: EvidenceInput): Evidence {
-	const quotable: string[] = [];
+export function formatEvidence(input: EvidenceInput): string {
 	const warnings = input.warnings ?? [];
 	const sections = [
 		warnings.length > 0 ? ["## Warnings (detected automatically)", ...warnings.map((w) => `- ${w}`)].join("\n") : "",
-		checksSection(input.checks, quotable),
+		checksSection(input.checks, input.maxChars),
 		changesSection(input),
-		commandsSection(input, quotable),
+		commandsSection(input),
 	].filter(Boolean);
 
 	const head = sections.join("\n\n");
@@ -155,19 +165,12 @@ export function buildEvidence(input: EvidenceInput): Evidence {
 	};
 	if (input.diff && input.diff.trim() !== "" && head.length < input.maxChars - 200) {
 		const room = input.maxChars - head.length - heading(true).length - 4;
-		const fitted = fitDiff(input.diff, room);
-		quotable.push(...fitted.split("\n").filter((line) => /^[+-](?![+-]{2} )/.test(line)));
-		sections.push(`${heading(input.diff.length > room)}\n${fitted}`);
+		sections.push(`${heading(input.diff.length > room)}\n${fitDiff(input.diff, room)}`);
 	} else if (left !== "") {
 		sections.push(heading(false));
 	}
 	const text = sections.join("\n\n");
-	return { text: text.length > input.maxChars ? `${text.slice(0, input.maxChars)}\n…` : text, quotable };
-}
-
-/** {@link buildEvidence}'s text. */
-export function formatEvidence(input: EvidenceInput): string {
-	return buildEvidence(input).text;
+	return text.length > input.maxChars ? `${text.slice(0, input.maxChars)}\n…` : text;
 }
 
 /**
@@ -219,7 +222,7 @@ export function touchedFiles(tools: readonly ToolOutcome[]): string[] {
 		const path = tool.input["path"] ?? tool.input["file_path"];
 		if (typeof path === "string" && /edit|write|create|patch/i.test(tool.toolName) && !tool.isError) paths.add(path);
 	}
-	return [...paths].slice(0, 30);
+	return [...paths];
 }
 
 /** The start of a long command, ending in `…` where it was cut. */

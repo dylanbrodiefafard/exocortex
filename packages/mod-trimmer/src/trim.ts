@@ -10,14 +10,14 @@ export interface TrimOptions {
 	readonly maxBlockLines: number;
 	/** At most this many error blocks; the highest-ranked first, then the earliest (root causes) over the last. */
 	readonly maxErrorWindows: number;
-	/** Longer lines are cut (minified output, base64 blobs). */
+	/** Longer lines are cut (minified output, base64 blobs), except a failure's own lines. */
 	readonly maxLineChars: number;
 	/** Failures beyond `maxErrorWindows` still show the line that names them. Default: true. */
 	readonly headerLines?: boolean;
 }
 
 export interface PrepareOptions {
-	/** Runs of at least this many similar lines collapse to one line plus a count. */
+	/** Runs of at least this many similar lines collapse to their first and last line and a count. */
 	readonly collapseRuns: number;
 	/** Hide routine lines (passing tests, compile progress) before anything else. */
 	readonly hideRoutine: boolean;
@@ -42,6 +42,11 @@ export interface Prepared {
 	readonly routineLines: number;
 	/** The error blocks among `lines` (indices into it), in order. */
 	readonly blocks: readonly Block[];
+	/**
+	 * Lines never cut short, however long (indices into `lines`): a failure's block and every
+	 * block's key lines. A long type error or JSON diff is the line that matters (D-110).
+	 */
+	readonly whole: ReadonlySet<number>;
 }
 
 export interface Trimmed {
@@ -53,6 +58,8 @@ export interface Trimmed {
 
 /** The last lines are never hidden as routine: the final status of a run is often an "ok". */
 const ROUTINE_TAIL_GUARD = 5;
+/** A shorter run would collapse to as many lines as it has: its first, a marker and its last. */
+const MIN_COLLAPSED_RUN = 4;
 /** For each failure shown whole, this many more may show the one line that names them. */
 const HEADER_LINES_PER_WINDOW = 3;
 
@@ -89,12 +96,13 @@ export function prepareLines(text: string, options: PrepareOptions): Prepared {
 		distinct.push(inFailure[index] === 1 || kind !== undefined || LOCATION.test(line));
 	});
 	const lines = collapseRuns(shown, distinct, options.collapseRuns);
-	return {
-		lines,
-		totalLines: raw.length,
-		routineLines: raw.length - shown.length,
-		blocks: placeBlocks(found, lines, raw.length),
-	};
+	const blocks = placeBlocks(found, lines, raw.length);
+	const whole = new Set<number>();
+	for (const block of blocks) {
+		if (block.rank >= 3) for (let i = block.start; i <= block.end; i++) whole.add(i);
+		for (const key of block.keys) whole.add(key);
+	}
+	return { lines, totalLines: raw.length, routineLines: raw.length - shown.length, blocks, whole };
 }
 
 /** Blocks found in the full output, as indices into the lines left after hiding and collapsing. */
@@ -209,7 +217,7 @@ export function renderSelection(
 		if (!keep.has(index)) return;
 		gap(line.first - 1);
 		if (line.similar !== undefined) out.push(options.numbered ? similarLines(line, line.similar) : line.text);
-		else if (line.text.length > options.maxLineChars) {
+		else if (line.text.length > options.maxLineChars && !prepared.whole.has(index)) {
 			out.push(`${line.text.slice(0, options.maxLineChars)}…[+${line.text.length - options.maxLineChars} chars]`);
 		} else out.push(line.text);
 		next = line.last + 1;
@@ -231,8 +239,10 @@ function similarLines(line: Line, count: number): string {
 }
 
 /**
- * Collapses runs of lines that differ only in numbers (progress, timestamps, repeated warnings).
- * A `distinct` line is never part of a run: its number is a position or it is an error (R1).
+ * Collapses runs of lines that differ only in numbers (progress, timestamps, repeated warnings)
+ * to their first line, a marker and their last line: the last value of a series is often the one
+ * that matters (D-110). A `distinct` line is never part of a run: its number is a position or it
+ * is an error (R1).
  */
 function collapseRuns(lines: readonly Line[], distinct: readonly boolean[], minRun: number): Line[] {
 	const out: Line[] = [];
@@ -243,13 +253,19 @@ function collapseRuns(lines: readonly Line[], distinct: readonly boolean[], minR
 		let j = i + 1;
 		while (shape !== undefined && j < lines.length && !distinct[j] && shapeOf(lines[j]?.text ?? "") === shape) j++;
 		const run = j - i;
-		if (run >= minRun && shape !== undefined && shape.trim() !== "") {
-			out.push(start, {
-				text: `[… ${run - 1} more similar line${run - 1 === 1 ? "" : "s"} …]`,
-				first: start.last + 1,
-				last: (lines[j - 1] as Line).last,
-				similar: run - 1,
-			});
+		if (run >= Math.max(MIN_COLLAPSED_RUN, minRun) && shape !== undefined && shape.trim() !== "") {
+			const end = lines[j - 1] as Line;
+			const hidden = run - 2;
+			out.push(
+				start,
+				{
+					text: `[… ${hidden} more similar line${hidden === 1 ? "" : "s"} …]`,
+					first: start.last + 1,
+					last: (lines[j - 2] as Line).last,
+					similar: hidden,
+				},
+				end,
+			);
 		} else {
 			out.push(...lines.slice(i, j));
 		}

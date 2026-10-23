@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { cleanTerminalOutput, lineVerdicts } from "./output.ts";
+import { cleanTerminalOutput, isWrapperLine, lineVerdicts } from "./output.ts";
 import type { ToolOutcome } from "./types.ts";
 
 /**
@@ -27,6 +27,10 @@ const RUN_IDS: readonly Rule[] = [
 	[/(?<![\w.-])(?:\/private)?(?:\/var\/folders\/[^\s/]+\/[^\s/]+\/T|\/var\/tmp|\/tmp)\/[^\s:'"`,;)\]]+/g, "<tmp>"],
 	[/\b(localhost|\d{1,3}(?:\.\d{1,3}){3}|\[::1?\]):\d{2,5}\b/g, "$1:<port>"],
 	[/\b0x[0-9a-f]+\b/gi, "<hex>"],
+	// A sanitizer's report names the process: `==12345==ERROR: AddressSanitizer: …` (D-108).
+	[/==\d+==/g, "==<pid>=="],
+	// The shell's report of a killed program: `bash: line 1: 4242 Segmentation fault`.
+	[/\b\d+(?= +(Segmentation fault|Aborted|Bus error|Illegal instruction|Floating point exception)\b)/g, "<pid>"],
 ];
 
 /**
@@ -109,11 +113,16 @@ const RUSTC_PLACE_WITHIN = 3;
  * thread ids). Names and values stay, and so do duplicates: one failing test fewer, a different
  * message, another value in the same assertion or one of two identical errors gone is a different
  * list. A rustc error carries the file it points at, so the same error in another file is another
- * error (D-077). Lines a toolchain prints for a failure are used when there are any.
+ * error (D-077). Lines a toolchain prints for a failure are used when there are any, those that
+ * only wrap another program's failure (`make: *** …`) aside: with nothing else, a crash under
+ * `make test` and an assertion under it would be one failure (D-108).
  */
 export function failureLines(output: string): string[] {
 	const lines = cleanTerminalOutput(output).split("\n");
-	const kinds = lineVerdicts(lines).map((verdict) => (verdict === "mention" ? "generic" : verdict && "specific"));
+	// A wrapper (`make: *** […] Error 1`) says a run failed, not how (D-108): it identifies nothing.
+	const kinds = lineVerdicts(lines).map((verdict, index) =>
+		verdict === "mention" ? "generic" : verdict && !isWrapperLine(lines[index] ?? "") ? "specific" : undefined,
+	);
 	const wanted = kinds.includes("specific") ? "specific" : kinds.includes("generic") ? "generic" : undefined;
 	const errors = wanted
 		? lines.flatMap((_, index) => (kinds[index] === wanted ? [withPlace(lines, index)] : []))
@@ -134,6 +143,89 @@ function withPlace(lines: readonly string[], index: number): string {
 		if (RUSTC_ERROR.test(below)) break;
 	}
 	return line;
+}
+
+/**
+ * What a failure is made of, its messages left out (D-108): the tests that failed, or else the
+ * places its errors point at. Two runs of the same tests that fail with other values have the
+ * same items, so a run can be told to have fixed something or not.
+ */
+export interface FailingItems {
+	readonly kind: "tests" | "sites";
+	/** Sorted. Tests are named once each; a site is named once per error there, so one error fewer shows. */
+	readonly items: readonly string[];
+}
+
+/** A failing test's name, per runner: the first group. */
+const FAILED_TEST: readonly RegExp[] = [
+	// pytest, unittest
+	/^(?:FAILED|ERROR) (\S+::\S+)/,
+	/^(?:FAIL|ERROR): (\S+ \(\S+\))$/,
+	// cargo, nextest, Go
+	/^test (\S+) \.\.\. FAILED$/,
+	/^\s*FAIL \[\s*[\d.]+s\] (.+)$/,
+	/^\s*--- FAIL: (\S+)/,
+	// GoogleTest (not its count line), CTest, TAP
+	/^\[\s+FAILED\s+\] ([A-Za-z_][\w./]*)(?: \(|, |$)/,
+	/^\s*\d+\/\d+ Test\s+#\d+: (\S+) \.*\s*\*\*\*/,
+	/^not ok \d+ (?:- )?(.+?)(?: # .*)?$/,
+	// Vitest, Jest, node:test: a failed test's mark, or Vitest's `FAIL file > suite > test`
+	/^\s*(?:×|✕|✗|✖) (.+?)(?: \(?[\d.]+ ?m?s\)?)?$/,
+	/^\s*FAIL\s+(\S+ > .+?)(?: [\d.]+ ?m?s)?$/,
+];
+
+/** A place an error points at, per toolchain: the groups joined (`path`, or `path in function`). */
+const ERROR_SITE: readonly RegExp[] = [
+	/^(\S+?):\d+(?::\d+)?: (?:fatal )?error: /,
+	/^(\S+?)\(\d+,\d+\): error TS\d+/,
+	/^\s*--> (\S+?)(?::\d+)*$/,
+	/^(\S+?):\d+:\d+: runtime error: /,
+	/^SUMMARY: \w*Sanitizer: \S+ (\S+?)(?::\d+)*( in \S+)?$/,
+	/^\S+: (\S+?):\d+: (.+?): Assertion `/,
+	/^thread '.*'(?: \(\d+\))? panicked at (\S+?)(?::\d+)*:?$/,
+	/: (undefined reference to|multiple definition of) [`'‘](.+?)['’]/,
+];
+const PYTHON_FRAME = /^\s*File "([^"]+)", line \d+, in (\S+)/;
+/** Lines in a test mark's place that are no test: node:test's `✖ failing tests:`, ESLint's `✖ 3 problems (…)`. */
+const NOT_A_TEST = /^(failing tests:?|\d+ problems? \(.*)$/i;
+const DURATION_SUFFIX = /\s*\(?[\d.]+ ?m?s\)?$/;
+
+/**
+ * The failing tests an output names, or else the places its errors point at (D-108). Undefined
+ * when it names neither: what a failure is made of then cannot be told from its messages.
+ */
+export function failingItems(output: string): FailingItems | undefined {
+	const lines = cleanTerminalOutput(output).split("\n");
+	const tests = new Set<string>();
+	const sites: string[] = [];
+	let frame: string | undefined;
+	for (const line of lines) {
+		for (const pattern of FAILED_TEST) {
+			const name = pattern.exec(line)?.[1]?.replace(DURATION_SUFFIX, "").trim();
+			if (name && NOT_A_TEST.test(name)) break;
+			if (name) {
+				tests.add(name);
+				break;
+			}
+		}
+		const python = PYTHON_FRAME.exec(line);
+		if (python) frame = `${python[1]} in ${python[2]}`;
+		for (const pattern of ERROR_SITE) {
+			const match = pattern.exec(line);
+			if (!match) continue;
+			sites.push(
+				match
+					.slice(1)
+					.flatMap((part) => part?.trim() || [])
+					.join(" "),
+			);
+			break;
+		}
+	}
+	// A traceback's innermost frame is where it was raised.
+	if (frame) sites.push(frame);
+	if (tests.size > 0) return { kind: "tests", items: [...tests].sort() };
+	return sites.length > 0 ? { kind: "sites", items: sites.sort() } : undefined;
 }
 
 /**

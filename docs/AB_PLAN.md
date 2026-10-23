@@ -51,34 +51,29 @@ npm run eval -- --model ninfer/coding --tags hard --config all-off,supervisor --
 - **Primary:** Δ success on `hard`, paired by task.
 - **Gate:** no runaway loops. Every run stays within `maxContinuations`, with no extra `max_turns` or timeout outcomes.
 - **Also read:** precision of `complete` and failures caught (the "Supervisor verdicts vs hidden checks" section).
-- **What `supervisor` now does (D-071):** the judge reads the request itself, sees every changed file, and is told when the agent's last test run came before its last edit or was piped. Verdict calls are larger (up to about 15k prompt tokens); nothing extra is run.
+- **What `supervisor` now does (D-071):** the judge reads the request itself, sees every changed file, and is told when the agent's last test run came before its last edit or was piped. Verdict calls are larger (since D-107 up to half the context window); nothing extra is run.
 - **On a pass:** merge Phase 3 and tag `phase-3`.
 
-## 2. Supervisor research options (D-046)
+## 2. Supervisor defaults (D-107)
 
 ```sh
 npm run eval -- --model ninfer/coding --tags hard --repeat 5 \
-  --config supervisor,supervisor-think,supervisor-pre,supervisor-items,supervisor-claims,supervisor-votes,supervisor-verify,supervisor-review
+  --config supervisor,supervisor-lean
 ```
 
-Each config turns on one option (D-056), so every row of the report is one option against `supervisor`.
+D-107 deleted the research options that never earned their keep (`preVerdict`, `verdictStyle`, `finalMessage`, `completeVotes`), made the warning signs permanent, and turned on the review (D-097) and the request to verify what an `uncertain` verdict could not see (D-071). `supervisor-lean` turns those two back off, so the pair is the A/B of the new defaults.
 
-- **Primary:** precision of `complete`, because a false "done" is the costly error. **Secondary:** Δ success, and verdict latency (sidecar tokens, wall-clock).
-- **What changes a default:** an option that raises precision of `complete` without lowering success, at acceptable cost, becomes the default in a new D-entry. After the single-option runs, confirm with `supervisor-research` (all options on).
-- **After research verification (D-054):**
-  - `supervisor-think` has the strongest prior: non-thinking judges were near chance on pairwise code judging. If GPU time is short, run `supervisor,supervisor-think` first.
-  - `supervisor-claims` (`finalMessage: "claims"`) is a real test, not a confirmation. CodeJudgeBench found judges do better *with* the judged response's full text, so stripping the narrative could lower precision. `supervisor-items` no longer sets it (D-056), so per-criterion verdicts are judged on their own.
-  - `supervisor-verify` (D-071) turns an `uncertain` verdict into one request to the agent to check the unshown items. **Primary for this row:** Δ success. It costs a continuation, so it changes a default only if success rises without turns and wall-clock rising beyond what that one continuation explains. If `uncertain` is rare in the `supervisor` row, it has nothing to act on. It is also the only config that acts on a stale or piped test run (the agent is asked to run its tests again), so compare its "lucky passes" with `supervisor`'s.
-  - `supervisor-review` (D-097) reviews the changes for bugs once the verdict is `complete`. **Primary for this row:** Δ success, read with the hidden checks: a task that passed in `supervisor` and fails here is a fix made for a bug that was not there. The `exo.review` events give, per run, findings proposed, those that survived the vote and the check, and those kept. It changes a default only if success rises and no task regresses beyond noise.
-  - `completeVotes` stays the logprob-free confidence route: logprobs are anti-calibrated on Qwen 3.5 27B (VERDI, verified).
+- **Primary:** Δ success, read with the hidden checks: a task that passes in `supervisor-lean` and fails in `supervisor` is a fix made for a bug that was not there. **Secondary:** turns and wall-clock (each follow-up costs a turn), precision of `complete`.
+- **What reverts a default:** success that does not rise, or a task that regresses beyond noise. The `exo.review` events give, per run, findings proposed, those that survived the vote and the check, and those kept.
+- To measure what thinking adds, run either config with `"pool": { "thinking": "never" }` against it (D-106).
 
 ## 3. Phase 4 modules (D-042 to D-045)
 
 ```sh
 # Trimmer: noisy outputs
-npm run eval -- --model ninfer/coding --tags noisy-output --config all-off,trimmer,trimmer-llm --repeat 5
+npm run eval -- --model ninfer/coding --tags noisy-output --config all-off,trimmer --repeat 5
 # Triage: misleading or repeated errors
-npm run eval -- --model ninfer/coding --tags error-recovery --config all-off,triage,triage-hypotheses --repeat 5
+npm run eval -- --model ninfer/coding --tags error-recovery --config all-off,triage --repeat 5
 ```
 
 - **Trimmer:**
@@ -93,7 +88,7 @@ npm run eval -- --model ninfer/coding --tags error-recovery --config all-off,tri
   - Self-Debug's gain came almost entirely from the first feedback turn (verified). Read the report's "Repeated errors" section (D-057): cap hints at 1 unless *stopped after hint 2* is a real share of *got hint 2* and beats `all-off`'s *gone after the 3rd time*.
   - **Secondary:** success, and turns from first failure to success.
   - **Loops without an error (D-069):** read the report's "Stuck loops" section. *Calls made inside a loop*, per loop, should fall against `all-off`. If loops are common in `all-off` and triage does not shorten them, the notice is not enough and stopping the run from the host is the next step. If no run loops, the tasks do not exercise this.
-  - `triage-hypotheses` also measures Phase 6 (D-050).
+  - **Not converging (D-108):** triage notes `not converging ×4` in `exo.rewrite` when a test command fails four runs in a row with none of its failing tests fixed. Hints now arrive late and are traced as `exo.action` (`action: "hint"`).
 - **Retro-masking (R2.3) is not in this plan** (D-053): for Qwen3-32B the source study showed no masking gain, and a local 30B lost half its prefix hits under masking. Revisit only if the compaction run below shows context-driven failures.
 - **Compaction:** the hard tasks rarely reach pi's compaction threshold. Force it with a small-context copy of the model:
   1. In `~/.pi/agent/models.json`, copy your ninfer provider block under a new provider name, for example `"ninfer32k"`. Keep the same `baseUrl` and model `id` (so ninfer sees the same model name) and set the model's `"contextWindow": 32768`.
@@ -133,7 +128,7 @@ npm run eval -- --model ninfer/coding --tags hard --config all-off,memory,memory
 
 ```sh
 npm run eval -- --model ninfer/coding --tags hard --repeat 5 \
-  --config all-off,phase4,supervisor-research
+  --config all-off,phase4,supervisor
 ```
 
 Use this to check that the modules don't interfere with each other, for example triage and memory both annotating the same failure, or the supervisor reacting to trimmed output. Compare against each module's own run.

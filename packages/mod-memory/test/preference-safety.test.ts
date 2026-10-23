@@ -1,6 +1,6 @@
 import "./home-guard.ts";
 import { describe, expect, it } from "vitest";
-import { admitRelation, alreadySaid } from "../src/preferences.ts";
+import { admitRelation } from "../src/preferences.ts";
 import { openMemoryStore, type StoredPreference } from "../src/store.ts";
 import { SETTLED, setup, signal, until, workspace } from "./helpers.ts";
 
@@ -104,16 +104,6 @@ describe("a rule and its opposite are two rules (M7)", () => {
 
 	it("does not merge opposites when the sidecar's answer calls one preference both", () => {
 		expect(admitRelation({ same: 1, contradicts: [1] }, [semicolons])).toEqual({ same: undefined, contradicts: [] });
-	});
-
-	it("leaves a rule out of a prompt that speaks about it, whichever way the prompt puts it", () => {
-		// Said the other way, the request wins; said the same way, the rule would only repeat it.
-		expect(
-			alreadySaid("Fix the parser, and don't add comments to the code this time", "Add comments to the code."),
-		).toBe(true);
-		expect(alreadySaid("Fix the parser and add comments to the code", "Add comments to the code.")).toBe(true);
-		expect(alreadySaid("Do not add any comments to the code", "Never add comments to the code.")).toBe(true);
-		expect(alreadySaid("Fix the parser and update the README", "Add comments to the code.")).toBe(false);
 	});
 
 	it("finds the preference a rule restates among all live ones, not only the latest thirty", async () => {

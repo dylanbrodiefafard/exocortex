@@ -14,6 +14,7 @@ import {
 	type TraceStore,
 } from "@exocortex/core";
 import { type CacheStats, createCacheStats } from "./cache-stats.ts";
+import { createProblems, type Problems } from "./problems.ts";
 
 export interface Runtime {
 	/**
@@ -37,6 +38,8 @@ export interface Runtime {
 	embedder: Embedder | undefined;
 	/** Prompt-cache use of the main agent and the sidecars this session (D-095). */
 	readonly cacheStats: CacheStats;
+	/** What went wrong this session: errors and modules' notes, for `/exo status` (D-106). */
+	readonly problems: Problems;
 	/** Live `/exo` toggles layered over config (brief §5.3 kill switches). */
 	readonly overrides: { allOff: boolean; modules: Record<string, Record<string, unknown>> };
 	/** Rebuilds the module instances whose settings a toggle changed (set by the module host). */
@@ -122,6 +125,7 @@ export function createRuntime(options: RuntimeOptions): Runtime {
 		engine: undefined,
 		embedder: undefined,
 		cacheStats: createCacheStats(),
+		problems: createProblems(),
 		overrides: { allOff: false, modules: {} },
 		rebuildModules: () => {},
 		disposeModules: async () => {},

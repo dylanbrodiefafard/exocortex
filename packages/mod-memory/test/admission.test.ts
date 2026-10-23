@@ -2,7 +2,6 @@ import "./home-guard.ts";
 import { describe, expect, it } from "vitest";
 import { refusalOf } from "../src/admission.ts";
 import { createEpisodeTracker, type FixEpisode } from "../src/episodes.ts";
-import { deterministicLesson } from "../src/learn.ts";
 import { shellEffect } from "../src/shell-effects.ts";
 import { openMemoryStore } from "../src/store.ts";
 import {
@@ -12,24 +11,22 @@ import {
 	editOf,
 	fail,
 	idle,
+	LESSON,
 	pass,
 	SETTLED,
 	setup,
 	signal,
 	until,
 	workspace,
-	writeOf,
 } from "./helpers.ts";
 
 const space = workspace();
 const tracker = () => createEpisodeTracker({ cwd: "/repo", minDetail: 0.6 });
 const cards = () => openMemoryStore(space.dbPath()).cards();
 const live = () => cards().filter((c) => c.validTo === null);
-const LESSON = { lesson: "Clone the value before pushing onto `self.stack` in lib.rs.", applies_when: "" };
-
-/** fail → the given steps → pass, with no sidecar: whatever is admitted becomes a deterministic card. */
+/** fail → the given steps → pass, with a sidecar that finds every fix worth a card. */
 async function attempt(steps: readonly ReturnType<typeof bash>[], command = "cargo test") {
-	const s = setup(space, { distill: false });
+	const s = setup(space, {}, { reply: () => LESSON });
 	s.memory.onToolResult?.(fail(command));
 	for (const step of steps) s.memory.onToolResult?.(step);
 	s.memory.onToolResult?.(pass(command));
@@ -79,18 +76,10 @@ describe("admission: a pass is not a fix whatever the edits were (M1)", () => {
 		).toBeUndefined();
 	});
 
-	it("stores no card when a shell command changed files between the failure and the pass", async () => {
-		for (const command of [
-			"git checkout -- src/",
-			"git stash",
-			"rm tests/flaky.rs",
-			"sed -i 's/3/4/' tests/stack.rs",
-			"pip install pyyaml",
-			"cargo fmt",
-			"echo 'fn main() {}' > src/main.rs",
-		]) {
+	it("stores no card when git put other code in place between the failure and the pass", async () => {
+		for (const command of ["git checkout -- src/", "git stash", "git reset --hard", "git pull", "git checkout main"]) {
 			const s = await attempt([edit, bash(command)]);
-			expect([command, s.reasons()]).toEqual([command, ["shell_change"]]);
+			expect([command, s.reasons()]).toEqual([command, ["code_replaced"]]);
 		}
 		expect(live()).toEqual([]);
 		// Looking around changes nothing.
@@ -98,22 +87,42 @@ describe("admission: a pass is not a fix whatever the edits were (M1)", () => {
 			edit,
 			bash("git diff && cat src/lib.rs | head -20"),
 			bash("grep -rn stack src > /dev/null"),
+			bash("rm -f /tmp/scratch.txt"),
 		]);
 		expect(read.actions()).toEqual(["learned"]);
 	});
 
-	it("tells commands that change files from ones that read and ones it cannot tell", () => {
+	it("shows the lesson sidecar the other commands that changed files, for it to judge (D-109)", async () => {
+		const s = setup(space, {}, { reply: () => LESSON });
+		s.memory.onToolResult?.(fail());
+		s.memory.onToolResult?.(edit);
+		for (const command of ["rm -rf build", "cargo fmt", "npm install", "echo 'fn main() {}' > src/main.rs"]) {
+			s.memory.onToolResult?.(bash(command));
+		}
+		s.memory.onToolResult?.(pass());
+		await until(() => s.actions().includes("learned"));
+		const prompt = String(s.t.requests[0]?.messages[0]?.["content"]);
+		expect(prompt).toContain("- rm -rf build (changed files)");
+		expect(prompt).toContain("- cargo fmt (changed files)");
+		expect(prompt).toContain("- npm install (changed files)");
+		expect(prompt).toContain("- echo 'fn main() {}' > src/main.rs (changed files)");
+	});
+
+	it("tells commands that replace code from ones that change files, ones that read and ones it cannot tell", () => {
 		const effect = (line: string) => shellEffect(line, "/repo");
+		for (const line of ["git restore .", "git -C sub reset --hard", "git stash", "git checkout main", "git pull"]) {
+			expect([line, effect(line)]).toEqual([line, "replaces"]);
+		}
 		for (const line of [
-			"git restore .",
-			"git -C sub reset --hard",
 			"mv a.rs b.rs",
+			"rm -rf build && cmake --build build",
 			"perl -pi -e 's/a/b/' x.rs",
 			"npm install left-pad",
 			"cd app && cargo add serde",
 			"npx prettier --write src",
 			"cat > src/gen.rs <<EOF\nfn x() {}\nEOF",
 			"cargo test 2>&1 | tee src/snapshot.rs",
+			"git clean -fd",
 		]) {
 			expect([line, effect(line)]).toEqual([line, "changes"]);
 		}
@@ -121,12 +130,15 @@ describe("admission: a pass is not a fix whatever the edits were (M1)", () => {
 			"ls -la",
 			"git status --short",
 			"git stash list",
+			"git checkout -b fix",
 			"sed -n '1,20p' src/lib.rs",
 			"cargo test 2>&1 | tail -20",
 			"cargo test > /tmp/out.txt 2>&1; tail /tmp/out.txt",
 			"cargo build 2>&1 | tee build.log",
 			"rg 'a > b' src",
 			"find . -name '*.rs' | wc -l",
+			"rm -f /tmp/x",
+			"cp /tmp/a /tmp/b",
 		]) {
 			expect([line, effect(line)]).toEqual([line, "reads"]);
 		}
@@ -149,7 +161,7 @@ describe("admission: a pass is not a fix whatever the edits were (M1)", () => {
 		s.memory.onToolResult?.(pass());
 		await until(() => s.t.requests.length > 0);
 		const prompt = String(s.t.requests[0]?.messages[0]?.["content"]);
-		expect(prompt).toContain("- python scripts/regen.py");
+		expect(prompt).toContain("- python scripts/regen.py\n");
 		expect(prompt).not.toContain("- ls");
 		expect(prompt).toMatch(/loosen/);
 	});
@@ -206,17 +218,6 @@ describe("the lesson and its gate (M2)", () => {
 		expect(s.actions()).toEqual(["learned", "merged"]);
 		expect(live()).toHaveLength(1);
 		expect(s.t.requests).toHaveLength(1);
-	});
-
-	it("names only the file when the fix rewrote it", () => {
-		expect(
-			deterministicLesson(episodeWith([{ path: "src/a.rs", before: "(file rewritten)", after: "fn main() {\n}" }])),
-		).toBe("Fixed before by rewriting src/a.rs");
-		const s = tracker();
-		s.observe(fail());
-		s.observe(writeOf("src/a.rs", "fn main() {}"));
-		const [episode] = s.observe(pass());
-		expect(episode && deterministicLesson(episode)).toBe("Fixed before by rewriting src/a.rs");
 	});
 });
 
@@ -315,7 +316,7 @@ describe("a wrong card can get out (M4)", () => {
 		const s = setup(space);
 		const [card] = live();
 		expect(await s.memory.command?.("cards")).toBe(
-			`${card?.id}. Fixed before by editing lib.rs: \`self.stack.push(x)\` → \`let v = x.clone(); self.stack.push(v)\` (for: error[E0502]: cannot borrow \`self.stack\` as mutable; files: lib.rs; seen 1×, shown 0×, helped 0×, hurt 0×)\n/exo memory forget card <id> removes one.`,
+			`${card?.id}. ${LESSON.lesson} (for: error[E0502]: cannot borrow \`self.stack\` as mutable; files: lib.rs; seen 1×, shown 0×, helped 0×, hurt 0×)\n/exo memory forget card <id> removes one.`,
 		);
 		expect(s.memory.command?.("forget card 999")).toBe("No card 999.");
 		expect(s.memory.command?.("forget card")).toBe("Usage: /exo memory forget card <id>");
@@ -340,18 +341,22 @@ describe("what a long route keeps (M11)", () => {
 		expect(edits.map((e) => e.after)).not.toContain("after 0");
 	});
 
-	it("forgets a failing command the agent did not run again for a long time", () => {
+	it("forgets a failing run the agent did not run again for many edits and runs, however long it looked around", () => {
 		const t = tracker();
 		t.observe(fail());
 		t.observe(edit);
 		for (let i = 0; i < 80; i++) t.observe(bash("ls"));
+		expect(t.observe(pass())).toHaveLength(1);
+		t.observe(fail());
+		t.observe(edit);
+		for (let i = 0; i < 41; i++) t.observe(pass("cargo test"));
 		expect(t.observe(pass())).toEqual([]);
 		// Running it again in between keeps it open.
 		t.observe(fail());
-		for (let i = 0; i < 40; i++) t.observe(bash("ls"));
+		for (let i = 0; i < 30; i++) t.observe(pass("cargo test"));
 		t.observe(fail());
 		t.observe(edit);
-		for (let i = 0; i < 40; i++) t.observe(bash("ls"));
+		for (let i = 0; i < 30; i++) t.observe(pass("cargo test"));
 		expect(t.observe(pass())).toHaveLength(1);
 	});
 });
@@ -359,6 +364,7 @@ describe("what a long route keeps (M11)", () => {
 function episodeWith(edits: FixEpisode["steps"][number]["edits"]): FixEpisode {
 	return {
 		command: "cargo test",
+		passCommand: "cargo test",
 		signature: "s",
 		errorLine: "e",
 		detail: [],

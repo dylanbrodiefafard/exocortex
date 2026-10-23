@@ -1,11 +1,12 @@
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type ToolResultDraft, ungroundedReferences } from "@exocortex/core";
+import type { ToolResultDraft } from "@exocortex/core";
 import { createTestModuleContext, type SidecarReply } from "@exocortex/testkit";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { parseSettings } from "../src/settings.ts";
-import { createTriage, dedupe, errorExcerpt, isBenign } from "../src/triage.ts";
+import { createTriage } from "../src/triage.ts";
 
 let dir: string;
 beforeEach(() => {
@@ -17,6 +18,10 @@ afterEach(() => rmSync(dir, { recursive: true, force: true }));
 const signal = new AbortController().signal;
 const RUST_ERROR =
 	"   Compiling forth\nerror[E0502]: cannot borrow `self.stack` as mutable\n  --> src/lib.rs:42:9\nerror: could not compile";
+const HINT = {
+	diagnosis: "The borrow of `self.stack` outlives the push in lib.rs.",
+	next_action: "Clone the value first.",
+};
 
 function draft(output: string, extra: Partial<ToolResultDraft> = {}): ToolResultDraft {
 	return {
@@ -33,7 +38,10 @@ function draft(output: string, extra: Partial<ToolResultDraft> = {}): ToolResult
 	};
 }
 
-function setup(settings: Record<string, unknown> = {}, reply?: (prompt: string) => SidecarReply) {
+function setup(
+	settings: Record<string, unknown> = {},
+	reply?: (prompt: string) => SidecarReply | Promise<SidecarReply>,
+) {
 	const t = createTestModuleContext({
 		cwd: dir,
 		...(reply ? { reply: (request) => reply(String(request.messages[0]?.["content"])) } : {}),
@@ -49,213 +57,199 @@ async function fail(triage: ReturnType<typeof createTriage>, d: ToolResultDraft)
 	return rewrite;
 }
 
+/** Waits for the late help sent so far to number `n`. */
+const sent = (t: { late: string[] }, n: number) => vi.waitFor(() => expect(t.late).toHaveLength(n));
+const logged = (t: { logs: string[] }, start: string) =>
+	vi.waitFor(() => expect(t.logs.some((l) => l.startsWith(start))).toBe(true));
+
 describe("triage", () => {
-	it("ignores successes and leaves a first failure alone when its error is near the top", async () => {
-		const { triage, t } = setup({}, () => ({ diagnosis: "x", next_action: "y" }));
+	it("says nothing on a first failure or a success, and asks no sidecar", async () => {
+		const { triage, t } = setup({}, () => HINT);
 		expect(await fail(triage, draft("ok", { isError: false, exitCode: 0 }))).toBeUndefined();
-		expect(await fail(triage, draft(RUST_ERROR))).toBeUndefined();
+		const noisy = `${Array.from({ length: 30 }, (_, i) => `note ${i}`).join("\n")}\n${RUST_ERROR}`;
+		expect(await fail(triage, draft(noisy))).toBeUndefined();
 		expect(t.requests).toEqual([]);
 	});
 
-	it("surfaces a buried first error at the top on the first failure", async () => {
-		const { triage } = setup();
-		const noisy = `${Array.from({ length: 30 }, (_, i) => `note ${i}`).join("\n")}\n${RUST_ERROR}`;
-		const rewrite = await fail(triage, draft(noisy));
-		expect(rewrite?.text.split("\n")[0]).toBe(
-			"[exo triage: first error (line 32 below): error[E0502]: cannot borrow `self.stack` as mutable]",
-		);
-		expect(rewrite?.note).toBe("surfaced the first error");
-	});
-
-	it("measures burial in the text the model sees, after earlier rewrites", async () => {
-		const { triage } = setup();
-		const noisy = `${Array.from({ length: 30 }, (_, i) => `note ${i}`).join("\n")}\n${RUST_ERROR}`;
-		expect(await fail(triage, draft(noisy, { current: RUST_ERROR }))).toBeUndefined();
-	});
-
-	it("on a repeat, appends a runtime notice and a grounded hint", async () => {
+	it("on the second sighting, adds nothing to the result and sends a diagnosis as late help (D-108)", async () => {
 		const prompts: string[] = [];
-		const { triage } = setup({}, (prompt) => {
+		const { triage, t } = setup({}, (prompt) => {
 			prompts.push(prompt);
-			return {
-				diagnosis: "The borrow of `self.stack` outlives the push in lib.rs.",
-				next_action: "Clone the value before mutating.",
-			};
+			return HINT;
 		});
 		triage.onUserTurn?.({ text: "implement forth", origin: "user" });
 		await fail(triage, draft(RUST_ERROR));
-		const second = draft(RUST_ERROR.replace("42:9", "57:3"));
-		const rewrite = await fail(triage, second);
-		expect(rewrite?.text.startsWith(RUST_ERROR.replace("42:9", "57:3"))).toBe(true);
-		expect(rewrite?.text).toContain(
-			"[exo triage: this failed again with the same errors as before (first: error[E0502]: cannot borrow `self.stack` as mutable); it has now failed this way 2 times.",
+		expect(await fail(triage, draft(RUST_ERROR.replace("42:9", "57:3")))).toBeUndefined();
+		await sent(t, 1);
+		expect(t.late[0]).toBe(
+			"[exo triage hint on `cargo build` (the same errors 2 times): The borrow of `self.stack` outlives the push in lib.rs. Clone the value first.]",
 		);
-		expect(rewrite?.text).toContain(
-			"[exo triage hint: The borrow of `self.stack` outlives the push in lib.rs. Clone the value before mutating.]",
-		);
-		expect(rewrite?.note).toBe("repeat 2 + hint");
 		expect(prompts[0]).toContain("implement forth");
 		expect(prompts[0]).toContain("- cargo build → exit 101");
 		expect(prompts[0]).toContain("the same errors 2 times");
+		expect(t.records).toContainEqual({
+			kind: "exo.action",
+			data: { action: "hint", toolCallId: "c1", reason: "the same errors 2 times" },
+		});
+		expect(t.progress).toEqual([]);
 		expect(triage.status?.()).toBe("triage (1 repeats, 1 hints)");
 	});
 
-	it("escalates at the loop threshold and caps hints per signature", async () => {
-		let calls = 0;
-		const { triage } = setup({ maxHintsPerSignature: 1 }, () => {
-			calls += 1;
-			return { diagnosis: "Still the borrow.", next_action: "Restructure it." };
-		});
+	it("never holds the result for the diagnosis, and a rerun waits for the one running", async () => {
+		const { triage, t } = setup({}, () => new Promise<SidecarReply>(() => undefined));
 		await fail(triage, draft(RUST_ERROR));
 		await fail(triage, draft(RUST_ERROR));
+		const started = Date.now();
 		const third = await fail(triage, draft(RUST_ERROR));
-		expect(third?.text).toContain("this has now failed 3 times");
-		expect(third?.text).toContain("stop retrying it");
-		expect(third?.text).not.toContain("hint:");
-		expect(calls).toBe(1);
+		expect(Date.now() - started).toBeLessThan(500);
+		expect(third?.note).toBe("repeat 3");
+		expect(t.requests).toHaveLength(1);
+		await triage.dispose?.();
 	});
 
-	it("asks for a hand-over to the user once the failure has outlived the loop warning", async () => {
+	it("warns at the loop threshold and asks for a hand-over at twice it", async () => {
 		const { triage } = setup({ sidecar: false });
 		const texts: string[] = [];
 		for (let i = 0; i < 6; i++) texts.push((await fail(triage, draft(RUST_ERROR)))?.text ?? "");
+		expect(texts[1]).toBe("");
+		expect(texts[2]).toContain(
+			"[exo triage: this has now failed 3 times with the same errors as before (first: error[E0502]: cannot borrow `self.stack` as mutable).",
+		);
+		expect(texts[2]).toContain("stop retrying it");
 		expect(texts[4]).toContain("this has now failed 5 times");
-		expect(texts[4]).toContain("stop retrying it");
 		expect(texts[5]).toContain(
 			"this has now failed 6 times with the same errors as before (first: error[E0502]: cannot borrow `self.stack` as mutable). Stop repeating it. If you cannot find a different approach, stop and tell the user what you tried and what is blocking you.]",
 		);
 	});
 
-	it("shows the second hint what the first one said, and drops it when it only repeats it", async () => {
+	it("shows the second diagnosis what the first said, and drops a hint that only repeats it", async () => {
 		const prompts: string[] = [];
-		const replies = [
-			{ diagnosis: "The borrow of `self.stack` outlives the push.", next_action: "Clone the value before mutating." },
-			{
-				diagnosis: "The borrow of `self.stack` outlives the push.",
-				next_action: "Clone the value before mutating it.",
-			},
-		];
 		const { triage, t } = setup({}, (prompt) => {
 			prompts.push(prompt);
-			return replies[prompts.length - 1] ?? {};
+			return { ...HINT, next_action: prompts.length === 1 ? HINT.next_action : "Clone the value first, please." };
 		});
 		await fail(triage, draft(RUST_ERROR));
-		expect((await fail(triage, draft(RUST_ERROR)))?.note).toBe("repeat 2 + hint");
-		const third = await fail(triage, draft(RUST_ERROR));
+		await fail(triage, draft(RUST_ERROR));
+		await sent(t, 1);
+		await fail(triage, draft(RUST_ERROR));
+		await logged(t, "dropped a hint that repeats");
 		expect(prompts[0]).toContain("Advice already given for this failure:\n(none)");
 		expect(prompts[1]).toContain(
-			"Advice already given for this failure:\n- The borrow of `self.stack` outlives the push. Clone the value before mutating.",
+			"Advice already given for this failure:\n- The borrow of `self.stack` outlives the push in lib.rs. Clone the value first.",
 		);
-		expect(third?.note).toBe("repeat 3");
-		expect(third?.text).not.toContain("hint:");
-		expect(t.logs).toContain("dropped a hint that repeats an earlier one");
-		// The dropped call still counts toward the cap: no third sidecar call.
+		expect(t.late).toHaveLength(1);
+		// The dropped hint was an answer: it counts toward the cap.
 		await fail(triage, draft(RUST_ERROR));
 		expect(prompts).toHaveLength(2);
 	});
 
-	it("keeps a second hint that says something new, and tells the sidecar which files were edited", async () => {
-		const prompts: string[] = [];
-		const replies = [
-			{ diagnosis: "The borrow of `self.stack` outlives the push.", next_action: "Clone the value before mutating." },
-			{ diagnosis: "The iterator still holds `self.stack`.", next_action: "Collect the items into a Vec first." },
-		];
-		const { triage, t } = setup({}, (prompt) => {
-			prompts.push(prompt);
-			return replies[prompts.length - 1] ?? {};
+	it("gives back the allowance of a call that ended without an answer (D-108)", async () => {
+		let calls = 0;
+		const { triage, t } = setup({ maxHintsPerSignature: 1 }, () => {
+			calls += 1;
+			return calls === 1 ? new Error("down") : HINT;
 		});
 		await fail(triage, draft(RUST_ERROR));
-		expect(t.progress).toEqual([]);
 		await fail(triage, draft(RUST_ERROR));
-		triage.onToolResult?.({ toolName: "edit", input: { path: "lib.rs" }, isError: false, exitCode: null, output: "" });
-		const third = await fail(triage, draft(RUST_ERROR));
-		expect(third?.note).toBe("repeat 3 + hint");
-		expect(third?.text).toContain("Collect the items into a Vec first.");
-		expect(t.progress).toEqual(["Diagnosing the repeated failure…", "Diagnosing the repeated failure…"]);
-		expect(prompts[1]).toContain("- edit lib.rs → ok");
+		await logged(t, "diagnosis error");
+		await fail(triage, draft(RUST_ERROR));
+		await sent(t, 1);
+		expect(calls).toBe(2);
 	});
 
-	it("drops hints naming files or symbols absent from the evidence and workspace", async () => {
-		const { triage, t } = setup({}, () => ({
-			diagnosis: "The bug is in `parser_state` of src/parser.rs.",
-			next_action: "Fix it.",
-		}));
+	it("drops a hint over a name found nowhere and says which; a name in the workspace's code is fine (D-108)", async () => {
+		writeFileSync(join(dir, "stack.rs"), "fn parser_state() {}\n");
+		// Untracked files are searched too.
+		execFileSync("git", ["init", "-q"], { cwd: dir });
+		const replies = [
+			{ diagnosis: "The bug is in `lexer_state` of src/parser.rs.", next_action: "Fix it." },
+			{ diagnosis: "`parser_state` in stack.rs resets the stack.", next_action: "Keep it." },
+		];
+		let asked = 0;
+		const { triage, t } = setup({}, () => replies[asked++] ?? {});
 		await fail(triage, draft(RUST_ERROR));
-		const rewrite = await fail(triage, draft(RUST_ERROR));
-		expect(rewrite?.text).not.toContain("hint:");
-		expect(rewrite?.note).toBe("repeat 2");
-		expect(t.logs.some((l) => l.includes("parser_state") && l.includes("src/parser.rs"))).toBe(true);
+		await fail(triage, draft(RUST_ERROR));
+		await logged(t, "dropped a hint naming");
+		expect(t.logs.find((l) => l.startsWith("dropped a hint naming"))).toContain("`lexer_state`, `src/parser.rs`");
+		await fail(triage, draft(RUST_ERROR));
+		await sent(t, 1);
+		expect(t.late[0]).toContain("`parser_state` in stack.rs resets the stack.");
 	});
 
-	it("degrades to the notice when the sidecar fails, is empty, is disabled or has no engine", async () => {
+	it("says nothing more when the sidecar is off, has no engine, or answers nothing", async () => {
 		for (const [settings, reply] of [
-			[{}, new Error("down")],
+			[{ sidecar: false }, HINT],
 			[{}, { diagnosis: "", next_action: "" }],
-			[{ sidecar: false }, { diagnosis: "a", next_action: "b" }],
 		] as const) {
-			const { triage } = setup(settings, () => reply);
+			const { triage, t } = setup(settings, () => reply);
 			await fail(triage, draft(RUST_ERROR));
-			expect((await fail(triage, draft(RUST_ERROR)))?.note).toBe("repeat 2");
+			expect(await fail(triage, draft(RUST_ERROR))).toBeUndefined();
+			await new Promise((resolve) => setTimeout(resolve, 30));
+			expect(t.late).toEqual([]);
 		}
 		const { triage } = setup();
 		await fail(triage, draft(RUST_ERROR));
-		expect((await fail(triage, draft(RUST_ERROR)))?.note).toBe("repeat 2");
+		expect(await fail(triage, draft(RUST_ERROR))).toBeUndefined();
 	});
 
-	it("goes on counting through a continuation and through a message from the user (D-082)", async () => {
-		const { triage } = setup({ sidecar: false });
-		await fail(triage, draft(RUST_ERROR));
-		triage.onUserTurn?.({ text: "keep going", origin: "extension" });
-		expect((await fail(triage, draft(RUST_ERROR)))?.note).toBe("repeat 2");
-		triage.onUserTurn?.({ text: "something else", origin: "user" });
-		expect((await fail(triage, draft(RUST_ERROR)))?.note).toBe("repeat 3");
-	});
-
-	it("treats a different error as a new failure", async () => {
-		const { triage } = setup({ sidecar: false });
+	it("treats a different error, fewer failing tests or another message as a new failure (D-073)", async () => {
+		const { triage, t } = setup({}, () => HINT);
 		await fail(triage, draft(RUST_ERROR));
 		expect(await fail(triage, draft("error[E0308]: mismatched types"))).toBeUndefined();
-	});
-
-	it("does not call fewer failing tests, or a different message, a repeat (D-073)", async () => {
-		const { triage, t } = setup({}, () => ({ diagnosis: "x", next_action: "y" }));
-		const run = (failing: readonly string[], message = "left: 1") =>
+		const run = (failing: readonly string[]) =>
 			draft(
 				[
 					...failing.map((name) => `test ${name} ... FAILED`),
-					`thread 'a' (4242) panicked at src/lib.rs:9:5:\n  ${message}`,
+					"thread 'a' (4242) panicked at src/lib.rs:9:5:\n  left: 1",
 					"error: test failed, to rerun pass `--lib`",
 				].join("\n"),
 				{ input: { command: "cargo test" } },
 			);
-		expect(await fail(triage, run(["a", "b", "c"]))).toBeUndefined();
-		// One test fixed: every run still ends in the same cargo line, but the failure moved.
-		expect(await fail(triage, run(["a", "b"]))).toBeUndefined();
-		expect(await fail(triage, run(["a"]))).toBeUndefined();
+		await fail(triage, run(["a", "b", "c"]));
+		await fail(triage, run(["a", "b"]));
+		await fail(triage, run(["a"]));
 		expect(t.requests).toEqual([]);
 		expect(triage.status?.()).toBe("triage");
-		// Back to a failure seen before (an edit was undone): that is a repeat, and said to be a return.
-		const back = await fail(triage, run(["a", "b"]));
-		expect(back?.text).toContain("this failed with the same errors as an earlier run");
 	});
 
-	it("ignores line numbers, run times and thread ids when comparing failures", async () => {
-		const { triage } = setup({ sidecar: false });
-		const run = (line: number, id: number, time: string) =>
+	it("ignores line numbers, run times, thread ids and sanitizer pids when comparing failures", async () => {
+		const { triage } = setup({ sidecar: false, loopThreshold: 2 });
+		const go = (line: number, id: number, time: string) =>
 			draft(
 				`--- FAIL: TestSteps (${time}s)\nthread 'a' (${id}) panicked at src/lib.rs:${line}:5:\nFAIL\tpkg\t${time}s`,
 			);
-		await fail(triage, run(9, 100, "0.01"));
-		expect((await fail(triage, run(14, 2077, "0.32")))?.note).toBe("repeat 2");
+		await fail(triage, go(9, 100, "0.01"));
+		expect((await fail(triage, go(14, 2077, "0.32")))?.note).toBe("repeat 2");
+		const asan = (pid: number) =>
+			draft(
+				`./build/t\n==${pid}==ERROR: AddressSanitizer: heap-use-after-free on address 0x60200000eff0\nSUMMARY: AddressSanitizer: heap-use-after-free src/manifest.cpp:52 in parse\nmake: *** [Makefile:24: test] Error 1`,
+				{ input: { command: "make test" }, exitCode: 2 },
+			);
+		await fail(triage, asan(4242));
+		expect((await fail(triage, asan(77)))?.note).toBe("repeat 2");
 	});
 
-	it("names the edited files a failure outlived, and shows the sidecar the edits and the code", async () => {
+	it("does not take two failures under `make` for one because make's own line is the same (D-108)", async () => {
+		const { triage } = setup({ sidecar: false, loopThreshold: 2 });
+		const make = (body: string) =>
+			draft(`./build/test_graph\n${body}\nmake: *** [Makefile:24: test] Error 1`, {
+				input: { command: "make test" },
+				exitCode: 2,
+			});
+		await fail(triage, make("check failed: order mismatch, expected a,b got b,a"));
+		const crash = make(
+			"==1==ERROR: AddressSanitizer: heap-use-after-free on address 0x1\nSUMMARY: AddressSanitizer: heap-use-after-free src/x.cpp:52 in f",
+		);
+		expect(await fail(triage, crash)).toBeUndefined();
+	});
+
+	it("names the edited files a failure outlived, and shows the isolated diagnosis the edits, the code and the output", async () => {
 		writeFileSync(
 			join(dir, "calc.py"),
 			["def add(a, b):", "    return a - b", "", "def sub(a, b):", "    return a - b"].join("\n"),
 		);
 		const prompts: string[] = [];
-		const { triage } = setup({}, (prompt) => {
+		const { triage, t } = setup({}, (prompt) => {
 			prompts.push(prompt);
 			return { diagnosis: "`add` subtracts in calc.py.", next_action: "Change line 2 of calc.py to add." };
 		});
@@ -271,12 +265,14 @@ describe("triage", () => {
 			exitCode: null,
 			output: "ok",
 		});
-		const rewrite = await fail(triage, failure);
-		expect(rewrite?.text).toContain("The edits made since (calc.py) did not change it.");
-		expect(rewrite?.text).toContain("[exo triage hint: `add` subtracts in calc.py.");
+		await fail(triage, failure);
+		await sent(t, 1);
+		const third = await fail(triage, failure);
+		expect(third?.text).toContain("The edits made since (calc.py) did not change it.");
 		expect(prompts[0]).toContain("calc.py\n- def sub(a, b):\n+ def sub(a: int, b: int):");
-		expect(prompts[0]).toContain("calc.py (line 2):\n     1 | def add(a, b):\n>    2 |     return a - b");
+		expect(prompts[0]).toContain("calc.py (lines 1-5):\n     1 | def add(a, b):\n>    2 |     return a - b");
 		expect(prompts[0]).not.toContain("case.py (line");
+		expect(prompts[0]).toContain('File "/usr/lib/python3/unittest/case.py", line 58, in run');
 	});
 
 	it("counts a test run that failed behind a pipe, and says whose exit code was shown", async () => {
@@ -285,61 +281,111 @@ describe("triage", () => {
 		const failing = "test parse ... FAILED\nerror: test failed, to rerun pass `--lib`";
 		const { triage } = setup({ sidecar: false });
 		expect(await fail(triage, piped("test result: ok. 4 passed"))).toBeUndefined();
-		expect(await fail(triage, piped(failing))).toBeUndefined();
-		const again = await fail(triage, piped(failing));
-		expect(again?.text).toContain("this failed again with the same errors as before (first: test parse ... FAILED)");
-		expect(again?.text).toContain("The exit code shown is the pipe's last command's, not this run's.");
+		await fail(triage, piped(failing));
+		await fail(triage, piped(failing));
+		const third = await fail(triage, piped(failing));
+		expect(third?.text).toContain(
+			"this has now failed 3 times with the same errors as before (first: test parse ... FAILED)",
+		);
+		expect(third?.text).toContain("The exit code shown is the pipe's last command's, not this run's.");
 
 		const off = setup({ sidecar: false, maskedFailures: false }).triage;
-		await fail(off, piped(failing));
-		expect(await fail(off, piped(failing))).toBeUndefined();
+		for (let i = 0; i < 2; i++) expect(await fail(off, piped(failing))).toBeUndefined();
 	});
 
-	it("skips benign exit codes (no grep match) and counts non-error failures with no error line", async () => {
+	it("skips benign exit codes (no grep match) and counts failures with no error line", async () => {
 		const { triage } = setup({ sidecar: false });
 		const grep = draft("", { input: { command: "cd src && grep -rn foo ." }, exitCode: 1 });
-		expect(await fail(triage, grep)).toBeUndefined();
-		expect(await fail(triage, grep)).toBeUndefined();
+		for (let i = 0; i < 2; i++) expect(await fail(triage, grep)).toBeUndefined();
 		const silent = draft("nothing useful", { input: { command: "./run.sh" }, exitCode: 3, isError: false });
 		await fail(triage, silent);
-		const rewrite = await fail(triage, silent);
-		expect(rewrite?.text).toContain("this failed again the same way");
+		await fail(triage, silent);
+		expect((await fail(triage, silent))?.text).toContain("this has now failed 3 times the same way as before");
 	});
 
-	it("at the loop threshold, lists distinct grounded hypotheses from parallel angles", async () => {
-		const prompts: string[] = [];
-		const answers = [
-			{ hypothesis: "The borrow of `self.stack` in lib.rs outlives the push.", check: "Read lib.rs around line 42." },
-			{ hypothesis: "The borrow of `self.stack` in lib.rs outlives the push call.", check: "Read lib.rs." },
-			{
-				hypothesis: "Cargo builds a stale target; the error is from an old build.",
-				check: "Run cargo clean then cargo build.",
-			},
-			{ hypothesis: "The bug is in `ghost_module` instead.", check: "Open src/ghost.rs." },
-		];
-		const { triage } = setup({ hypotheses: 4, sidecar: false }, (prompt) => {
-			prompts.push(prompt);
-			return prompt.includes("Angle:") ? (answers[prompts.filter((p) => p.includes("Angle:")).length - 1] ?? {}) : {};
+	describe("a run that is not converging (D-108)", () => {
+		const pytest = (failing: readonly string[], value: number, command = "pytest -q") =>
+			draft(
+				[
+					...failing.map((name) => `FAILED tests/test_meal.py::${name} - assert ${value} == 4`),
+					`=== ${failing.length} failed, 9 passed in 0.${value}s ===`,
+				].join("\n"),
+				{ input: { command }, exitCode: 1 },
+			);
+
+		it("says so once when the same tests keep failing with other messages, and asks for a diagnosis", async () => {
+			const prompts: string[] = [];
+			writeFileSync(join(dir, "meal.py"), "def plan_week(): pass\n");
+			const { triage, t } = setup({}, (prompt) => {
+				prompts.push(prompt);
+				return { diagnosis: "`plan_week` returns nothing.", next_action: "Read the test first." };
+			});
+			const rewrites: Awaited<ReturnType<typeof fail>>[] = [];
+			for (let value = 1; value <= 6; value++)
+				rewrites.push(await fail(triage, pytest(["test_total", "test_days"], value)));
+			expect(rewrites.map((r) => r?.note)).toEqual([
+				undefined,
+				undefined,
+				undefined,
+				"not converging ×4",
+				undefined,
+				undefined,
+			]);
+			expect(rewrites[3]?.text).toContain(
+				"[exo triage: 4 runs since this last passed, and the same tests still fail (tests/test_meal.py::test_days, tests/test_meal.py::test_total): the messages change but none is fixed. Step back and find the cause before the next edit.]",
+			);
+			await sent(t, 1);
+			expect(t.late[0]).toBe(
+				"[exo triage hint on `pytest -q` (4 failing runs, the same tests failing each time): `plan_week` returns nothing. Read the test first.]",
+			);
+			expect(prompts[0]).toContain("has failed 4 times in a row since it last passed");
+			expect(triage.status?.()).toBe("triage (0 repeats, 1 hints, 1 not converging)");
 		});
-		for (let i = 0; i < 2; i++) await fail(triage, draft(RUST_ERROR));
-		const third = await fail(triage, draft(RUST_ERROR));
-		expect(prompts.filter((p) => p.includes("Angle:"))).toHaveLength(4);
-		expect(new Set(prompts.map((p) => /Angle: (.*)/.exec(p)?.[1])).size).toBe(4);
-		expect(third?.text).toContain("[exo triage: possible causes to check before the next attempt (unverified):");
-		expect(third?.text).toContain(
-			"1. The borrow of `self.stack` in lib.rs outlives the push. Check: Read lib.rs around line 42.",
-		);
-		expect(third?.text).toContain("2. Cargo builds a stale target");
-		expect(third?.text).not.toContain("ghost");
-		expect(third?.note).toBe("repeat 3 + 2 hypotheses");
-		// Asked once per failure.
-		expect((await fail(triage, draft(RUST_ERROR)))?.note).toBe("repeat 4");
-	});
 
-	it("falls back to the plain notice when fewer than two hypotheses survive", async () => {
-		const { triage } = setup({ hypotheses: 2, sidecar: false }, () => ({ hypothesis: "", check: "" }));
-		for (let i = 0; i < 2; i++) await fail(triage, draft(RUST_ERROR));
-		expect((await fail(triage, draft(RUST_ERROR)))?.note).toBe("repeat 3");
+		it("starts over when a test is fixed, and after a pass of any spelling of the tests", async () => {
+			const { triage } = setup({ sidecar: false });
+			const notes: (string | undefined)[] = [];
+			const run = async (d: ToolResultDraft) => notes.push((await fail(triage, d))?.note);
+			await run(pytest(["a", "b"], 1));
+			await run(pytest(["a", "b"], 2));
+			await run(pytest(["a", "b"], 3));
+			// `b` is fixed: progress.
+			await run(pytest(["a", "c"], 4));
+			await run(pytest(["a", "c"], 5));
+			await run(pytest(["a", "c"], 6));
+			await run(draft("10 passed in 0.5s", { input: { command: "python -m pytest -x" }, isError: false, exitCode: 0 }));
+			await run(pytest(["a", "c"], 7));
+			await run(pytest(["a", "c"], 8));
+			await run(pytest(["a", "c"], 9));
+			expect(notes.every((n) => n === undefined)).toBe(true);
+			expect((await fail(triage, pytest(["a", "c"], 10)))?.note).toBe("not converging ×4");
+		});
+
+		it("sees a test fixed past the first 64 of many (D-108 amendment)", async () => {
+			const { triage } = setup({ sidecar: false });
+			const names = Array.from({ length: 100 }, (_, i) => `t${String(i).padStart(3, "0")}`);
+			const notes: (string | undefined)[] = [];
+			for (let run = 0; run < 5; run++) {
+				// One more of the last tests fixed each run.
+				notes.push((await fail(triage, pytest(names.slice(0, 100 - run), run + 1)))?.note);
+			}
+			expect(notes.every((n) => n === undefined)).toBe(true);
+		});
+
+		it("gives only the repeat notice when both apply", async () => {
+			const { triage } = setup({ sidecar: false });
+			const notes: (string | undefined)[] = [];
+			for (let i = 0; i < 5; i++) notes.push((await fail(triage, pytest(["a"], 1)))?.note);
+			expect(notes).toEqual([undefined, undefined, "repeat 3", "repeat 4", "repeat 5"]);
+		});
+
+		it("ignores runs that name no test or error site", async () => {
+			const { triage } = setup({ sidecar: false });
+			for (let i = 0; i < 6; i++) {
+				const out = draft(`something went wrong: ${i}`, { input: { command: "make test" }, exitCode: 2 });
+				expect(await fail(triage, out)).toBeUndefined();
+			}
+		});
 	});
 
 	describe("loops without an error (D-069)", () => {
@@ -348,7 +394,7 @@ describe("triage", () => {
 			draft(output, { toolName: "read", input: { path }, isError: false, exitCode: null });
 
 		it("says once that the same call keeps returning the same result, then asks for a hand-over", async () => {
-			const { triage, t } = setup({}, () => ({ diagnosis: "x", next_action: "y" }));
+			const { triage, t } = setup({}, () => HINT);
 			const results: Awaited<ReturnType<typeof fail>>[] = [];
 			for (let i = 0; i < 7; i++) results.push(await fail(triage, read("src/lib.rs", "fn main() {} // same")));
 			expect(results.map((r) => r?.note)).toEqual([
@@ -396,8 +442,8 @@ describe("triage", () => {
 				notes.push((await fail(triage, edit()))?.note);
 				notes.push((await fail(triage, draft(RUST_ERROR)))?.note);
 			}
-			// The failing build gets the repeated-error notices; the loop is named on the next edit.
-			expect(notes).toEqual([undefined, undefined, undefined, "repeat 2", undefined, "repeat 3"]);
+			// The failing build gets the repeated-error notice; the loop is named on the next edit.
+			expect(notes).toEqual([undefined, undefined, undefined, undefined, undefined, "repeat 3"]);
 			const next = await fail(triage, edit());
 			expect(next?.note).toBe("no progress ×3 (cycle of 2)");
 			expect(next?.text).toContain(
@@ -436,73 +482,6 @@ describe("triage", () => {
 	it("reports invalid settings", () => {
 		const { t } = setup({ loopThreshold: 1 });
 		expect(t.logs.some((l) => l.startsWith("triage /loopThreshold"))).toBe(true);
-	});
-});
-
-describe("dedupe", () => {
-	it("keeps the first of near-identical hypotheses", () => {
-		const h = (hypothesis: string) => ({ hypothesis, check: "c" });
-		expect(
-			dedupe([
-				h("the parser drops the last token"),
-				h("the parser drops the last token silently"),
-				h("an env var is missing"),
-			]).map((x) => x.hypothesis),
-		).toEqual(["the parser drops the last token", "an env var is missing"]);
-	});
-});
-
-describe("isBenign", () => {
-	const settings = parseSettings({}).settings;
-	const of = (command: string, exitCode: number | null = 1) =>
-		isBenign({ exitCode, input: { command }, toolName: "bash" }, settings);
-	it("matches the last step's command word only for exit code 1", () => {
-		expect(of("grep -q x file")).toBe(true);
-		expect(of("LC_ALL=C rg foo")).toBe(true);
-		expect(of("make && git diff --exit-code")).toBe(true);
-		expect(of("grep x file", 2)).toBe(false);
-		expect(of("grepx file")).toBe(false);
-		expect(of("grep x file && make")).toBe(false);
-		// Core's rule (D-077): the command that set the exit code, read as the shell reads the line.
-		expect(of("cat build.log | grep -c ERROR")).toBe(true);
-		expect(of("echo 'x; grep' && make")).toBe(false);
-		expect(of("cd src &&\n  grep -rn TODO .")).toBe(true);
-		expect(isBenign({ exitCode: 1, input: {}, toolName: "read" }, settings)).toBe(false);
-	});
-});
-
-describe("errorExcerpt", () => {
-	it("keeps the first error with context and the tail, marking gaps", () => {
-		const lines = Array.from({ length: 60 }, (_, i) => `line ${i}`);
-		lines[30] = "error: boom";
-		const excerpt = errorExcerpt(lines.join("\n")).split("\n");
-		expect(excerpt[0]).toBe("line 28");
-		expect(excerpt).toContain("error: boom");
-		expect(excerpt).toContain("[…]");
-		expect(excerpt.at(-1)).toBe("line 59");
-	});
-	it("marks an excerpt that lost its end to the size limit (D-089)", () => {
-		const lines = Array.from({ length: 30 }, (_, i) => `line ${i} ${"x".repeat(290)}`);
-		lines[5] = "error: boom";
-		const excerpt = errorExcerpt(lines.join("\n"));
-		expect(excerpt.endsWith("\n[…]")).toBe(true);
-		expect(excerpt).toContain("error: boom");
-	});
-	it("starts at the top when there is no error line", () => {
-		expect(errorExcerpt("a\nb")).toBe("a\nb");
-	});
-});
-
-describe("ungroundedReferences", () => {
-	it("accepts references found in the evidence or the workspace", () => {
-		expect(
-			ungroundedReferences("Fix `self.stack` in src/lib.rs:42 and lib.rs.", "src/lib.rs:42:9 `self.stack`", dir),
-		).toEqual([]);
-	});
-	it("flags invented paths and identifiers, but not commands", () => {
-		expect(ungroundedReferences("Edit src/nope.rs and `ghost_fn`, then run `cargo test`.", "", dir)).toEqual([
-			"ghost_fn",
-			"src/nope.rs",
-		]);
+		expect(parseSettings({}).problems).toEqual([]);
 	});
 });

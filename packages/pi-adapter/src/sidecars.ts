@@ -4,7 +4,6 @@ import {
 	createOpenAIClient,
 	createSidecarPool,
 	type EngineFallback,
-	moduleLimitsFrom,
 	resolveEmbeddings,
 	resolveEngine,
 	type SidecarPool,
@@ -50,6 +49,12 @@ export function shutdownDrainMs(env: Readonly<Record<string, string | undefined>
 }
 
 /**
+ * Modules whose main work is a model's: without an engine they do nothing at all. Compaction is
+ * not one: without an engine it adds its facts to pi's own summary (D-111).
+ */
+const NEEDS_ENGINE = ["supervisor"] as const;
+
+/**
  * Owns the sidecar pool's lifecycle for each pi session (brief §5.2):
  * - built at `session_start` (and on `model_select` when the engine follows the main model): the
  *   new pool replaces the old one in one step, so modules never find the pool missing in between;
@@ -83,7 +88,6 @@ export function registerSidecars(pi: ExtensionAPI, options: SidecarOptions): voi
 				client: createOpenAIClient(target),
 				target,
 				config: config.pool,
-				moduleLimits: moduleLimitsFrom(config.modules),
 				onRecord: (record) => {
 					runtime.cacheStats.addSidecar(record);
 					runtime.traceSession?.recordSidecarCall(record);
@@ -98,7 +102,13 @@ export function registerSidecars(pi: ExtensionAPI, options: SidecarOptions): voi
 			: undefined;
 		previous?.close();
 		if (config.enabled && !target) {
-			onError("sidecars", "no sidecar engine (set engine.baseUrl/model, or use an openai-completions main model)");
+			const why = "no sidecar engine (set engine.baseUrl/model, or use an openai-completions main model)";
+			onError("sidecars", why);
+			// Modules whose work is a model's would otherwise do nothing, silently (D-106).
+			const on = NEEDS_ENGINE.filter((id) => config.modules[id]?.enabled === true);
+			if (on.length > 0 && ctx.hasUI) {
+				ctx.ui.notify(`Exocortex: ${why}. ${on.join(" and ")} cannot work without one.`, "warning");
+			}
 		}
 	}
 
@@ -115,7 +125,11 @@ export function registerSidecars(pi: ExtensionAPI, options: SidecarOptions): voi
 
 	pi.on(
 		"session_start",
-		guarded("sidecars.session_start", (_event, ctx) => rebuild(ctx)),
+		guarded("sidecars.session_start", (_event, ctx) => {
+			// A new session's problems start from none (D-106).
+			runtime.problems.clear();
+			return rebuild(ctx);
+		}),
 	);
 	pi.on(
 		"model_select",

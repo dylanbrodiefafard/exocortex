@@ -24,7 +24,7 @@ Developer's request:
 {{uses}}
 >>>
 
-The change to {{file}} (`git diff` with each changed function shown whole; lines starting with `+` were added, `-` removed):
+{{diff_label}} (`git diff` with each changed function shown whole; lines starting with `+` were added, `-` removed):
 <<<
 {{diff}}
 >>>

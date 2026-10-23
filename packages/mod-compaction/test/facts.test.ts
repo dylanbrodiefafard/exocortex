@@ -60,6 +60,7 @@ function request(extra: Partial<CompactionRequest> = {}): CompactionRequest {
 		filesRead: [],
 		filesModified: [],
 		tokensBefore: 120_000,
+		contextWindow: null,
 		customInstructions: null,
 		fork: null,
 		conversationSince: () => "",
@@ -282,9 +283,10 @@ describe("K1: facts survive a second compaction and a rebuilt module", () => {
 		expect(section(first.summary, REQUESTS)).toBe("1. go\n2. Not done yet. 1. Add the README");
 	});
 
-	it("keeps the requests through a compaction the harness wrote itself", async () => {
-		const s = setup({ settings: { fallback: "harness" }, reply: () => new Error("down") });
-		expect(await s.module.compact?.(request({ userMessages: ["first"] }), signal)).toBeUndefined();
+	it("keeps the requests through a compaction the harness wrote itself, without the facts", async () => {
+		const s = setup({ reply: () => new Error("down") });
+		// Offered for after the harness's summary (D-111), and not used.
+		expect(await s.module.compact?.(request({ userMessages: ["first"] }), signal)).toMatchObject({ part: "facts" });
 		s.module.onCompacted?.();
 		const rebuilt = setup({ savedState: s.t.states.at(-1) ?? null });
 		const second = await compacted(
@@ -294,11 +296,10 @@ describe("K1: facts survive a second compaction and a rebuilt module", () => {
 		expect(section(second.summary, REQUESTS)).toBe("1. first\n2. second");
 		// A compaction that never happened leaves nothing behind.
 		let calls = 0;
-		const failed = setup({
-			settings: { fallback: "harness" },
-			reply: () => (calls++ === 0 ? new Error("down") : NARRATIVE),
+		const failed = setup({ reply: () => (calls++ === 0 ? new Error("down") : NARRATIVE) });
+		expect(await failed.module.compact?.(request({ userMessages: ["lost?"] }), signal)).toMatchObject({
+			part: "facts",
 		});
-		expect(await failed.module.compact?.(request({ userMessages: ["lost?"] }), signal)).toBeUndefined();
 		const again = await compacted(failed.module, request({ userMessages: ["lost?", "more"] }));
 		expect(section(again.summary, REQUESTS)).toBe("1. lost?\n2. more");
 	});
@@ -460,8 +461,7 @@ describe("K4: a name that cannot be verified is marked, not deleted with its ste
 		// `tests/` does not exist: the name stays, said to be unverified.
 		expect(summary).toContain("2. Add tests/parser_test.rs and `notes.md` [unverified: tests/parser_test.rs]");
 		expect(summary).toContain("Names marked [unverified]");
-		expect(s.t.logs).toContain("unverified in the summary: tests/parser_test.rs");
-		expect(s.t.records[0]?.data).toMatchObject({ unverified: 1 });
+		expect(s.t.records[0]?.data).toMatchObject({ unverified: 1, unverifiedNames: ["tests/parser_test.rs"] });
 	});
 
 	it("keeps a bullet outside the next steps, marking only the name found nowhere", async () => {
@@ -589,14 +589,14 @@ describe("K5: budgets", () => {
 		const first = await compacted(setup().module, request({ userMessages: long }));
 		const kept = keptFacts(first).requests;
 		expect(kept).toHaveLength(100);
-		expect(kept.join("").length).toBeLessThan(61_000);
+		expect(kept.join("").length).toBeLessThan(121_000);
 		expect(kept[0]).toBe(long[0]);
 		expect(kept[1]).toBe("long 2 …");
 		expect(kept.at(-1)).toBe(long.at(-1));
 		const short = Array.from({ length: 3_000 }, (_, i) => `short ${i + 1} ${"s".repeat(90)}`);
 		const second = await compacted(setup().module, next(first, { userMessages: short }));
 		const facts = keptFacts(second);
-		expect(facts.requests.join("").length).toBeLessThan(61_000);
+		expect(facts.requests.join("").length).toBeLessThan(121_000);
 		expect(facts.requests.length + facts.requestsOmitted).toBe(3_100);
 		expect(facts.requests[0]).toBe(long[0]);
 		const lines = (section(second.summary, REQUESTS) ?? "").split("\n");
@@ -697,11 +697,11 @@ describe("K6: files modified, from the tools and from git", () => {
 	it("keeps the files the tools changed first when the list is cut", async () => {
 		await repo({ "a.txt": "one\n" });
 		const s = await started(setup());
-		for (let i = 0; i < 60; i++) writeFileSync(join(dir, `gen-${String(i).padStart(2, "0")}.txt`), "x\n");
+		for (let i = 0; i < 120; i++) writeFileSync(join(dir, `gen-${String(i).padStart(3, "0")}.txt`), "x\n");
 		tools(s.module).write("zz-last.txt");
-		renameSync(join(dir, "gen-00.txt"), join(dir, "zz-last.txt"));
+		renameSync(join(dir, "gen-000.txt"), join(dir, "zz-last.txt"));
 		const lines = (section((await compacted(s.module, request())).summary, MODIFIED) ?? "").split("\n");
-		expect(lines).toHaveLength(41);
+		expect(lines).toHaveLength(101);
 		expect(lines).toContain("- zz-last.txt (new)");
 		expect(lines.at(-1)).toBe("- … and 20 more");
 	});

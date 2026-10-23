@@ -1,3 +1,5 @@
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import type {
 	CompactionRequest,
 	ExoModule,
@@ -10,8 +12,8 @@ import type {
 	ToolRewrite,
 	UserTurn,
 } from "@exocortex/core";
-import { afterEach, describe, expect, it } from "vitest";
-import { registerModuleHost } from "../src/modules.ts";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { type ModuleHostOptions, registerModuleHost } from "../src/modules.ts";
 import { type AdapterHarness, createAdapterHarness } from "./harness.ts";
 
 interface Probe {
@@ -76,6 +78,7 @@ function setup(
 	options: {
 		hasUI?: boolean;
 		budgetsMs?: { rewrite?: number; toolCall?: number; settle?: number; compact?: number; userTurn?: number };
+		host?: Pick<ModuleHostOptions, "harnessSummary" | "piCompactionSettings">;
 	} = {},
 ) {
 	harness = createAdapterHarness({ modules: enabled }, options);
@@ -86,6 +89,7 @@ function setup(
 		log: (message) => logs.push(message),
 		modules,
 		...(options.budgetsMs ? { budgetsMs: options.budgetsMs } : {}),
+		...options.host,
 	});
 	return { h: harness, logs };
 }
@@ -142,9 +146,14 @@ describe("module host", () => {
 		await h.pi.emit("session_start");
 		const result = await h.pi.emit("agent_before_settle", settleEvent("all good"));
 		expect(result).toBeUndefined();
-		expect(a.settles).toEqual([{ outcome: "completed", lastAssistantText: "all good" }]);
+		expect(a.settles).toEqual([{ outcome: "completed", lastAssistantText: "all good", assistantTexts: ["all good"] }]);
 		expect(h.pi.ui).toContainEqual({ method: "setEditorText", args: ["run the tests"] });
-		expect(h.pi.ui.some((c) => c.method === "notify" && String(c.args[0]).includes("tests not run"))).toBe(true);
+		// The editor and the status line say it; no notification on top (D-106).
+		expect(h.pi.ui).toContainEqual({
+			method: "setStatus",
+			args: ["exo", "exo: tests not run (follow-up in the editor: Enter sends it)"],
+		});
+		expect(h.pi.ui.some((c) => c.method === "notify")).toBe(false);
 	});
 
 	it("a continuation injects a tagged custom message, continues, and is traced", async () => {
@@ -271,15 +280,49 @@ describe("module host", () => {
 		expect(h.runtime.moduleStatus()).toEqual([]);
 	});
 
-	it("clears the 'checking' status when no module acts", async () => {
+	it("says nothing on the status line for a settle that is quick and finds nothing (D-106)", async () => {
 		const a = newProbe();
 		const { h } = setup({ a: probeModule("a", a, () => undefined) }, { a: { enabled: true } });
 		await h.pi.emit("session_start");
 		await h.pi.emit("agent_before_settle", settleEvent());
-		expect(h.pi.ui.filter((c) => c.method === "setStatus").map((c) => c.args)).toEqual([
-			["exo", "exo: checking the work…"],
-			["exo", undefined],
+		expect(h.pi.ui.filter((c) => c.method === "setStatus")).toEqual([]);
+	});
+
+	it("says it is checking the work once settling takes a while, and clears it after (D-106)", async () => {
+		const { h } = setup(
+			{
+				a: () => ({
+					id: "a",
+					onSettle: () => new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 400)),
+				}),
+			},
+			{ a: { enabled: true } },
+		);
+		await h.pi.emit("session_start");
+		await h.pi.emit("agent_before_settle", settleEvent());
+		expect(h.pi.ui.filter((c) => c.method === "setStatus").map((c) => c.args[1])).toEqual([
+			"exo: checking the work…",
+			undefined,
 		]);
+	});
+
+	it("reports a status line that throws while settling, instead of throwing from a timer", async () => {
+		const { h } = setup(
+			{
+				a: () => ({
+					id: "a",
+					onSettle: () => new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 400)),
+				}),
+			},
+			{ a: { enabled: true } },
+		);
+		await h.pi.emit("session_start");
+		const ctx = h.pi.ctx();
+		ctx.ui.setStatus = () => {
+			throw new Error("stale UI");
+		};
+		await h.pi.emit("agent_before_settle", settleEvent(), ctx);
+		expect(h.errors.map((e) => e.where)).toContain("modules.progress");
 	});
 
 	it("does nothing when no module settles, and forgets modules at shutdown", async () => {
@@ -367,6 +410,30 @@ describe("tool-result rewrites", () => {
 		await h.pi.emit("session_start");
 		await h.pi.emit("tool_result", bashResult("boom\n\nCommand exited with code 2"));
 		expect(drafts[0]?.status).toBe("Command exited with code 2");
+	});
+
+	it("finds the saved output and the status of a command that timed out, from the text alone (D-110)", async () => {
+		const drafts: ToolResultDraft[] = [];
+		const { h } = setup(
+			{
+				trim: rewriter("trim", async (d) => {
+					drafts.push(d);
+					return undefined;
+				}),
+			},
+			{ trim: { enabled: true } },
+		);
+		await h.pi.emit("session_start");
+		// Pi throws on a timeout: the result keeps no details, only the text.
+		const text =
+			"tail\n\n[Showing lines 9-10 of 10 (50.0KB limit). Full output: /tmp/pi-bash-1.log]\n\nCommand timed out after 30 seconds";
+		await h.pi.emit("tool_result", bashResult(text, { details: undefined, structuredContent: undefined }));
+		expect(drafts[0]).toMatchObject({
+			fullOutputPath: "/tmp/pi-bash-1.log",
+			status: "Command timed out after 30 seconds",
+		});
+		await h.pi.emit("tool_result", bashResult("Command aborted", { details: undefined, structuredContent: undefined }));
+		expect(drafts[1]).toMatchObject({ fullOutputPath: null, status: "Command aborted" });
 	});
 
 	it("chains rewrites, merges details.exo, keeps structuredContent and traces each rewrite", async () => {
@@ -550,27 +617,30 @@ function compactEvent(signal = new AbortController().signal) {
 }
 
 describe("one rewrite budget per batch of tool results (D-098)", () => {
-	it("shares the budget among a batch's results, and gives the next turn's batch its own", async () => {
+	it("shares the guard among a batch's results, and gives the next turn's batch its own", async () => {
 		const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 		const { h } = setup(
 			{
 				slow: rewriter("slow", async (draft, signal) => {
-					await sleep(250);
+					await sleep(80);
 					return signal.aborted ? undefined : { text: `${draft.current} [seen]`, note: "seen" };
 				}),
 			},
 			{ slow: { enabled: true } },
-			{ budgetsMs: { rewrite: 400 } },
+			// A rewriter may take a third of it: 93 ms, enough for 80.
+			{ budgetsMs: { rewrite: 280 } },
 		);
 		await h.pi.emit("session_start");
 		const text = (result: unknown) => JSON.stringify(result);
-		const first = await h.pi.emit("tool_result", bashResult("one", { toolCallId: "a" }));
-		const second = await h.pi.emit("tool_result", bashResult("two", { toolCallId: "b" }));
-		expect(text(first)).toContain("[seen]");
-		// 250 ms of the batch's 400 are gone: the second result's rewrite is cut short.
-		expect(second).toBeUndefined();
+		const results: unknown[] = [];
+		for (const id of ["a", "b", "c", "d"]) {
+			results.push(await h.pi.emit("tool_result", bashResult(id, { toolCallId: id })));
+		}
+		expect(results.slice(0, 3).every((r) => text(r).includes("[seen]"))).toBe(true);
+		// About 240 ms of the batch's 280 are gone: the fourth result's rewrite is cut short.
+		expect(results[3]).toBeUndefined();
 		await h.pi.emit("turn_end", {});
-		const next = await h.pi.emit("tool_result", bashResult("three", { toolCallId: "c" }));
+		const next = await h.pi.emit("tool_result", bashResult("next", { toolCallId: "e" }));
 		expect(text(next)).toContain("[seen]");
 	});
 
@@ -618,20 +688,256 @@ describe("compaction hosting", () => {
 		expect(request?.conversationSince(3)).toBe("");
 	});
 
-	it("tells settle hooks how full the context is and where pi compacts it, when pi knows (D-098)", async () => {
+	it("tells settle hooks how full the context is and where pi compacts it, from pi's own settings (D-098, D-111)", async () => {
 		const probe = newProbe();
 		const { h } = setup({ a: probeModule("a", probe, () => undefined) }, { a: { enabled: true } });
-		await h.pi.emit("session_start");
-		const usage = (tokens: number | null) =>
-			h.pi.ctx({ getContextUsage: () => ({ tokens, contextWindow: 131_072, percent: null }) });
-		await h.pi.emit("agent_before_settle", settleEvent(), usage(90_000));
-		await h.pi.emit("agent_before_settle", settleEvent(), usage(null));
-		await h.pi.emit("agent_before_settle", settleEvent());
+		const agentDir = join(h.dir, "agent");
+		mkdirSync(agentDir, { recursive: true });
+		writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ compaction: { reserveTokens: 30_000 } }));
+		vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
+		try {
+			await h.pi.emit("session_start");
+			const usage = (tokens: number | null) =>
+				h.pi.ctx({
+					getContextUsage: () => ({ tokens, contextWindow: 131_072, percent: null }),
+					isProjectTrusted: () => false,
+				});
+			await h.pi.emit("agent_before_settle", settleEvent(), usage(90_000));
+			await h.pi.emit("agent_before_settle", settleEvent(), usage(null));
+			await h.pi.emit("agent_before_settle", settleEvent());
+			// A compaction hands over the settings pi used: they are the ones from then on.
+			await h.pi.emit("session_before_compact", compactEvent());
+			await h.pi.emit("agent_before_settle", settleEvent(), usage(90_000));
+		} finally {
+			vi.unstubAllEnvs();
+		}
 		expect(probe.settles.map((s) => s.context)).toEqual([
-			{ tokens: 90_000, compactAt: 131_072 - 16_384 },
+			{ tokens: 90_000, compactAt: 131_072 - 30_000 },
 			undefined,
 			undefined,
+			{ tokens: 90_000, compactAt: 131_072 - 1 },
 		]);
+	});
+
+	it("takes pi's defaults when its settings cannot be read, and the window when it does not compact on its own", async () => {
+		const probe = newProbe();
+		const at = async (settings?: ModuleHostOptions["piCompactionSettings"]) => {
+			probe.settles.length = 0;
+			const { h } = setup(
+				{ a: probeModule("a", probe, () => undefined) },
+				{ a: { enabled: true } },
+				settings ? { host: { piCompactionSettings: settings } } : {},
+			);
+			await h.pi.emit("session_start");
+			// The fake has no `isProjectTrusted`: reading pi's settings throws.
+			const ctx = h.pi.ctx({ getContextUsage: () => ({ tokens: 1, contextWindow: 131_072, percent: null }) });
+			await h.pi.emit("agent_before_settle", settleEvent(), ctx);
+			return probe.settles[0]?.context?.compactAt;
+		};
+		expect(await at()).toBe(131_072 - 16_384);
+		expect(await at(() => ({ enabled: false, reserveTokens: 16_384 }))).toBe(131_072);
+	});
+
+	describe("pi's own summary with a module's facts after it (D-111)", () => {
+		const factsModule = (committed: string[]) => () => ({
+			id: "facts",
+			compact: async () => ({
+				summary: "## User requests (verbatim, oldest first)\n\n1. implement forth",
+				part: "facts" as const,
+				details: { facts: { v: 1 } },
+				commit: () => committed.push("facts"),
+			}),
+		});
+		const piResult = {
+			summary: "pi's summary\n",
+			firstKeptEntryId: "entry-9",
+			tokensBefore: 150_000,
+			usage: { input: 1 },
+			details: { readFiles: ["a.rs"], modifiedFiles: ["b.rs"] },
+		};
+
+		it("follows pi's summary with the facts, and tells the user once per session", async () => {
+			const committed: string[] = [];
+			const calls: unknown[] = [];
+			const { h, logs } = setup(
+				{ facts: factsModule(committed) },
+				{ facts: { enabled: true } },
+				{
+					host: {
+						harnessSummary: async (event, _ctx, signal, retry) => {
+							calls.push([event.reason, signal.aborted, retry]);
+							return piResult as never;
+						},
+					},
+				},
+			);
+			await h.pi.emit("session_start");
+			const result = await h.pi.emit("session_before_compact", compactEvent());
+			expect(result).toEqual({
+				compaction: {
+					summary: "pi's summary\n\n## User requests (verbatim, oldest first)\n\n1. implement forth",
+					firstKeptEntryId: "entry-9",
+					tokensBefore: 150_000,
+					usage: { input: 1 },
+					details: { readFiles: ["a.rs"], modifiedFiles: ["b.rs"], exo: { facts: { v: 1 }, module: "facts" } },
+				},
+			});
+			// Pi's settings could not be read (the fake has no `isProjectTrusted`): pi's default retries.
+			expect(calls).toEqual([
+				["threshold", false, { enabled: true, maxRetries: 3, baseDelayMs: 2_000, maxAgentDelayMs: 60_000 }],
+			]);
+			expect(committed).toEqual(["facts"]);
+			expect(logs).toEqual([
+				"compaction: Exocortex's summary could not be written; pi wrote its own, with the tracked requests, files and commands after it",
+			]);
+			await h.pi.emit("session_before_compact", compactEvent());
+			expect(h.pi.ui.filter((call) => call.method === "notify")).toHaveLength(1);
+			await h.pi.emit("session_start");
+			await h.pi.emit("session_before_compact", compactEvent());
+			expect(h.pi.ui.filter((call) => call.method === "notify")).toHaveLength(2);
+		});
+
+		it("retries pi's summary as pi's own settings say", async () => {
+			const retries: unknown[] = [];
+			const { h } = setup(
+				{ facts: factsModule([]) },
+				{ facts: { enabled: true } },
+				{
+					host: {
+						harnessSummary: async (_event, _ctx, _signal, retry) => {
+							retries.push(retry);
+							return piResult as never;
+						},
+					},
+				},
+			);
+			const agentDir = join(h.dir, "agent");
+			mkdirSync(agentDir, { recursive: true });
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ retry: { maxRetries: 7 } }));
+			vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
+			try {
+				await h.pi.emit("session_start");
+				await h.pi.emit("session_before_compact", compactEvent(), h.pi.ctx({ isProjectTrusted: () => false }));
+			} finally {
+				vi.unstubAllEnvs();
+			}
+			expect(retries).toEqual([{ enabled: true, maxRetries: 7, baseDelayMs: 2_000, maxAgentDelayMs: 60_000 }]);
+		});
+
+		it("prefers a module's whole summary, and keeps the facts alone when pi's summary fails too", async () => {
+			const committed: string[] = [];
+			const whole = setup(
+				{
+					facts: factsModule(committed),
+					writer: () => ({ id: "writer", compact: async () => ({ summary: "whole" }) }),
+				},
+				{ facts: { enabled: true }, writer: { enabled: true } },
+				{ host: { harnessSummary: () => Promise.reject(new Error("never asked")) } },
+			);
+			await whole.h.pi.emit("session_start");
+			expect(await whole.h.pi.emit("session_before_compact", compactEvent())).toMatchObject({
+				compaction: { summary: "whole" },
+			});
+			expect(committed).toEqual([]);
+			whole.h.cleanup();
+
+			const { h, logs } = setup(
+				{ facts: factsModule(committed) },
+				{ facts: { enabled: true } },
+				{ host: { harnessSummary: () => Promise.reject(new Error("model unavailable")) } },
+			);
+			await h.pi.emit("session_start");
+			const result = await h.pi.emit("session_before_compact", compactEvent());
+			expect(result).toEqual({
+				compaction: {
+					summary:
+						"(No summary of the earlier conversation could be written. What follows was tracked as it happened.)\n\n## User requests (verbatim, oldest first)\n\n1. implement forth",
+					firstKeptEntryId: "entry-9",
+					tokensBefore: 150_000,
+					details: { exo: { facts: { v: 1 }, module: "facts" } },
+				},
+			});
+			expect(logs[0]).toContain("(model unavailable)");
+			expect(committed).toEqual(["facts"]);
+			// Pi's abort ends it with nothing.
+			const aborted = new AbortController();
+			aborted.abort();
+			expect(await h.pi.emit("session_before_compact", compactEvent(aborted.signal))).toBeUndefined();
+		});
+
+		it("writes pi's summary with pi's own `compact`, through the model registry", async () => {
+			const asked: { model: unknown; prompt: string; options: Record<string, unknown> }[] = [];
+			const { h, logs } = setup({ facts: factsModule([]) }, { facts: { enabled: true } });
+			await h.pi.emit("session_start");
+			const model = { id: "m", provider: "p", api: "openai-completions", contextWindow: 262_144, maxTokens: 0 };
+			const ctx = h.pi.ctx({
+				model,
+				modelRegistry: {
+					streamSimple: (
+						m: unknown,
+						context: { messages: { content: unknown }[] },
+						options: Record<string, unknown>,
+					) => {
+						asked.push({ model: m, prompt: JSON.stringify(context.messages), options });
+						return {
+							result: async () => ({
+								role: "assistant",
+								content: [{ type: "text", text: `summary ${asked.length}` }],
+								stopReason: "stop",
+								usage: {
+									input: 1,
+									output: 1,
+									cacheRead: 0,
+									cacheWrite: 0,
+									totalTokens: 2,
+									cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+								},
+							}),
+						};
+					},
+				},
+			});
+			const result = (await h.pi.emit("session_before_compact", compactEvent(), ctx)) as {
+				compaction: { summary: string; details: Record<string, unknown> };
+			};
+			expect(logs).toEqual([
+				"compaction: Exocortex's summary could not be written; pi wrote its own, with the tracked requests, files and commands after it",
+			]);
+			// A split turn: the history and the turn's start are summarized apart (`compaction.js:690-702`).
+			expect(asked).toHaveLength(2);
+			expect(asked[0]?.model).toBe(model);
+			expect(asked[0]?.prompt).toContain("implement forth");
+			expect(asked[0]?.prompt).toContain("old summary");
+			expect(asked[0]?.prompt).toContain("Additional focus: focus");
+			expect(asked[0]?.options["maxTokens"]).toBe(0);
+			expect(result.compaction.summary).toMatch(
+				/^summary 1\n\n---\n\n\*\*Turn Context \(split turn\):\*\*\n\nsummary 2/,
+			);
+			expect(result.compaction.summary).toContain("<modified-files>\nb.rs\nc.rs\n</modified-files>");
+			expect(result.compaction.summary).toMatch(
+				/\n\n## User requests \(verbatim, oldest first\)\n\n1\. implement forth$/,
+			);
+			expect(result.compaction.details).toMatchObject({ readFiles: ["a.rs"], modifiedFiles: ["b.rs", "c.rs"] });
+		});
+
+		it("gives modules the main model's context window", async () => {
+			const requests: CompactionRequest[] = [];
+			const { h } = setup(
+				{
+					writer: () => ({
+						id: "writer",
+						compact: async (request: CompactionRequest) => {
+							requests.push(request);
+							return undefined;
+						},
+					}),
+				},
+				{ writer: { enabled: true } },
+			);
+			await h.pi.emit("session_start");
+			await h.pi.emit("session_before_compact", compactEvent(), h.pi.ctx({ model: { contextWindow: 262_144 } }));
+			expect(requests[0]?.contextWindow).toBe(262_144);
+		});
 	});
 
 	it("passes a harness-agnostic request and returns the first module summary", async () => {
@@ -668,6 +974,7 @@ describe("compaction hosting", () => {
 			filesRead: ["a.rs"],
 			filesModified: ["b.rs", "c.rs"],
 			tokensBefore: 150_000,
+			contextWindow: null,
 			customInstructions: "focus",
 		});
 		expect(request?.conversation).toContain("[User]: implement forth");
@@ -863,12 +1170,13 @@ describe("progress while a hook holds pi", () => {
 		context?.progress("too late");
 		expect(statuses(h)).toEqual([]);
 
-		// After a settle left a status, progress gives it back when done.
+		// A settle's status is about that run: the next message clears it, and progress leaves it clear (D-106).
 		await h.pi.emit("agent_before_settle", settleEvent());
 		h.pi.ui.length = 0;
 		await h.pi.emit("input", { text: "now add tests", source: "interactive" });
 		await h.pi.emit("before_agent_start", {});
-		expect(statuses(h).at(-2)).toEqual(["setStatus", "exo", "exo: a: complete"]);
+		expect(statuses(h)[0]).toEqual(["setStatus", "exo", undefined]);
+		expect(statuses(h).at(-2)).toEqual(["setStatus", "exo", undefined]);
 	});
 
 	it("keeps the message until the last of several concurrent hooks returns, and is silent without a UI", async () => {
@@ -900,6 +1208,46 @@ describe("progress while a hook holds pi", () => {
 		release[2]?.();
 		await held;
 		expect(statuses(headless.h)).toEqual([]);
+	});
+});
+
+describe("what settle hooks are told (D-107)", () => {
+	it("every reply since the user's message, past the module's own follow-ups, and the context window", async () => {
+		const probe = newProbe();
+		const { h } = setup({ a: probeModule("a", probe, () => undefined) }, { a: { enabled: true } });
+		await h.pi.emit("session_start");
+		const window = h.pi.ctx({ getContextUsage: () => ({ tokens: null, contextWindow: 262_144, percent: null }) });
+		await h.pi.emit(
+			"agent_before_settle",
+			{
+				outcome: "completed",
+				context: {
+					llmMessages: [{ role: "assistant", content: [{ type: "text", text: "Done." }] }],
+					contextMessages: [
+						{ role: "user", content: "an earlier task" },
+						{ role: "assistant", content: [{ type: "text", text: "old reply" }] },
+						{ role: "user", content: "summarize it in 3 sentences, then fix the bug" },
+						{ role: "assistant", content: [{ type: "text", text: "Here is the summary." }] },
+						{ role: "assistant", content: [{ type: "toolCall", id: "t", name: "edit", arguments: {} }] },
+						{ role: "toolResult", content: "ok" },
+						{ role: "custom", customType: "exo.supervisor", content: "Not done yet." },
+						{
+							role: "assistant",
+							content: [
+								{ type: "thinking", thinking: "hm" },
+								{ type: "text", text: "Done." },
+							],
+						},
+					],
+				},
+			},
+			window,
+		);
+		expect(probe.settles.at(-1)).toMatchObject({
+			lastAssistantText: "Done.",
+			assistantTexts: ["Here is the summary.", "Done."],
+			contextWindow: 262_144,
+		});
 	});
 });
 
@@ -982,7 +1330,9 @@ describe("background jobs (D-097)", () => {
 		const { h } = setup({ a: job.factory }, { a: { enabled: true } });
 		await h.pi.emit("session_start");
 		await h.pi.emit("agent_before_settle", settleEvent());
-		job.finish({ kind: "continue", text: "fix the bug", summary: "review found a bug" });
+		const delivered: (string | undefined)[] = [];
+		const commit = (as?: string) => delivered.push(as);
+		job.finish({ kind: "continue", text: "fix the bug", summary: "review found a bug", commit });
 		await flush();
 		expect(h.pi.sent).toEqual([
 			{
@@ -1001,10 +1351,12 @@ describe("background jobs (D-097)", () => {
 
 		await h.pi.emit("agent_before_settle", settleEvent());
 		h.pi.idle = false;
-		job.finish({ kind: "continue", text: "fix it too", summary: "review found another" });
+		job.finish({ kind: "continue", text: "fix it too", summary: "review found another", commit });
 		await flush();
 		expect(h.pi.sent).toHaveLength(1);
 		expect(h.pi.ui).toContainEqual({ method: "setEditorText", args: ["fix it too"] });
+		// The module is told how each went out: the second as a suggestion the user may send (D-107).
+		expect(delivered).toEqual(["continue", "suggest"]);
 	});
 
 	it("reports a job that throws, and cannot start without a UI", async () => {

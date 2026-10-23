@@ -35,7 +35,7 @@ describe("resolveEmbeddings", () => {
 			resolveEmbeddings(config({ baseUrl: "http://localhost:8081/v1/", model: "m", apiKey: "$EMBED_KEY" }), {
 				EMBED_KEY: "secret",
 			}),
-		).toEqual({ baseUrl: "http://localhost:8081/v1", model: "m", apiKey: "secret", timeoutMs: 2_000 });
+		).toEqual({ baseUrl: "http://localhost:8081/v1", model: "m", apiKey: "secret", timeoutMs: 60_000 });
 	});
 });
 

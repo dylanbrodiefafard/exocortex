@@ -4,7 +4,6 @@ import {
 	activePreferences,
 	admitRelation,
 	admitStatement,
-	alreadySaid,
 	nearestPreferences,
 	renderPreferences,
 	saidVerbatim,
@@ -66,13 +65,7 @@ describe("activePreferences and the interview (D-066)", () => {
 	});
 });
 
-describe("alreadySaid and renderPreferences", () => {
-	it("treats a prompt carrying most of a rule's words as stating it", () => {
-		expect(alreadySaid("please make the commit message short", "Keep commits small.")).toBe(false);
-		expect(alreadySaid("keep the commits small and focused", "Keep commits small.")).toBe(true);
-		expect(alreadySaid("anything", "a b")).toBe(true);
-	});
-
+describe("renderPreferences", () => {
 	it("stops at the character budget and renders nothing when no rule fits", () => {
 		const many = [1, 2, 3].map((id) => ({
 			id,

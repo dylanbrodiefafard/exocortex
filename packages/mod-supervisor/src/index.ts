@@ -17,13 +17,10 @@ export {
 	unsupportedClaims,
 } from "./signals.ts";
 export {
-	aggregateItems,
 	continuationMessage,
 	createSupervisor,
-	type ItemVerdict,
 	type Judgement,
 	type Ledger,
-	preVerdict,
 	SUPERVISOR_ID,
 	type Verdict,
 	verificationMessage,

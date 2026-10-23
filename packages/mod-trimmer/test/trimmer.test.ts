@@ -1,11 +1,11 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ToolResultDraft } from "@exocortex/core";
-import { createTestModuleContext, type SidecarReply } from "@exocortex/testkit";
+import { createTestModuleContext } from "@exocortex/testkit";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { prepareLines } from "../src/trim.ts";
-import { createTrimmer, keepFromRanges, removeRetiredSaveDirs } from "../src/trimmer.ts";
+import { TrimmerSettingsSchema } from "../src/index.ts";
+import { createTrimmer } from "../src/trimmer.ts";
 
 let dir: string;
 beforeEach(() => {
@@ -52,12 +52,8 @@ function draft(current: string, extra: Partial<ToolResultDraft> = {}): ToolResul
 	};
 }
 
-function setup(settings: Record<string, unknown> = {}, reply?: (body: string) => SidecarReply, sessionId?: string) {
-	const t = createTestModuleContext({
-		cwd: dir,
-		...(sessionId === undefined ? {} : { sessionId }),
-		...(reply ? { reply: (request) => reply(String(request.messages[0]?.["content"])) } : {}),
-	});
+function setup(settings: Record<string, unknown> = {}, sessionId?: string) {
+	const t = createTestModuleContext({ cwd: dir, ...(sessionId === undefined ? {} : { sessionId }) });
 	const trimmer = createTrimmer({ saveDir: join(dir, "saved"), ...settings }, t.context);
 	return { t, trimmer };
 }
@@ -71,7 +67,7 @@ describe("trimmer", () => {
 	});
 
 	it("trims deterministically, keeping the root error, and saves the full output", async () => {
-		const { trimmer } = setup();
+		const { trimmer } = setup({ headLines: 40, tailLines: 80 });
 		const log = buildLog();
 		const rewrite = await trimmer.rewriteToolResult?.(draft(log), signal);
 		if (!rewrite) throw new Error("expected a rewrite");
@@ -119,7 +115,9 @@ describe("trimmer", () => {
 			[{}, "/nonexistent/pi-full.log"],
 			[{ maxFullOutputBytes: 10 }, path],
 		] as const) {
-			const rewrite = await setup(settings).trimmer.rewriteToolResult?.(draft(log, { fullOutputPath }), signal);
+			const { trimmer, t } = setup(settings);
+			const rewrite = await trimmer.rewriteToolResult?.(draft(log, { fullOutputPath }), signal);
+			expect(t.logs.join("\n")).toMatch(/could not read pi's saved output|over maxFullOutputBytes/);
 			// Line numbers would not match the file, so markers only count.
 			expect(rewrite?.text).toMatch(/\[… \d+ lines omitted …\]/);
 			expect(rewrite?.text).toMatch(/showing \d+ of 601 lines; full output: \S+ \(grep it/);
@@ -131,7 +129,7 @@ describe("trimmer", () => {
 			i % 100 === 50 ? `not ok ${i} - ${letters(i)}\n  #   got: 0\n  #   expected: 1` : `ok ${i} - check ${letters(i)}`,
 		);
 		const log = `${tap.join("\n")}\n# 891/900 checks passed`;
-		const { trimmer } = setup();
+		const { trimmer } = setup({ minChars: 8_000 });
 		const rewrite = await trimmer.rewriteToolResult?.(draft(log, { input: { command: "make test" } }), signal);
 		if (!rewrite) throw new Error("expected a rewrite");
 		expect(rewrite.text.match(/^not ok /gm)).toHaveLength(9);
@@ -140,9 +138,83 @@ describe("trimmer", () => {
 		expect(rewrite.text).toContain("[… lines 1–50 omitted …]\nnot ok 50 - ");
 		expect(rewrite.text).toContain("; 887 routine lines hidden; full output: ");
 		expect(rewrite.note).toBe("trimmed 919→32 lines (routine lines hidden)");
-		const off = await setup({ hideRoutine: false }).trimmer.rewriteToolResult?.(draft(log), signal);
+		const off = await setup({ hideRoutine: false, minChars: 8_000, maxChars: 8_000 }).trimmer.rewriteToolResult?.(
+			draft(log),
+			signal,
+		);
 		expect(off?.note).toContain("head/tail/errors");
 		expect(off?.text).not.toContain("routine lines hidden");
+	});
+
+	it("leaves long output that is not a log alone, unless pi cut it (D-110)", async () => {
+		// What a script printed on request: numbers, no errors, no routine lines, exit 0.
+		const rows = Array.from({ length: 1_900 }, (_, i) => `${letters(i)},${i * 37},${(i * 0.731).toFixed(3)}`).join(
+			"\n",
+		);
+		const data = (extra: Partial<ToolResultDraft> = {}) =>
+			draft(rows, { isError: false, exitCode: 0, input: { command: "python3 report.py" }, ...extra });
+		expect(await setup({ minChars: 8_000 }).trimmer.rewriteToolResult?.(data(), signal)).toBeUndefined();
+		// Pi cut it to its end: the start it dropped comes back from its saved copy.
+		const path = join(dir, "pi-full.log");
+		writeFileSync(path, rows);
+		const kept = `${rows.split("\n").slice(-200).join("\n")}\n\n[Showing lines 1701-1900 of 1900. Full output: ${path}]`;
+		const recovered = await setup().trimmer.rewriteToolResult?.(data({ current: kept, fullOutputPath: path }), signal);
+		expect(recovered?.text).toContain(`${letters(0)},0,0.000\n`);
+		expect(recovered?.text).toContain(rows.split("\n").at(-1));
+		expect(recovered?.text).not.toContain("[Showing lines");
+	});
+
+	it("shows a cut output whole from pi's saved copy when it fits, with how the command ended", async () => {
+		const lines = Array.from({ length: 2_400 }, (_, i) => `step ${letters(i)}`);
+		const path = join(dir, "pi-full.log");
+		writeFileSync(path, lines.join("\n"));
+		const status = "Command timed out after 30 seconds";
+		const kept = `${lines.slice(-2_000).join("\n")}\n\n[Showing lines 401-2400 of 2400. Full output: ${path}]\n\n${status}`;
+		const rewrite = await setup().trimmer.rewriteToolResult?.(draft(kept, { fullOutputPath: path, status }), signal);
+		if (!rewrite) throw new Error("expected a rewrite");
+		expect(rewrite.note).toBe("trimmed 2400→2400 lines (all lines)");
+		expect(rewrite.text.startsWith(`step a\nstep b\n`)).toBe(true);
+		expect(rewrite.text).toContain(
+			`${lines.at(-1)}\n\n${status}\n[exo trimmer: showing 2400 of 2400 lines; full output: ${path}`,
+		);
+	});
+
+	it("shows everything that is not routine whenever it fits, however long (D-110)", async () => {
+		// Far more than the old 8k threshold of what is left, all of it within the budget.
+		const out = Array.from({ length: 3_000 }, (_, i) =>
+			i < 2_600 ? `test tests::case_${letters(i)} ... ok` : `   note: ${letters(i)} ${"detail ".repeat(6)}`,
+		);
+		const rewrite = await setup().trimmer.rewriteToolResult?.(draft(out.join("\n")), signal);
+		if (!rewrite) throw new Error("expected a rewrite");
+		expect(rewrite.note).toContain("routine lines hidden");
+		expect(rewrite.text.match(/^ {3}note: /gm)?.length).toBe(400);
+	});
+
+	it("never cuts a failure's own line short, however long (D-110)", async () => {
+		const typeError = `src/a.ts(3,5): error TS2322: Type '{ ${"field: string; ".repeat(200)}}' is not assignable to type 'Row'.`;
+		const blob = `data: ${"x".repeat(3_000)}`;
+		const out = [
+			...Array.from({ length: 2_000 }, (_, i) => `   Compiling crate-${letters(i)} v0.1.0`),
+			blob,
+			typeError,
+		];
+		const rewrite = await setup({ minChars: 500, maxChars: 20_000 }).trimmer.rewriteToolResult?.(
+			draft(out.join("\n")),
+			signal,
+		);
+		expect(rewrite?.text).toContain(typeError);
+		expect(rewrite?.text).not.toContain(blob);
+		expect(rewrite?.text).toContain("…[+1006 chars]");
+	});
+
+	it("retires the sidecar's settings (D-110)", () => {
+		expect((TrimmerSettingsSchema as { retired?: readonly string[] }).retired).toEqual([
+			"sidecar",
+			"sidecarAboveChars",
+			"sidecarMaxInputChars",
+			"sidecarMaxLines",
+			"sidecarTimeoutMs",
+		]);
 	});
 
 	it("leaves output the agent asked to read alone", async () => {
@@ -160,53 +232,6 @@ describe("trimmer", () => {
 		).toBeDefined();
 	});
 
-	it("uses the sidecar's line ranges verbatim, always adding the tail and the root error", async () => {
-		const prompts: string[] = [];
-		const { trimmer, t } = setup({ sidecar: true, headLines: 200, tailLines: 200 }, (body) => {
-			prompts.push(body);
-			return { ranges: [[5, 6]] };
-		});
-		trimmer.onUserTurn?.({ text: "make forth compile", origin: "user" });
-		trimmer.onUserTurn?.({ text: "(continuation)", origin: "extension" });
-		const rewrite = await trimmer.rewriteToolResult?.(draft(buildLog()), signal);
-		if (!rewrite) throw new Error("expected a rewrite");
-		expect(prompts[0]).toContain("make forth compile");
-		expect(prompts[0]).toContain("Command: cargo build");
-		expect(prompts[0]).toContain("301: error[E0502]");
-		expect(rewrite.note).toContain("sidecar selection");
-		const lines = rewrite.text.split("\n");
-		expect(lines[0]).toBe("[… lines 1–4 omitted …]");
-		expect(lines[1]).toContain(`crate-${letters(4)} `);
-		expect(rewrite.text).toContain("error[E0502]");
-		expect(rewrite.text).toContain("could not compile");
-		expect(t.requests[0]?.thinking).toBe(false);
-	});
-
-	it("falls back to the deterministic tier when the sidecar fails or answers badly", async () => {
-		for (const reply of [new Error("down"), { ranges: [] }, { ranges: [[1, 1000]] }, "not json"] as SidecarReply[]) {
-			const { trimmer } = setup({ sidecar: true }, () => reply);
-			const rewrite = await trimmer.rewriteToolResult?.(draft(buildLog(3000)), signal);
-			expect(rewrite?.note).toContain("head/tail/errors");
-		}
-	});
-
-	it("skips the sidecar without an engine, for huge outputs, and when the deterministic tier suffices", async () => {
-		const calls: string[] = [];
-		const noEngine = setup({ sidecar: true });
-		expect((await noEngine.trimmer.rewriteToolResult?.(draft(buildLog(3000)), signal))?.note).toContain("head/tail");
-		const huge = setup({ sidecar: true, sidecarMaxInputChars: 1_000 }, (b) => {
-			calls.push(b);
-			return { ranges: [[1, 2]] };
-		});
-		await huge.trimmer.rewriteToolResult?.(draft(buildLog(3000)), signal);
-		const small = setup({ sidecar: true, sidecarAboveChars: 100_000 }, (b) => {
-			calls.push(b);
-			return { ranges: [[1, 2]] };
-		});
-		await small.trimmer.rewriteToolResult?.(draft(buildLog(3000)), signal);
-		expect(calls).toEqual([]);
-	});
-
 	it("halves the error windows while the result is over maxChars, keeping the first errors", async () => {
 		// 120 long, distinct errors spread through 1,200 lines: every window is kept without a budget.
 		const lines = Array.from({ length: 1_200 }, (_, i) =>
@@ -215,7 +240,7 @@ describe("trimmer", () => {
 				: `   Generated crate-${letters(i)} v0.1.0`,
 		);
 		const log = lines.join("\n");
-		const loose = await setup({ maxChars: 1_000_000 }).trimmer.rewriteToolResult?.(draft(log), signal);
+		const loose = await setup().trimmer.rewriteToolResult?.(draft(log), signal);
 		const tight = await setup({ maxChars: 6_000 }).trimmer.rewriteToolResult?.(draft(log), signal);
 		if (!loose || !tight) throw new Error("expected rewrites");
 		expect(loose.text.length).toBeGreaterThan(12_000);
@@ -265,56 +290,37 @@ describe("maxChars is a ceiling (R5)", () => {
 		const lines = Array.from({ length: 2_400 }, (_, i) =>
 			i % 2 === 0 ? `ok ${i} - ${"checks the parser ".repeat(4)}${letters(i)}` : letters(i),
 		);
-		const rewrite = await setup().trimmer.rewriteToolResult?.(draft(lines.join("\n")), signal);
-		if (!rewrite) throw new Error("expected a rewrite");
-		expect(rewrite.text.length).toBeLessThanOrEqual(24_000);
-		expect(rewrite.note).toContain("head/tail/errors");
-	});
-
-	it("holds for a sidecar selection, which is dropped when it is over", async () => {
-		const lines = Array.from({ length: 400 }, (_, i) => longLine(i));
-		lines[200] = "error[E0502]: cannot borrow `self.items` as mutable";
-		const reply = () => ({ ranges: [[1, 100]] });
-		const rewrite = await setup(
-			{ sidecar: true, maxChars: 12_000, sidecarMaxInputChars: 1_000_000 },
-			reply,
-		).trimmer.rewriteToolResult?.(draft(lines.join("\n")), signal);
+		const rewrite = await setup({ maxChars: 12_000 }).trimmer.rewriteToolResult?.(draft(lines.join("\n")), signal);
 		if (!rewrite) throw new Error("expected a rewrite");
 		expect(rewrite.text.length).toBeLessThanOrEqual(12_000);
 		expect(rewrite.note).toContain("head/tail/errors");
-		expect(rewrite.text).toContain("error[E0502]");
-		// One that fits is used.
-		const small = await setup({ sidecar: true, maxChars: 12_000, sidecarMaxInputChars: 1_000_000 }, () => ({
-			ranges: [[1, 3]],
-		})).trimmer.rewriteToolResult?.(draft(lines.join("\n")), signal);
-		expect(small?.note).toContain("sidecar selection");
-		expect(small?.text.length).toBeLessThanOrEqual(12_000);
 	});
 
-	it("cuts the text itself when even the least selection is over, and says so", async () => {
-		// A path so long that the footer leaves the output a few hundred characters, then none.
-		for (const [depth, shown] of [
-			[280, /^\[… \d+ lines omitted …\]\nerror\[E0502\]: cannot .*…\[\+\d+ chars\]\n/],
-			[400, /^\n\[… cut here to fit maxChars …\]\n/],
-		] as const) {
-			const path = join(dir, `${"deep/".repeat(depth)}pi-full.log`);
-			const rewrite = await setup({ maxChars: 2_000 }).trimmer.rewriteToolResult?.(
-				draft(buildLog(), { fullOutputPath: path, status: "Command exited with code 101" }),
-				signal,
-			);
-			if (!rewrite) throw new Error("expected a rewrite");
-			expect(rewrite.text.length).toBeLessThanOrEqual(2_000);
-			expect(rewrite.text).toMatch(shown);
-		}
+	it("as the last resort, leaves out whole lines from the middle, never cutting a failure's own lines (D-110)", async () => {
+		// Ten failures, each one line too long to cut and too long to fit together.
+		const lines = Array.from({ length: 900 }, (_, i) =>
+			i % 90 === 45
+				? `src/mod_${letters(i)}.ts(${i},1): error TS2322: Type '{ ${"field: string; ".repeat(60)}}' is not assignable`
+				: `   Generated crate-${letters(i)} v0.1.0`,
+		);
+		const rewrite = await setup({ maxChars: 4_000, minChars: 500 }).trimmer.rewriteToolResult?.(
+			draft(lines.join("\n")),
+			signal,
+		);
+		if (!rewrite) throw new Error("expected a rewrite");
+		expect(rewrite.text.length).toBeLessThanOrEqual(4_000);
+		expect(rewrite.text).not.toContain("…[+");
+		expect(rewrite.text).toContain(lines[45]);
+		expect(rewrite.text).toContain(lines.at(-1));
+		expect(rewrite.text).toMatch(/\[… lines \d+–\d+ omitted …\]/);
+		expect(rewrite.text).not.toContain("maxChars");
 	});
 });
 
 describe("saved outputs (R6)", () => {
-	afterEach(() => removeRetiredSaveDirs());
-
 	it("keeps each session's outputs in its own directory, readable by the user only", async () => {
-		const first = setup({}, undefined, "session/one");
-		const second = setup({}, undefined, "session-two");
+		const first = setup({}, "session/one");
+		const second = setup({}, "session-two");
 		const a = await first.trimmer.rewriteToolResult?.(draft(buildLog(600)), signal);
 		const b = await second.trimmer.rewriteToolResult?.(draft(buildLog(700)), signal);
 		const pathA = join(dir, "saved", "session-session_one", "call_1.log");
@@ -330,36 +336,21 @@ describe("saved outputs (R6)", () => {
 		}
 	});
 
-	it("removes a disposed session's outputs when the process exits, not while the session can still read them", async () => {
-		const first = setup({}, undefined, "one");
-		const other = setup({}, undefined, "two");
-		await first.trimmer.rewriteToolResult?.(draft(buildLog()), signal);
-		await other.trimmer.rewriteToolResult?.(draft(buildLog()), signal);
-		const saved = join(dir, "saved", "session-one", "call_1.log");
-		await first.trimmer.dispose?.();
-		// A reload or a settings change disposes the module too; the context still names the file.
-		expect(existsSync(saved)).toBe(true);
-		removeRetiredSaveDirs();
-		expect(existsSync(join(dir, "saved", "session-one"))).toBe(false);
-		// A session still running keeps its files, and so does the directory the user named.
-		expect(existsSync(join(dir, "saved", "session-two", "call_1.log"))).toBe(true);
-	});
-
-	it("keeps the outputs of a session whose trimmer was rebuilt", async () => {
-		const first = setup({}, undefined, "one");
+	it("keeps a session's outputs after it ends, and removes those untouched for a week when one starts (D-110)", async () => {
+		const first = setup({}, "one");
 		await first.trimmer.rewriteToolResult?.(draft(buildLog()), signal);
 		await first.trimmer.dispose?.();
-		const rebuilt = setup({ minChars: 9_000 }, undefined, "one");
-		removeRetiredSaveDirs();
+		// A resumed session's context still names the file.
 		const saved = join(dir, "saved", "session-one", "call_1.log");
 		expect(existsSync(saved)).toBe(true);
-		// The rebuilt one saved nothing itself; the directory is still its session's to remove.
-		await rebuilt.trimmer.dispose?.();
-		removeRetiredSaveDirs();
-		expect(existsSync(saved)).toBe(false);
-		// Nothing saved, nothing to remove.
-		await setup({}, undefined, "three").trimmer.dispose?.();
-		removeRetiredSaveDirs();
+		const old = join(dir, "other", "session-old");
+		const recent = join(dir, "other", "session-recent");
+		for (const path of [old, recent]) mkdirSync(path, { recursive: true });
+		const eightDaysAgo = (Date.now() - 8 * 24 * 60 * 60 * 1000) / 1000;
+		utimesSync(old, eightDaysAgo, eightDaysAgo);
+		setup({ saveDir: join(dir, "other") }, "new");
+		expect(existsSync(old)).toBe(false);
+		expect(existsSync(recent)).toBe(true);
 	});
 
 	it("saves under the temp directory by default", async () => {
@@ -367,33 +358,8 @@ describe("saved outputs (R6)", () => {
 		const t = createTestModuleContext({ cwd: dir, sessionId });
 		const trimmer = createTrimmer({}, t.context);
 		const rewrite = await trimmer.rewriteToolResult?.(draft(buildLog()), signal);
-		const saved = join(tmpdir(), "exocortex-trimmer", `session-${sessionId}`, "call_1.log");
-		expect(rewrite?.details).toEqual({ fullOutputPath: saved });
-		await trimmer.dispose?.();
-		removeRetiredSaveDirs();
-		expect(existsSync(saved)).toBe(false);
-	});
-});
-
-describe("keepFromRanges", () => {
-	const lines = prepareLines(["a", "error: x", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m"].join("\n"), {
-		collapseRuns: 99,
-		hideRoutine: false,
-	});
-	it("converts 1-based inclusive ranges, clamps, ignores reversed ones, adds tail and first error", () => {
-		const keep = keepFromRanges(
-			[
-				[1, 1],
-				[9, 3],
-				[0, 0],
-			],
-			lines,
-			50,
-		);
-		expect([...(keep ?? [])].sort((a, b) => a - b)).toEqual([0, 1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
-	});
-	it("rejects empty and over-budget selections", () => {
-		expect(keepFromRanges([], lines, 5)).toBeUndefined();
-		expect(keepFromRanges([[1, 13]], lines, 5)).toBeUndefined();
+		const saved = join(tmpdir(), "exocortex-trimmer", `session-${sessionId}`);
+		expect(rewrite?.details).toEqual({ fullOutputPath: join(saved, "call_1.log") });
+		rmSync(saved, { recursive: true, force: true });
 	});
 });

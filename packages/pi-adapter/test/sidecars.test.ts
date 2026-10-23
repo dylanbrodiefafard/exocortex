@@ -33,16 +33,22 @@ function setup(
 const lastNotify = (h: AdapterHarness) =>
 	h.pi.ui.filter((c) => c.method === "notify").at(-1)?.args as [string, string] | undefined;
 
+/** One small call through the session's pool, as a module makes it. */
+const ask = (h: AdapterHarness) =>
+	h.runtime.pool?.run({
+		module: "test",
+		kind: "pick",
+		priority: "interactive",
+		request: { messages: [{ role: "user", content: "ping" }], maxTokens: 4 },
+	});
+
 describe("sidecar lifecycle", () => {
-	it("builds a pool from the configured engine and pings it", async () => {
+	it("builds a pool from the configured engine and sends to it", async () => {
 		server = await startFakeOpenAIServer([{ kind: "text", text: "pong", cachedTokens: 3 }]);
 		const h = setup({ engine: { baseUrl: server.baseUrl, model: "fake-model" } });
 		await h.pi.emit("session_start");
 		expect(h.runtime.pool).toBeDefined();
-		await h.pi.command("exo", "ping");
-		const [text, level] = lastNotify(h) ?? [];
-		expect(level).toBe("info");
-		expect(text).toMatch(/sidecar OK in \d+ ms .*3 cached.*pong/);
+		expect(await ask(h)).toMatchObject({ ok: true, value: "pong" });
 		await h.pi.emit("session_shutdown");
 		expect(h.runtime.pool).toBeUndefined();
 	});
@@ -51,8 +57,7 @@ describe("sidecar lifecycle", () => {
 		server = await startFakeOpenAIServer([{ kind: "error", status: 500, message: "boom" }]);
 		const h = setup({ engine: { baseUrl: server.baseUrl, model: "fake-model" } });
 		await h.pi.emit("session_start");
-		await h.pi.command("exo", "ping");
-		expect(lastNotify(h)?.[1]).toBe("error");
+		expect(await ask(h)).toMatchObject({ ok: false, outcome: "error" });
 	});
 
 	it("falls back to an openai-completions main model and follows model changes", async () => {
@@ -64,8 +69,7 @@ describe("sidecar lifecycle", () => {
 		expect(first).toBeDefined();
 		await h.pi.emit("model_select", {}, h.pi.ctx({ model }));
 		expect(h.runtime.pool).not.toBe(first);
-		await h.pi.command("exo", "ping");
-		expect(lastNotify(h)?.[1]).toBe("info");
+		expect(await ask(h)).toMatchObject({ ok: true });
 		expect(server.requests).toHaveLength(1);
 	});
 
@@ -76,24 +80,6 @@ describe("sidecar lifecycle", () => {
 		const pool = h.runtime.pool;
 		await h.pi.emit("model_select");
 		expect(h.runtime.pool).toBe(pool);
-	});
-
-	it("pings the embeddings server too, and says so when it does not answer", async () => {
-		server = await startFakeOpenAIServer([
-			{ kind: "text", text: "pong" },
-			{ kind: "text", text: "pong" },
-		]);
-		const h = setup({ engine: { baseUrl: server.baseUrl, model: "fake-model" } });
-		await h.pi.emit("session_start");
-		h.runtime.embedder = { model: "small-embed", embed: async () => [new Float32Array(384)] };
-		await h.pi.command("exo", "ping");
-		expect(lastNotify(h)?.[0]).toMatch(/^Exocortex embeddings OK in \d+ ms \(small-embed, 384 dimensions\)$/);
-		h.runtime.embedder = { model: "small-embed", embed: async () => undefined };
-		await h.pi.command("exo", "ping");
-		expect(lastNotify(h)).toEqual([
-			"Exocortex embeddings (small-embed) did not answer: modules fall back to keywords",
-			"warning",
-		]);
 	});
 
 	it("builds an embedder only when an embeddings server is configured", async () => {
@@ -116,8 +102,8 @@ describe("sidecar lifecycle", () => {
 		await h.pi.emit("session_start", {}, h.pi.ctx({ model: { api: "anthropic-messages", provider: "x", id: "y" } }));
 		expect(h.runtime.pool).toBeUndefined();
 		expect(h.errors.map((e) => e.where)).toEqual(["sidecars"]);
-		await h.pi.command("exo", "ping");
-		expect(lastNotify(h)).toEqual(["Exocortex: no sidecar engine configured", "warning"]);
+		await h.pi.command("exo", "status");
+		expect(lastNotify(h)?.[0]).toContain("sidecars: no engine configured");
 	});
 
 	it("holds background work while the main agent runs and cancels hot-path work on user input", async () => {
@@ -128,8 +114,8 @@ describe("sidecar lifecycle", () => {
 		if (!pool) throw new Error("no pool");
 		await h.pi.emit("agent_start");
 		const request = { messages: [{ role: "user" as const, content: "x" }], maxTokens: 4 };
-		const background = pool.run({ module: "t", priority: "background", timeoutMs: 5_000, request });
-		const interactive = pool.run({ module: "t", priority: "interactive", timeoutMs: 5_000, request });
+		const background = pool.run({ module: "t", kind: "pick", priority: "background", timeoutMs: 5_000, request });
+		const interactive = pool.run({ module: "t", kind: "pick", priority: "interactive", timeoutMs: 5_000, request });
 		await new Promise((resolve) => setTimeout(resolve, 20));
 		expect(pool.stats().queued.background).toBe(1);
 		await h.pi.emit("input", { text: "new task", source: "interactive" });
@@ -146,6 +132,7 @@ describe("sidecar lifecycle", () => {
 		if (!pool) throw new Error("no pool");
 		const call = pool.run({
 			module: "t",
+			kind: "pick",
 			priority: "interactive",
 			timeoutMs: 5_000,
 			request: { messages: [{ role: "user", content: "x" }], maxTokens: 4 },
@@ -161,7 +148,7 @@ describe("sidecar lifecycle", () => {
 		const pool = h.runtime.pool;
 		if (!pool) throw new Error("no pool");
 		const request = { messages: [{ role: "user" as const, content: "x" }], maxTokens: 4 };
-		const call = () => pool.run({ module: "t", priority: "interactive", timeoutMs: 5_000, request });
+		const call = () => pool.run({ module: "t", kind: "pick", priority: "interactive", timeoutMs: 5_000, request });
 		const steered = call();
 		await h.pi.emit("input", { text: "use the other file", source: "interactive", streamingBehavior: "steer" });
 		const followed = call();
@@ -200,8 +187,10 @@ describe("sidecar lifecycle", () => {
 			expect(second).not.toBe(first);
 			const request = { messages: [{ role: "user" as const, content: "x" }], maxTokens: 4 };
 			// The old pool is closed; the new one knows the agent is mid-run and holds background work.
-			expect((await first?.run({ module: "t", priority: "interactive", timeoutMs: 1_000, request }))?.ok).toBe(false);
-			const background = second?.run({ module: "t", priority: "background", timeoutMs: 5_000, request });
+			expect(
+				(await first?.run({ module: "t", kind: "pick", priority: "interactive", timeoutMs: 1_000, request }))?.ok,
+			).toBe(false);
+			const background = second?.run({ module: "t", kind: "pick", priority: "background", timeoutMs: 5_000, request });
 			await tick();
 			expect(second?.stats().queued.background).toBe(1);
 			await h.pi.emit("agent_settled");
@@ -242,7 +231,7 @@ describe("sidecar lifecycle", () => {
 			const traced: { kind: string; module?: string; data: Record<string, unknown> }[] = [];
 			h.runtime.traceSession = { append: (e: never) => traced.push(e) } as never;
 			const run = (priority: "background" | "interactive") =>
-				pool.run({ module: "memory", priority, timeoutMs: 5_000, request });
+				pool.run({ module: "memory", kind: "pick", priority, timeoutMs: 5_000, request });
 			return { h, pool, run, traced };
 		}
 		const elapsed = async (work: Promise<unknown>) => {
@@ -376,7 +365,7 @@ describe("sidecar lifecycle", () => {
 				onToolResult: () => {
 					void ctx
 						.pool()
-						?.run({ module: "memory", priority: "background", timeoutMs: 5_000, request })
+						?.run({ module: "memory", kind: "pick", priority: "background", timeoutMs: 5_000, request })
 						.then((result) => log.push(result.ok ? "lesson written" : `lesson lost (${result.outcome})`));
 				},
 				dispose: () => void log.push("disposed"),

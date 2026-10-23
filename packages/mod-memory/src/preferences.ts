@@ -18,8 +18,6 @@ const MIN_QUOTE_CHARS = 8;
 const MIN_RULE_CHARS = 8;
 const MAX_RULE_CHARS = 200;
 const QUOTE_CHARS = 300;
-/** A prompt that already has this share of a rule's keywords speaks about it itself. */
-const ALREADY_SAID_OVERLAP = 0.6;
 /** How a rule for one kind of task is introduced to the agent and the user. */
 const KIND_LABEL: Readonly<Record<TaskKind, string>> = {
 	any: "",
@@ -198,19 +196,6 @@ export function activePreferences(
 		});
 	}
 	return active.sort((a, b) => b.sessions - a.sessions || b.lastSeenAt - a.lastSeenAt || a.id - b.id);
-}
-
-/**
- * Whether the prompt speaks about what the rule is about: it carries most of the rule's keywords.
- * The rule is then left out, whichever way the prompt puts it: said the same way it would only
- * repeat the user, and said the other way the request wins. This is the fallback for when no
- * sidecar picks the preferences (`preference-select`), which reads the request properly.
- */
-export function alreadySaid(prompt: string, rule: string): boolean {
-	const words = keywords(rule);
-	if (words.length === 0) return true;
-	const said = new Set(keywords(prompt));
-	return words.filter((word) => said.has(word)).length / words.length >= ALREADY_SAID_OVERLAP;
 }
 
 /** The rule as the agent and the user read it: "For bug fixes: Add a regression test." */

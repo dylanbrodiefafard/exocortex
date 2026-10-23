@@ -24,8 +24,8 @@ const MAX_OTHER_RECORDS = 40;
 /** Paths kept per list: the newest. */
 export const MAX_PATHS = 300;
 /** Characters of requests kept with a compaction; over it the ones between the first and the newest shrink. */
-const MAX_KEPT_REQUEST_CHARS = 60_000;
-const MAX_ONE_LINE_CHARS = 160;
+const MAX_KEPT_REQUEST_CHARS = 120_000;
+const MAX_ONE_LINE_CHARS = 300;
 /** A request longer than any setting would keep is not one this module wrote. */
 const MAX_REQUEST_CHARS = 100_000;
 

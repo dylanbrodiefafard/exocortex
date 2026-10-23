@@ -6,8 +6,12 @@ export interface EmbeddingTarget {
 	readonly baseUrl: string;
 	readonly model: string;
 	readonly apiKey: string | undefined;
+	/** For a call that names no deadline of its own: nobody waits on it, so this only ends a hung server (D-106). */
 	readonly timeoutMs: number;
 }
+
+/** How long a call that nobody waits on may take before the server counts as hung (D-106). */
+const BACKGROUND_EMBED_TIMEOUT_MS = 60_000;
 
 /**
  * Turns texts into unit vectors for similarity search. It never throws: a missing, slow or broken
@@ -33,7 +37,7 @@ export function resolveEmbeddings(
 		baseUrl: config.baseUrl.replace(/\/+$/, ""),
 		model: config.model,
 		apiKey: apiKey === "" ? undefined : apiKey,
-		timeoutMs: config.timeoutMs,
+		timeoutMs: BACKGROUND_EMBED_TIMEOUT_MS,
 	};
 }
 

@@ -236,9 +236,9 @@ describe("runEval with the real pi CLI and a scripted model", { timeout: 60_000 
 			{ kind: "text", text: "Fixed both functions; tests pass." },
 		];
 		const ledger = {
-			is_task: true,
-			follows_previous: false,
-			criteria: ["Fix paginate", "Fix page_count"],
+			relation: "new_task",
+			added_criteria: ["Fix paginate", "Fix page_count"],
+			dropped_criteria: [],
 			check_commands: [],
 			do_not_run: [],
 		};
@@ -253,8 +253,16 @@ describe("runEval with the real pi CLI and a scripted model", { timeout: 60_000 
 			respond: (body) => {
 				const request = body as { stream?: boolean; messages: unknown[] };
 				if (isMain(request)) return main[m++] ?? { kind: "text", text: "(extra)" };
-				const isVerdict = JSON.stringify(request.messages).includes("acceptance checklist and evidence");
-				return { kind: "text", text: JSON.stringify(isVerdict ? verdicts[v++] : ledger) };
+				const text = JSON.stringify(request.messages);
+				// The agent's claims are read beside the verdict, and a complete task's change is reviewed (D-107).
+				const reply = text.includes("whether a coding agent finished a task")
+					? verdicts[v++]
+					: text.includes("the last message a coding agent wrote")
+						? { asked_user: false, claims: [] }
+						: text.includes("You are reviewing a code change for bugs")
+							? { findings: [] }
+							: ledger;
+				return { kind: "text", text: JSON.stringify(reply) };
 			},
 		});
 		expect(records[0]).toMatchObject({
@@ -267,7 +275,8 @@ describe("runEval with the real pi CLI and a scripted model", { timeout: 60_000 
 			continuations: 1,
 			verdicts: { complete: 1, incomplete: 1, failed: 0, uncertain: 0 },
 		});
-		expect(records[0]?.metrics?.sidecarCalls).toBe(3);
+		// The ledger, a reading and a verdict per settle, and the review's five passes.
+		expect(records[0]?.metrics?.sidecarCalls).toBe(10);
 		expect(m).toBe(3);
 	});
 });

@@ -17,7 +17,6 @@ import {
 	activePreferences,
 	admitRelation,
 	admitStatement,
-	alreadySaid,
 	HOLDS,
 	nearestPreferences,
 	type ProposedPreference,
@@ -64,8 +63,14 @@ const SelectionSchema = Type.Object({ apply: Type.Array(Type.Integer({ minimum: 
  * this time" is as likely to be its last line as its first.
  */
 const SELECT_REQUEST_CHARS = 12_000;
-/** Shorter messages ("yes", "continue", "thanks") cannot state a preference worth a sidecar call. */
-const MIN_PREFERENCE_MESSAGE_CHARS = 20;
+/**
+ * Shorter messages ("yes", "ok", "go on") cannot state a preference. Short ones can: "use pnpm",
+ * "no comments pls" (D-109).
+ */
+const MIN_PREFERENCE_MESSAGE_CHARS = 8;
+/** A message that only says to go on ("continue", "go ahead", "thanks!"): no sidecar call is spent on it. */
+const ACKNOWLEDGEMENT =
+	/^(?:(?:ok(?:ay)?|yes|yep|yeah|sure|continue|go on|go ahead|proceed|keep going|next|do it|lgtm|looks good|sounds good|thanks?(?: you)?|thx|perfect|great|nice|please|carry on)[\s.!,]*)+$/i;
 /**
  * A long message keeps its start and its end (D-089): a standing rule often follows what was
  * pasted. A quote is checked against what the sidecar read, so none can run across the gap.
@@ -87,8 +92,6 @@ const RETIRED_BY: Readonly<Record<RetiredBy, string>> = {
 	model: "the model",
 	interview: "a later interview answer",
 };
-/** Prompts with fewer words are not tasks ("thanks", "go on"): nothing is added to them. */
-const MIN_PROMPT_WORDS = 4;
 
 /** One line of `/exo memory preferences`. */
 function describe(p: StoredPreference, active: boolean): string {
@@ -113,12 +116,13 @@ export interface PreferenceSession {
 	heard(turn: UserTurn): void;
 	/** The preferences this prompt leaves unsaid, for the context right after it. */
 	context(turn: UserTurn, signal: AbortSignal): Promise<UserTurnContext | undefined>;
+	/** The agent stopped: the background sidecar can read what the user said. */
+	settled(info: SettleInfo): void;
 	/**
-	 * The agent stopped: the background sidecar can read what the user said. Returns a notice when
-	 * a sidecar's reading of an earlier message retired a preference (M6): the user did not ask for
-	 * that in so many words, so they are told and shown how to undo it.
+	 * A notice when a sidecar's reading of an earlier message retired a preference (M6): the user
+	 * did not ask for that in so many words, so they are told and shown how to undo it.
 	 */
-	settled(info: SettleInfo): SettleAction | undefined;
+	notice(): SettleAction | undefined;
 	/** Text added earlier may be gone from the context: everything may be added again. */
 	compacted(): void;
 	/** `/exo memory preferences` lists them; `forget <id>` retires one; `restore <id>` brings one back. */
@@ -155,6 +159,7 @@ export function createPreferenceSession(
 	/** Preferences a sidecar retired since the user was last told. */
 	const retiredByModel: { readonly id: number; readonly rule: string }[] = [];
 	let lastAssistantText = "";
+	let toldNoEngine = false;
 
 	/**
 	 * Reads one user message for preferences (D-060, D-090), in two sidecar steps with a gate in
@@ -223,6 +228,7 @@ export function createPreferenceSession(
 	): Promise<readonly ProposedPreference[] | undefined> {
 		const result = await ctx.pool()?.run({
 			module: MEMORY_ID,
+			kind: "judge",
 			priority: priorityOf(source),
 			schema: PreferencesSchema,
 			schemaName: "preferences",
@@ -234,7 +240,6 @@ export function createPreferenceSession(
 					},
 				],
 				maxTokens: SIDECAR_MAX_TOKENS,
-				thinking: settings.thinking,
 			},
 		});
 		if (result && !result.ok) ctx.log(`preferences ${result.outcome}: ${result.error}`);
@@ -255,6 +260,7 @@ export function createPreferenceSession(
 		const shown = nearestPreferences(statement.rule, live, MAX_RELATED_PREFERENCES, similarity);
 		const result = await ctx.pool()?.run({
 			module: MEMORY_ID,
+			kind: "judge",
 			priority: priorityOf(source),
 			schema: RelationSchema,
 			schemaName: "preference_relation",
@@ -275,7 +281,6 @@ export function createPreferenceSession(
 					},
 				],
 				maxTokens: SIDECAR_MAX_TOKENS,
-				thinking: settings.thinking,
 			},
 		});
 		if (result && !result.ok) ctx.log(`preference relation ${result.outcome}: ${result.error}`);
@@ -377,17 +382,27 @@ export function createPreferenceSession(
 		}
 	}
 
-	/** The sidecar's pick of the preferences that fit this prompt and are not stated in it; undefined when it fails. */
+	/**
+	 * The sidecar's pick of the preferences that fit this prompt and are not stated in it (D-109):
+	 * it is shown every one that applies here, and the caps apply to what it picks. Without its
+	 * pick nothing is added: a preference the prompt already states or makes an exception to,
+	 * added anyway, is noise at best and a contradiction at worst.
+	 */
 	async function select(
 		prompt: string,
 		candidates: readonly ActivePreference[],
 		signal: AbortSignal,
-	): Promise<ActivePreference[] | undefined> {
+	): Promise<ActivePreference[]> {
 		const pool = ctx.pool();
-		if (!pool) return undefined;
+		if (!pool) {
+			if (!toldNoEngine) ctx.log("no sidecar engine: preferences are not added (a model picks which apply)");
+			toldNoEngine = true;
+			return [];
+		}
 		ctx.progress("Recalling your preferences…");
 		const result = await pool.run({
 			module: MEMORY_ID,
+			kind: "pick",
 			priority: "interactive",
 			// The agent has not started: it waits up to what this kind of call usually takes (D-098).
 			timeoutMs: holdFor(pool, MEMORY_ID, "preference_selection", settings.preferenceSelectTimeoutMs),
@@ -405,15 +420,14 @@ export function createPreferenceSession(
 					},
 				],
 				maxTokens: SIDECAR_MAX_TOKENS,
-				thinking: settings.thinking,
 			},
 		});
 		if (!result.ok) {
-			ctx.log(`preference selection ${result.outcome}: ${result.error}`);
-			return undefined;
+			ctx.log(`preference selection ${result.outcome}: ${result.error}; none added to this prompt`);
+			return [];
 		}
 		const picked = new Set(result.value.apply);
-		return candidates.filter((_, i) => picked.has(i + 1));
+		return candidates.filter((_, i) => picked.has(i + 1)).slice(0, settings.maxPreferences);
 	}
 
 	/** Live preferences with what is known of each, then the ones retired lately (M6). */
@@ -446,21 +460,21 @@ export function createPreferenceSession(
 		retire,
 
 		heard(turn) {
-			if (settings.preferences && turn.text.trim().length >= MIN_PREFERENCE_MESSAGE_CHARS) {
+			const text = turn.text.trim();
+			if (settings.preferences && text.length >= MIN_PREFERENCE_MESSAGE_CHARS && !ACKNOWLEDGEMENT.test(text)) {
 				unread.push({ text: turn.text, before: lastAssistantText, tries: 0 });
 			}
 		},
 
 		async context(turn, signal) {
 			if (!settings.preferences || turn.origin !== "user") return undefined;
-			if (turn.text.trim().split(/\s+/).length < MIN_PROMPT_WORDS) return undefined;
-			const candidates = activePreferences(store.preferences(), (await scope()).id, settings.preferenceMinSessions)
-				.filter((p) => !shown.has(p.id))
-				.slice(0, settings.maxPreferences);
+			const candidates = activePreferences(
+				store.preferences(),
+				(await scope()).id,
+				settings.preferenceMinSessions,
+			).filter((p) => !shown.has(p.id));
 			if (candidates.length === 0) return undefined;
-			const unsaid =
-				(settings.preferenceSelect ? await select(turn.text, candidates, signal) : undefined) ??
-				candidates.filter((p) => !alreadySaid(turn.text, p.rule));
+			const unsaid = await select(turn.text, candidates, signal);
 			const text = renderPreferences(unsaid, settings.maxPreferenceChars);
 			if (text === "") return undefined;
 			// Count only the ones that fit the budget.
@@ -483,6 +497,7 @@ export function createPreferenceSession(
 
 		settled(info) {
 			lastAssistantText = info.lastAssistantText;
+			if (!settings.preferences) return;
 			// The agent has stopped, so the background sidecar can run without competing with it.
 			for (const message of unread.splice(0)) {
 				// Not answered (the engine stopped, or the session's budget ran out): read again at the next stop (D-098).
@@ -494,6 +509,9 @@ export function createPreferenceSession(
 					ctx.log(`preference learning failed: ${String(error)}`),
 				);
 			}
+		},
+
+		notice() {
 			const retired = retiredByModel.splice(0);
 			if (retired.length === 0) return undefined;
 			const [only] = retired;

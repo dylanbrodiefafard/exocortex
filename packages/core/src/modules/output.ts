@@ -50,7 +50,32 @@ const FAILED_PATTERNS: readonly RegExp[] = [
 	/^=* ?(\d+ \w+, )*\d+ (failed|errors?)\b.* in [\d.]+s/,
 	// TypeScript / Node
 	/error TS\d+: /,
+	// Vitest and Jest summaries, Mocha, node:test (TAP and spec reporters), Deno
+	/^(Test Files|Tests)\s+\d+ failed\b/,
+	/^(Test Suites|Tests):\s+\d+ failed\b/,
+	/^\d+ failing$/,
+	/^(#|ℹ) fail [1-9]\d*$/,
+	/^FAILED \| \d+ passed\b.* \| \d+ failed/,
 ];
+
+/**
+ * Failed lines that wrap another program's failure and say nothing of their own (D-108): `make`
+ * reporting that a recipe failed, a linker driver, a runner listing the tests it ran. They decide
+ * that a run failed, but every failure under them looks the same: an ASan crash and an assertion
+ * under `make test` both end in `make: *** [Makefile:24: test] Error 1`. So they never identify a
+ * failure while anything else does.
+ */
+const WRAPPER_PATTERNS: readonly RegExp[] = [
+	/^g?make(\[\d+\])?: \*\*\* /,
+	/^ninja: build stopped/,
+	/^collect2: error: /,
+	/^The following tests FAILED/,
+	/^error: could not compile /,
+	/^error: test failed, to rerun pass /,
+];
+
+/** How the shell names a signal that killed a program. */
+const SIGNAL_DEATH = "(Segmentation fault|Aborted|Bus error|Illegal instruction|Floating point exception)";
 
 /**
  * What a program prints when it crashes. It is the error of an output known to have failed, but a
@@ -63,6 +88,17 @@ const CRASH_PATTERNS: readonly RegExp[] = [
 	/^Traceback \(most recent call last\):/,
 	// `json.decoder.JSONDecodeError: …`, `KeyboardInterrupt`; `SystemExit: 0` is a clean exit.
 	/^(?!SystemExit: 0$)([A-Za-z_]\w*\.)*[A-Z]\w*(Error|Exception|Exit|Interrupt)(: |$)/,
+	// Sanitizers (ASan, LSan, MSan, TSan, UBSan) and a C assertion
+	/^==\d+==ERROR: \w*Sanitizer: /,
+	/^SUMMARY: \w*Sanitizer: /,
+	/^WARNING: ThreadSanitizer: /,
+	/^\S+:\d+:\d+: runtime error: /,
+	/: Assertion `.*' failed\.$/,
+	/^Assertion failed: .*, file .*, line \d+/,
+	// What the shell prints for a program killed by a signal: `bash: line 1: 4242 Segmentation fault (core dumped) ./t`
+	new RegExp(
+		String.raw`^((\S+: )?(line \d+: )?\d+ +${SIGNAL_DEATH}(\s+\(core dumped\))?(\s.*)?|${SIGNAL_DEATH}( \(core dumped\))?)$`,
+	),
 ];
 
 /** Go's `t.Log`/`t.Errorf` output: under a `--- FAIL` it is the failure's message, else a passing test's log. */
@@ -206,16 +242,27 @@ export function errorLineIndices(lines: readonly string[]): number[] {
 	return indices;
 }
 
-/** The first line a toolchain reports a failure or a crash on, else the first that mentions one (with its index). */
+/** Whether a line only wraps another program's failure (`make: *** […] Error 1`): see {@link WRAPPER_PATTERNS}. */
+export function isWrapperLine(line: string): boolean {
+	const trimmed = line.trim();
+	return WRAPPER_PATTERNS.some((pattern) => pattern.test(trimmed));
+}
+
+/**
+ * The first line a toolchain reports a failure or a crash on, else the first that mentions one,
+ * else the first line that only wraps a failure (`make: *** …`), with its index.
+ */
 export function firstErrorLine(text: string): { readonly line: string; readonly index: number } | undefined {
 	const lines = cleanTerminalOutput(text).split("\n");
 	let generic: { line: string; index: number } | undefined;
+	let wrapper: { line: string; index: number } | undefined;
 	for (const [index, verdict] of lineVerdicts(lines).entries()) {
 		const line = (lines[index] ?? "").trim();
-		if (verdict === "failed" || verdict === "error") return { line, index };
-		if (verdict === "mention" && !generic) generic = { line, index };
+		if ((verdict === "failed" || verdict === "error") && isWrapperLine(line)) wrapper ??= { line, index };
+		else if (verdict === "failed" || verdict === "error") return { line, index };
+		else if (verdict === "mention" && !generic) generic = { line, index };
 	}
-	return generic;
+	return generic ?? wrapper;
 }
 
 /** Normalizes the volatile parts of an error line: quoted strings, paths, hex ids and numbers. */
@@ -268,13 +315,22 @@ export function ungroundedReferences(hint: string, evidence: string, cwd: string
 		/(?:^|[\s(])((?:\.{0,2}\/)?(?:[\w.-]+\/)*[\w-]+\.[a-z]{1,5})(?::\d+)*(?=[\s),.;:]|$)/gi,
 	)) {
 		const path = match[1] ?? "";
-		if (path.includes("/") || (SOURCE_EXTENSION.test(path) && !PRODUCT_NAME.test(path))) references.add(path);
+		if (isFileReference(path)) references.add(path);
 	}
 	return [...references].filter((ref) => {
 		let name = ref;
 		while (NAME_SUFFIX.test(name)) name = name.replace(NAME_SUFFIX, "");
 		return ![ref, name].some((spelling) => evidence.includes(spelling) || existsInWorkspace(spelling, cwd));
 	});
+}
+
+/**
+ * Whether a name in prose names a file: it has a `/`, or ends in a source file's extension and is
+ * not a product (`Node.js`). `self.stack` and `e.g` do not (D-077).
+ */
+export function isFileReference(ref: string): boolean {
+	const name = ref.replace(/(:\d+)+$/, "");
+	return name.includes("/") || (SOURCE_EXTENSION.test(name) && !PRODUCT_NAME.test(name));
 }
 
 function existsInWorkspace(ref: string, cwd: string): boolean {

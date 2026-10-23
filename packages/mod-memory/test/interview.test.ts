@@ -97,7 +97,7 @@ describe("/exo memory interview (D-066)", () => {
 		shown(memory.contextForUserTurn?.({ text, origin: "user" }, signal));
 
 	it("stores each chosen option as a standing preference that applies at once, and nothing for 'no preference'", async () => {
-		const { memory, t } = setup({ preferences: true, preferenceSelect: false });
+		const { memory, t } = setup({ preferences: true }, () => ({ apply: [1, 2] }));
 		const reply = await memory.command?.("interview", user(skipAll({ 0: first(0).label, 5: first(5).label })).dialog);
 		expect(reply).toBe(
 			"Interview finished. Preferences saved: 2 (2 new). They apply in every repo, starting with your next prompt. /exo memory preferences lists them; /exo memory forget <id> removes one.",

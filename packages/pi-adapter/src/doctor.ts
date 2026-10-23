@@ -194,6 +194,7 @@ async function checkFork(input: DoctorInput, engine: EngineTarget, ask: Ask, add
 	}
 	const result = await input.pool?.run({
 		module: "exo.doctor",
+		kind: "pick",
 		priority: "interactive",
 		timeoutMs: PROBE_TIMEOUT_MS,
 		// A miss here must not turn forks off for the session, as a module's would.

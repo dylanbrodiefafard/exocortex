@@ -6,6 +6,8 @@ import {
 	type ForkPrefix,
 	loadPrompt,
 	type ModuleContext,
+	SIDECAR_THINKING_TOKENS,
+	type SidecarCall,
 	ungroundedReferences,
 } from "@exocortex/core";
 import { FACTS_HEADING } from "./render.ts";
@@ -33,6 +35,15 @@ const V1_NARRATIVE_HEADING = "## Current work";
  */
 const PRIOR_CHARS_PER_TOKEN = 8;
 const CUT_MARK = "[… the rest was cut …]";
+/**
+ * Characters per token assumed when fitting a transcript into the context window (D-111): below
+ * the ~4 of prose, since code, paths and JSON run denser, so the estimate errs toward fitting.
+ */
+const TRANSCRIPT_CHARS_PER_TOKEN = 3;
+/** Tokens of a prompt's own words and the template, with a margin. */
+const PROMPT_TOKENS = 2_000;
+/** No transcript is cut below this, however small the window: a call that overflows fails and falls back. */
+const MIN_TRANSCRIPT_CHARS = 20_000;
 const UNVERIFIED_MARK = /\s*\[unverified: ([^\]]*)\]/g;
 /** Follows a handover that has marked names, so the agent knows what the mark means. */
 export const UNVERIFIED_NOTE =
@@ -73,37 +84,98 @@ function messagesPrefix(body: ForkPrefix["body"], length?: number): { readonly l
 
 /**
  * The summary written early, from a fork, at background priority (D-098): it runs while the agent
- * is idle and nobody waits for it. Undefined when there is no engine or the reply cannot be used.
+ * is idle and nobody waits for it. Undefined when there is no engine or the reply cannot be used;
+ * `log` hears why.
  */
 export async function writeEarlySummary(
 	ctx: ModuleContext,
 	settings: CompactionSettings,
 	fork: ForkPrefix,
+	signal: AbortSignal,
+	log: (problem: string, message: string) => void,
 ): Promise<Omit<EarlySummary, "at" | "tokens"> | undefined> {
-	const pool = ctx.pool();
-	if (!pool) return undefined;
-	const result = await pool.run({
-		module: "compaction",
-		priority: "background",
-		request: {
-			fork,
-			messages: [
-				{ role: "user", content: FORK_PROMPT.render({ template: TEMPLATE.text.trim(), instructions: "" }).trim() },
-			],
-			maxTokens: settings.maxSummaryTokens,
-			// Applied only where the engine switches thinking for the new turn alone (F4, D-100).
-			thinking: settings.thinking,
+	const reply = await ask(
+		ctx,
+		settings,
+		{
+			module: "compaction",
+			kind: "judge",
+			priority: "background",
+			signal,
+			request: {
+				fork,
+				messages: [
+					{ role: "user", content: FORK_PROMPT.render({ template: TEMPLATE.text.trim(), instructions: "" }).trim() },
+				],
+			},
 		},
-	});
-	if (!result.ok) {
-		ctx.log(`early summary ${result.outcome}: ${result.error}`);
-		return undefined;
-	}
-	const summary = parseSummary(result.value);
-	if (!summary) ctx.log("early summary did not follow the template: not kept");
+		"early summary",
+		null,
+		log,
+	);
+	if (reply === undefined) return undefined;
+	const summary = parseSummary(reply);
+	if (!summary) log("template", "early summary did not follow the template: not kept");
 	return summary
 		? { summary, read: texts(fork.body["messages"]).join("\n"), prefix: messagesPrefix(fork.body) }
 		: undefined;
+}
+
+/** A summary call as the module makes it: everything but the limit, which {@link ask} sets. */
+type SummaryCall = Omit<SidecarCall, "request"> & { readonly request: Omit<SidecarCall["request"], "maxTokens"> };
+
+/**
+ * Runs a summary call and returns its reply; undefined without an engine or on a failed call,
+ * with the reason logged. A reply cut off at its limit is never used (D-111): the call is asked
+ * again once at twice the limit, unless the context window has no room for that, and is then given
+ * up. Room is what an engine that refuses `prompt + max_tokens > window` (vLLM) needs: the prompt,
+ * the larger limit and the pool's whole thinking room. A fork at compaction never has it.
+ */
+async function ask(
+	ctx: ModuleContext,
+	settings: CompactionSettings,
+	call: SummaryCall,
+	what: string,
+	contextWindow: number | null,
+	log: (problem: string, message: string) => void = (_, message) => ctx.log(message),
+): Promise<string | undefined> {
+	const pool = ctx.pool();
+	if (!pool) return undefined;
+	let maxTokens = settings.maxSummaryTokens;
+	for (;;) {
+		const result = await pool.run({ ...call, request: { ...call.request, maxTokens } });
+		if (!result.ok) {
+			log(result.outcome, `${what} ${result.outcome}: ${result.error}`);
+			return undefined;
+		}
+		if (result.finishReason !== "length") return result.value;
+		const { promptTokens, completionTokens } = result.usage;
+		const fits = contextWindow === null || promptTokens + 2 * maxTokens + SIDECAR_THINKING_TOKENS <= contextWindow;
+		if (maxTokens > settings.maxSummaryTokens || !fits) {
+			log("length", `${what} was cut off at ${completionTokens} tokens: not used`);
+			return undefined;
+		}
+		maxTokens *= 2;
+	}
+}
+
+/**
+ * The characters of transcript a summary prompt may hold (D-111): what the context window leaves
+ * after the prompt, the previous summary, and the most the call may ask for. That is the limit
+ * of a second try at twice `maxSummaryTokens`, plus the thinking room the pool adds
+ * (`SIDECAR_THINKING_TOKENS`), so an engine that refuses `prompt + max_tokens > window` takes it.
+ * ninfer accepts such a request and stops at the window (checked 2026-10-23). Unbounded when the
+ * window is not known.
+ */
+function transcriptRoom(contextWindow: number | null, settings: CompactionSettings, prior: string): number {
+	if (contextWindow === null) return Number.POSITIVE_INFINITY;
+	const tokens =
+		contextWindow -
+		PROMPT_TOKENS -
+		2 * settings.maxSummaryTokens -
+		SIDECAR_THINKING_TOKENS -
+		Math.ceil(prior.length / TRANSCRIPT_CHARS_PER_TOKEN);
+	return Math.max(MIN_TRANSCRIPT_CHARS, tokens * TRANSCRIPT_CHARS_PER_TOKEN);
 }
 
 /** Asks the sidecar for the handover. Undefined without an engine, on a failed call, or for a reply off the template. */
@@ -114,11 +186,11 @@ export async function writeNarrative(
 	signal: AbortSignal,
 	early?: EarlySummary,
 ): Promise<WrittenNarrative | undefined> {
-	const pool = ctx.pool();
-	if (!pool) return undefined;
+	if (!ctx.pool()) return undefined;
 	const prior = priorOf(request.previousSummary, settings);
+	const room = transcriptRoom(request.contextWindow, settings, prior);
 	const shared = {
-		conversation: tail(request.conversation, settings.maxConversationChars),
+		conversation: tail(request.conversation, room),
 		template: TEMPLATE.text.trim(),
 		instructions: request.customInstructions
 			? `\n\nThe user asked this summary to focus on: ${request.customInstructions}`
@@ -152,28 +224,35 @@ export async function writeNarrative(
 	const forked = await writeFromFork(ctx, settings, request, shared, signal, progress.of("fork"));
 	// The fork also read the messages the harness keeps, which the span does not have.
 	if (forked) return { ...grounded(forked.summary, `${evidence}\n${forked.read}`, ctx), updated: prior !== "" };
-	const result = await pool.run({
-		module: "compaction",
-		priority: "critical",
-		signal,
-		onProgress: progress.of("transcript"),
-		request: {
-			messages: [
-				{ role: "system", content: SYSTEM_PROMPT.text.trim() },
-				{
-					role: "user",
-					content: (prior ? UPDATE_PROMPT.render({ ...shared, prior }) : SUMMARIZE_PROMPT.render(shared)).trim(),
-				},
-			],
-			maxTokens: settings.maxSummaryTokens,
-			thinking: settings.thinking,
-		},
-	});
-	if (!result.ok) {
-		ctx.log(`summary ${result.outcome}: ${result.error}`);
-		return undefined;
+	if (request.conversation.length > room) {
+		ctx.log(
+			`summary from the transcript: its oldest ${request.conversation.length - room} characters left out to fit the context window`,
+		);
 	}
-	const summary = parseSummary(result.value);
+	const reply = await ask(
+		ctx,
+		settings,
+		{
+			module: "compaction",
+			kind: "judge",
+			priority: "critical",
+			signal,
+			onProgress: progress.of("transcript"),
+			request: {
+				messages: [
+					{ role: "system", content: SYSTEM_PROMPT.text.trim() },
+					{
+						role: "user",
+						content: (prior ? UPDATE_PROMPT.render({ ...shared, prior }) : SUMMARIZE_PROMPT.render(shared)).trim(),
+					},
+				],
+			},
+		},
+		"summary",
+		request.contextWindow,
+	);
+	if (reply === undefined) return undefined;
+	const summary = parseSummary(reply);
 	if (!summary) {
 		ctx.log("summary did not follow the template: not used");
 		return undefined;
@@ -195,26 +274,23 @@ async function writeFromFork(
 	signal: AbortSignal,
 	onProgress: (chars: number) => void,
 ): Promise<{ readonly summary: string; readonly read: string } | undefined> {
-	const pool = ctx.pool();
-	if (!pool || !request.fork || !settings.fork) return undefined;
-	const result = await pool.run({
-		module: "compaction",
-		priority: "critical",
-		signal,
-		onProgress,
-		request: {
-			fork: request.fork,
-			messages: [{ role: "user", content: FORK_PROMPT.render(shared).trim() }],
-			maxTokens: settings.maxSummaryTokens,
-			// Applied only where the engine switches thinking for the new turn alone (F4, D-100).
-			thinking: settings.thinking,
+	if (!request.fork || !settings.fork) return undefined;
+	const reply = await ask(
+		ctx,
+		settings,
+		{
+			module: "compaction",
+			kind: "judge",
+			priority: "critical",
+			signal,
+			onProgress,
+			request: { fork: request.fork, messages: [{ role: "user", content: FORK_PROMPT.render(shared).trim() }] },
 		},
-	});
-	if (!result.ok) {
-		ctx.log(`summary from a fork ${result.outcome}: ${result.error}`);
-		return undefined;
-	}
-	const summary = parseSummary(result.value);
+		"summary from a fork",
+		request.contextWindow,
+	);
+	if (reply === undefined) return undefined;
+	const summary = parseSummary(reply);
 	if (!summary) {
 		ctx.log("summary from a fork did not follow the template: asking with the transcript");
 		return undefined;
@@ -243,33 +319,35 @@ async function fromEarly(
 ): Promise<{ readonly summary: string; readonly updated: boolean } | undefined> {
 	const since = request.conversationSince(early.at);
 	if (since.trim() === "") return { summary: early.summary, updated: false };
-	const result = await ctx.pool()?.run({
-		module: "compaction",
-		priority: "critical",
-		signal,
-		onProgress,
-		request: {
-			messages: [
-				{ role: "system", content: SYSTEM_PROMPT.text.trim() },
-				{
-					role: "user",
-					content: UPDATE_PROMPT.render({
-						conversation: tail(since, settings.maxConversationChars),
-						template: TEMPLATE.text.trim(),
-						instructions: "",
-						prior: early.summary,
-					}).trim(),
-				},
-			],
-			maxTokens: settings.maxSummaryTokens,
-			thinking: settings.thinking,
+	const reply = await ask(
+		ctx,
+		settings,
+		{
+			module: "compaction",
+			kind: "judge",
+			priority: "critical",
+			signal,
+			onProgress,
+			request: {
+				messages: [
+					{ role: "system", content: SYSTEM_PROMPT.text.trim() },
+					{
+						role: "user",
+						content: UPDATE_PROMPT.render({
+							conversation: tail(since, transcriptRoom(request.contextWindow, settings, early.summary)),
+							template: TEMPLATE.text.trim(),
+							instructions: "",
+							prior: early.summary,
+						}).trim(),
+					},
+				],
+			},
 		},
-	});
-	if (!result?.ok) {
-		if (result) ctx.log(`update of the early summary ${result.outcome}: ${result.error}`);
-		return undefined;
-	}
-	const summary = parseSummary(result.value);
+		"update of the early summary",
+		request.contextWindow,
+	);
+	if (reply === undefined) return undefined;
+	const summary = parseSummary(reply);
 	if (!summary) ctx.log("update of the early summary did not follow the template: writing it whole");
 	return summary ? { summary, updated: true } : undefined;
 }
@@ -322,11 +400,12 @@ export function parseSummary(reply: string): string | undefined {
  * The guidance gate for summaries (research R3.5, D-061; D-085): once the transcript is gone the
  * agent cannot check a name, so a file or symbol found nowhere in the transcript, the previous
  * summary or the workspace is marked `[unverified: name]` on its bullet and loses its backticks.
- * The bullet stays: it may be the next step.
+ * The bullet stays: it may be the next step. The names go to the trace, not the user's problem
+ * log: a mark is the gate working, not Exocortex failing (D-111).
  * - Under "Next Move" a path whose directory exists is taken as a file to create.
  * - The objective is left alone: it restates the user's request.
  */
-export function grounded(summary: string, evidence: string, ctx: Pick<ModuleContext, "cwd" | "log">): Narrative {
+export function grounded(summary: string, evidence: string, ctx: Pick<ModuleContext, "cwd">): Narrative {
 	const unverified = new Set<string>();
 	let section = SECTIONS[0];
 	const lines = summary.split("\n").map((marked) => {
@@ -345,7 +424,6 @@ export function grounded(summary: string, evidence: string, ctx: Pick<ModuleCont
 		for (const name of missing) unverified.add(name);
 		return `${missing.reduce((text, name) => text.replaceAll(`\`${name}\``, name), line)} [unverified: ${missing.join(", ")}]`;
 	});
-	if (unverified.size > 0) ctx.log(`unverified in the summary: ${[...unverified].join(", ")}`);
 	return { text: lines.join("\n"), unverified: [...unverified] };
 }
 

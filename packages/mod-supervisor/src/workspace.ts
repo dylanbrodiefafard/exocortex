@@ -10,7 +10,13 @@ import type { ModuleContext } from "@exocortex/core";
  * quote, a space or a non-ASCII letter is the same as any other.
  */
 
+/**
+ * A limit on git while the agent works or the user waits (a message's start, a snapshot after a
+ * test run). In a background job git has none: the job's signal stops it (D-107).
+ */
 const GIT_TIMEOUT_MS = 10_000;
+/** The longest a timer runs: a git command in a background job, which its signal stops. */
+const NO_TIME_LIMIT_MS = 2 ** 31 - 1;
 /** Room for some twenty thousand paths; a longer list loses its start. */
 const LIST_CHARS = 1024 * 1024;
 /**
@@ -29,20 +35,105 @@ export function isCommitId(ref: unknown): ref is string {
 	return typeof ref === "string" && /^[0-9a-f]{7,64}$/.test(ref);
 }
 
-/** A NUL-separated list of paths from git, or undefined when the command failed (not a repository). */
-async function gitPaths(ctx: ModuleContext, args: string): Promise<string[] | undefined> {
-	const out = await ctx
-		.runCommand(`git -c core.quotePath=false ${args}`, { timeoutMs: GIT_TIMEOUT_MS, tailChars: LIST_CHARS })
-		.catch(() => undefined);
-	if (out?.exitCode !== 0 || out.timedOut) return undefined;
-	const paths = out.outputTail.split("\0").filter(Boolean);
-	// Only the end of a longer output is kept: its first entry may be half a name.
-	return out.outputTail.length >= LIST_CHARS ? paths.slice(1) : paths;
+/** What a git command printed, or why it failed: a failure is never taken for "no changes" (D-107). */
+export type GitResult = { readonly ok: true; readonly out: string } | { readonly ok: false; readonly error: string };
+
+/**
+ * Runs `git <args>` in the working directory, with names printed as they are. With a `signal` (a
+ * background job) it has no time limit: the signal stops it.
+ */
+export async function git(
+	ctx: ModuleContext,
+	args: string,
+	options: { readonly signal?: AbortSignal; readonly tailChars?: number } = {},
+): Promise<GitResult> {
+	try {
+		const out = await ctx.runCommand(`git -c core.quotePath=false ${args}`, {
+			timeoutMs: options.signal ? NO_TIME_LIMIT_MS : GIT_TIMEOUT_MS,
+			...(options.tailChars === undefined ? {} : { tailChars: options.tailChars }),
+			...(options.signal ? { signal: options.signal } : {}),
+		});
+		if (out.exitCode === 0 && !out.timedOut) return { ok: true, out: out.outputTail };
+		const why = out.timedOut
+			? `timed out after ${Math.round(out.durationMs / 1000)} s`
+			: out.exitCode === null
+				? "stopped"
+				: `exit ${out.exitCode}: ${lastLine(out.outputTail)}`;
+		return { ok: false, error: `git ${args.split(" ")[0]} ${why}` };
+	} catch (error) {
+		return { ok: false, error: `git ${args.split(" ")[0]}: ${String(error)}` };
+	}
 }
 
-/** Files git neither tracks nor ignores, relative to the working directory; undefined outside a repository. */
-export function untrackedFiles(ctx: ModuleContext): Promise<string[] | undefined> {
-	return gitPaths(ctx, "ls-files -z --others --exclude-standard");
+/** Whether a git failure means only that there is no repository here: nothing to report then. */
+export function notARepository(result: { readonly ok: boolean; readonly error?: string }): boolean {
+	return !result.ok && /not a git repository/i.test(result.error ?? "");
+}
+
+function lastLine(text: string): string {
+	return text.trim().split("\n").at(-1)?.slice(0, 200) ?? "";
+}
+
+/** A NUL-separated list of paths from git, or undefined when the command failed (not a repository). */
+async function gitPaths(ctx: ModuleContext, args: string, signal?: AbortSignal): Promise<string[] | undefined> {
+	const out = await git(ctx, args, { tailChars: LIST_CHARS, ...(signal ? { signal } : {}) });
+	if (!out.ok) return undefined;
+	const paths = out.out.split("\0").filter(Boolean);
+	// Only the end of a longer output is kept: its first entry may be half a name.
+	return out.out.length >= LIST_CHARS ? paths.slice(1) : paths;
+}
+
+/** Files git neither tracks nor ignores, relative to the working directory; undefined outside a repository or when git fails. */
+function untrackedFiles(ctx: ModuleContext, signal?: AbortSignal): Promise<string[] | undefined> {
+	return gitPaths(ctx, "ls-files -z --others --exclude-standard", signal);
+}
+
+/** Files git neither tracks nor ignores, or why git could not list them (D-107): a failure is not "no new files". */
+export async function listUntracked(
+	ctx: ModuleContext,
+	signal?: AbortSignal,
+): Promise<{ readonly ok: true; readonly files: string[] } | { readonly ok: false; readonly error: string }> {
+	const out = await git(ctx, "ls-files -z --others --exclude-standard", {
+		tailChars: LIST_CHARS,
+		...(signal ? { signal } : {}),
+	});
+	if (!out.ok) return out;
+	const paths = out.out.split("\0").filter(Boolean);
+	return { ok: true, files: out.out.length >= LIST_CHARS ? paths.slice(1) : paths };
+}
+
+/** Directories that test and build runs fill, whatever the project's `.gitignore` says. */
+const BYPRODUCT_DIRS = new Set([
+	"__pycache__",
+	".pytest_cache",
+	".mypy_cache",
+	".ruff_cache",
+	".hypothesis",
+	".tox",
+	".nox",
+	"node_modules",
+	".gradle",
+	".next",
+	".turbo",
+	".parcel-cache",
+	".zig-cache",
+	"zig-cache",
+	"zig-out",
+]);
+const BYPRODUCT_FILE = /\.(pyc|pyo|o|obj|class)$|^\.coverage(\..*)?$|\.egg-info$/;
+
+/**
+ * Whether a new file is what test and build runs leave behind (D-107): Python's bytecode and test
+ * caches, `node_modules`, Cargo's `target/`, object files. The judge took `__pycache__/` files a
+ * test run made for changes the agent should not have made, and their bytes change on every run.
+ */
+export function isByproduct(path: string): boolean {
+	const parts = path.split("/");
+	const name = parts.at(-1) ?? "";
+	if (BYPRODUCT_FILE.test(name)) return true;
+	if (parts.slice(0, -1).some((dir) => BYPRODUCT_DIRS.has(dir) || dir.endsWith(".egg-info"))) return true;
+	// Cargo's build directory: at the top, or with the profile directories it always has.
+	return parts[0] === "target" || /(^|\/)target\/(debug|release)\//.test(path);
 }
 
 /** A budget that hashes nothing: size and modification time stand for content. */
@@ -56,26 +147,33 @@ const statOnly = () => ({ files: 0, bytes: 0 });
  * ({@link untrackedStates}).
  */
 export async function taskStart(ctx: ModuleContext): Promise<string | undefined> {
-	for (const command of ["git stash create", "git rev-parse --verify HEAD"]) {
-		const out = await ctx.runCommand(command, { timeoutMs: GIT_TIMEOUT_MS }).catch(() => undefined);
-		const id = out?.exitCode === 0 && !out.timedOut ? out.outputTail.trim() : "";
-		if (isCommitId(id)) return id;
+	const snapshot = await git(ctx, "stash create");
+	const id = snapshot.ok ? snapshot.out.trim() : "";
+	if (isCommitId(id)) return id;
+	const head = await git(ctx, "rev-parse --verify HEAD");
+	const headId = head.ok ? head.out.trim() : "";
+	if (!isCommitId(headId)) return undefined;
+	// Said only when it matters: the developer's uncommitted edits will read as the task's (D-107).
+	if (!snapshot.ok) {
+		ctx.log(
+			`could not record the uncommitted edits as the task began (${snapshot.error}): its changes are taken from HEAD, and may include edits made before it`,
+		);
 	}
-	return undefined;
+	return headId;
 }
 
 /** Whether `ref` names a commit this repository still has: a start snapshot is pruned with time. */
 export async function commitExists(ctx: ModuleContext, ref: string): Promise<boolean> {
 	if (!isCommitId(ref)) return false;
-	const out = await ctx
-		.runCommand(`git cat-file -e ${ref}^{commit}`, { timeoutMs: GIT_TIMEOUT_MS })
-		.catch(() => undefined);
-	return out?.exitCode === 0 && !out.timedOut;
+	return (await git(ctx, `cat-file -e ${ref}^{commit}`)).ok;
 }
 
 /** Each file git does not track, with its size and time: which new files were there before the task (D-102). */
 export async function untrackedStates(ctx: ModuleContext): Promise<ReadonlyMap<string, string>> {
-	const files = (await untrackedFiles(ctx)) ?? [];
+	const listed = await listUntracked(ctx);
+	// Outside a repository there is nothing to list; any other failure makes the developer's new files read as the task's.
+	if (!listed.ok && !notARepository(listed)) ctx.log(`could not list the new files as the task began: ${listed.error}`);
+	const files = (listed.ok ? listed.files : []).filter((file) => !isByproduct(file));
 	const states = await Promise.all(
 		files.map(async (file) => [file, await fileState(resolve(ctx.cwd, file), statOnly())] as const),
 	);
@@ -125,23 +223,31 @@ async function fileState(path: string, budget: { files: number; bytes: number })
  * and after it is added. It does change when any such file's content does, shown to the judge or
  * not. Without `ref` (a repository with no commit yet) every tracked file is hashed.
  *
- * Undefined outside a git repository or when git fails. Never rejects.
+ * What test and build runs leave behind ({@link isByproduct}) is left out: a test run is not progress.
+ *
+ * Undefined outside a git repository or when git fails. Never rejects. With a `signal` (a
+ * background job) git has no time limit.
  */
-export async function workspaceFingerprint(ctx: ModuleContext, ref: string | undefined): Promise<string | undefined> {
+export async function workspaceFingerprint(
+	ctx: ModuleContext,
+	ref: string | undefined,
+	signal?: AbortSignal,
+): Promise<string | undefined> {
 	try {
-		const top = await ctx.runCommand("git rev-parse --show-toplevel", { timeoutMs: GIT_TIMEOUT_MS });
-		const root = top.outputTail.trim();
-		if (top.exitCode !== 0 || root === "") return undefined;
+		const top = await git(ctx, "rev-parse --show-toplevel", signal ? { signal } : {});
+		const root = top.ok ? top.out.trim() : "";
+		if (root === "") return undefined;
 		const [changed, untracked] = await Promise.all([
 			// Paths from `git diff` are relative to the repository's root, those from `ls-files` to the directory.
 			isCommitId(ref)
-				? gitPaths(ctx, `diff --name-only -z --no-renames ${ref} --`)
-				: gitPaths(ctx, "ls-files -z --full-name"),
-			untrackedFiles(ctx),
+				? gitPaths(ctx, `diff --name-only -z --no-renames ${ref} --`, signal)
+				: gitPaths(ctx, "ls-files -z --full-name", signal),
+			untrackedFiles(ctx, signal),
 		]);
 		if (!changed || !untracked) return undefined;
+		const made = untracked.filter((path) => !isByproduct(path));
 		const paths = [
-			...new Set([...changed.map((path) => join(root, path)), ...untracked.map((path) => resolve(ctx.cwd, path))]),
+			...new Set([...changed.map((path) => join(root, path)), ...made.map((path) => resolve(ctx.cwd, path))]),
 		].sort();
 		const hash = createHash("sha256");
 		const budget = { files: MAX_HASHED_FILES, bytes: MAX_HASHED_BYTES };

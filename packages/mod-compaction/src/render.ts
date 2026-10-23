@@ -15,8 +15,12 @@ const PASSED_HEADING = "## Commands that last succeeded (no need to re-run unles
 const HEADINGS = [FACTS_HEADING, MODIFIED_HEADING, READ_HEADING, FAILED_HEADING, PASSED_HEADING];
 
 const SHORTENED_NOTE = "(The first and the newest request are whole; those between are cut to their first line.)";
-/** Paths listed per heading. */
-export const MAX_FILES = 40;
+/**
+ * Paths listed under each heading. The files changed are the work state, so a long session lists
+ * many (D-111); the files only read matter less.
+ */
+export const MAX_MODIFIED_FILES = 100;
+const MAX_READ_FILES = 40;
 /** Test and build runs listed per heading, and other commands beside them: the newest of each. */
 const MAX_RUNS = 15;
 const MAX_OTHER_FAILED = 5;
@@ -42,9 +46,10 @@ export interface FactsView {
 	readonly lastEditAt: number;
 }
 
-/** Sorted, and cut to what a summary lists. */
+/** The newest that a summary lists, sorted. */
 function shown(lines: readonly string[]): Shown {
-	return { lines: [...lines].sort().slice(0, MAX_FILES), more: Math.max(0, lines.length - MAX_FILES) };
+	const kept = lines.slice(-MAX_READ_FILES);
+	return { lines: [...kept].sort(), more: lines.length - kept.length };
 }
 
 /** Renders the summary: the sidecar's handover (and any note on it), then tracked facts verbatim. */

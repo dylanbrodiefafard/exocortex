@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { JsonValue, ToolOutcome, ToolResultDraft } from "@exocortex/core";
@@ -257,10 +257,32 @@ describe("read view", () => {
 			.split("\n");
 		write("m.py", lines.join("\n"));
 		const { module } = setup({ readLineNumbers: false, outlineMaxEntries: 2 });
-		const output = `${lines[0]}\n\n[58 more lines in file. Use offset=3 to continue.]`;
-		const result = await deliver(module, outcome("read", { path: "m.py", limit: 2 }, output));
-		expect(result?.text).toContain("def f0():\n\n[58 more lines in file. Use offset=3 to continue.]");
+		const output = `${lines[0]}\n\n[Showing lines 1-2 of 60 (50.0KB limit). Use offset=3 to continue.]`;
+		const result = await deliver(module, outcome("read", { path: "m.py" }, output));
+		expect(result?.text).toContain("def f0():\n\n[Showing lines 1-2 of 60 (50.0KB limit). Use offset=3 to continue.]");
 		expect(result?.text).toContain("3\tdef f1():\n5\tdef f2():\n(27 more)");
+	});
+
+	it("outlines only a read pi's size limit stopped, once per file content (D-110)", async () => {
+		const lines = ["def a():", "    pass", "def b():", "    pass"];
+		write("m.py", lines.join("\n"));
+		const { module } = setup();
+		// The model asked for two lines: it chose what to see.
+		const limited = await deliver(
+			module,
+			outcome(
+				"read",
+				{ path: "m.py", limit: 2 },
+				"def a():\n    pass\n\n[2 more lines in file. Use offset=3 to continue.]",
+			),
+		);
+		expect(limited?.text).not.toContain("Declarations");
+		const cut = "def a():\n    pass\n\n[Showing lines 1-2 of 4 (50.0KB limit). Use offset=3 to continue.]";
+		expect((await deliver(module, outcome("read", { path: "m.py" }, cut)))?.text).toContain("3\tdef b():");
+		expect((await deliver(module, outcome("read", { path: "m.py" }, cut)))?.text).not.toContain("Declarations");
+		// The file changed: its outline may have too.
+		write("m.py", [...lines, "def c():"].join("\n"));
+		expect((await deliver(module, outcome("read", { path: "m.py" }, cut)))?.text).toContain("5\tdef c():");
 	});
 
 	it("leaves images, long-line notes and unnumbered reads alone", async () => {
@@ -282,37 +304,35 @@ describe("read view", () => {
 	});
 });
 
+/** Lets checks started in the background finish. */
+const settle = (ms = 400) => new Promise((resolve) => setTimeout(resolve, ms));
+
 describe("checks after an edit", () => {
-	it("shows a syntax error the edit introduced, and not one that was there before", async () => {
+	it("shows a file's syntax error once, and not again while it stays (D-110)", async () => {
 		write("a.py", "def f():\n    return 1\n");
 		const { module } = setup();
-		const call = { toolName: "edit", toolCallId: "1", input: { path: "a.py" } };
-		await module.beforeToolCall?.(call, signal);
 		write("a.py", "def f(:\n    return 1\n");
 		const first = await deliver(module, outcome("edit", { path: "a.py" }, "Successfully replaced 1 block(s) in a.py."));
-		expect(first?.text).toContain("[exo tools] python3 syntax check reports a new error after this change:");
+		// Nothing was checked before the edit: the error is the file's, not claimed to be new.
+		expect(first?.text).toContain("[exo tools] python3 syntax check reports an error in a.py (it had not run before");
 		expect(first?.text).toMatch(/a\.py:1:\d+: SyntaxError/);
 
 		// The error is still there after an unrelated edit: it is not new.
-		await module.beforeToolCall?.({ ...call, toolCallId: "2" }, signal);
 		write("a.py", "def f(:\n    return 2\n");
+		expect(await deliver(module, outcome("edit", { path: "a.py" }, "ok"))).toBeUndefined();
+		// A shell command made the last result stale; what was shown is still not repeated.
+		await deliver(module, outcome("bash", { command: "python3 gen.py" }, ""));
+		write("a.py", "def f(:\n    return 3\n");
 		expect(await deliver(module, outcome("edit", { path: "a.py" }, "ok"))).toBeUndefined();
 		expect(module.status?.()).toContain("1 new error(s) shown");
 	});
 
-	it("does not report what it had no picture of before the edit", async () => {
-		write("a.sh", "echo hi\n");
-		const { module } = setup();
-		write("a.sh", "if then\n");
-		expect(await deliver(module, outcome("write", { path: "a.sh", content: "if then\n" }, "ok"))).toBeUndefined();
-	});
-
-	it("treats a file a write creates as having had no errors", async () => {
+	it("shows the errors of a file a write creates", async () => {
 		const { module } = setup();
 		await module.beforeToolCall?.({ toolName: "write", toolCallId: "1", input: { path: "new.sh" } }, signal);
 		write("new.sh", "if then\n");
 		const result = await deliver(module, outcome("write", { path: "new.sh" }, "ok"));
-		expect(result?.text).toContain("bash -n reports a new error");
+		expect(result?.text).toContain("bash -n reports an error in new.sh");
 	});
 
 	describe("a project-wide check", () => {
@@ -320,12 +340,14 @@ describe("checks after an edit", () => {
 		const checks = [{ files: "*.rs", command: "cat errors.txt; test ! -s errors.txt" }];
 		const E0425 = "error[E0425]: cannot find value `x` in this scope\n  --> src/a.rs:3:5";
 		const E0308 = "error[E0308]: mismatched types\n  --> src/b.rs:9:1";
+		const read = (path: string) => outcome("read", { path }, "fn main() {}\n");
 
-		it("shows only the errors that came with the edit, wherever they are", async () => {
+		it("compares with a run started when the agent read the file, not one before the edit", async () => {
 			write("errors.txt", `${E0425}\n`);
 			write("src/a.rs", "");
-			const { module } = setup({ checks, builtinChecks: false });
-			await module.beforeToolCall?.({ toolName: "edit", toolCallId: "1", input: { path: "src/a.rs" } }, signal);
+			const { module, logs } = setup({ checks, builtinChecks: false });
+			await deliver(module, read("src/a.rs"));
+			await settle();
 			// The old error moved down two lines; a new one appeared in another file.
 			write("errors.txt", `${E0425.replace("3:5", "5:5")}\n${E0308}\n`);
 			const result = await deliver(module, outcome("edit", { path: "src/a.rs" }, "ok"));
@@ -333,6 +355,21 @@ describe("checks after an edit", () => {
 				"cat errors.txt; test ! -s errors.txt reports a new error after this change:\nerror[E0308]: mismatched types\n  --> src/b.rs:9:1",
 			);
 			expect(result?.text).not.toContain("E0425");
+			expect(logs).toEqual([]);
+		});
+
+		it("with nothing to compare with, shows the errors that name the edited file and says what it left out", async () => {
+			write("errors.txt", `${E0425}\n${E0308}\n`);
+			write("src/a.rs", "");
+			const { module, logs } = setup({ checks, builtinChecks: false });
+			const result = await deliver(module, outcome("edit", { path: "src/a.rs" }, "ok"));
+			expect(result?.text).toContain(
+				"reports an error in src/a.rs (it had not run before, so some may predate this change)",
+			);
+			expect(result?.text).toContain("E0425");
+			expect(result?.text).not.toContain("E0308");
+			// Routine, not a problem for the user.
+			expect(logs).toEqual([]);
 		});
 
 		it("compares each edit of a turn with the one before it", async () => {
@@ -340,6 +377,8 @@ describe("checks after an edit", () => {
 			write("src/a.rs", "");
 			write("src/b.rs", "");
 			const { module } = setup({ checks, builtinChecks: false });
+			await deliver(module, read("src/a.rs"));
+			await settle();
 			// Pi asks about every call of a turn before it runs any of them.
 			await module.beforeToolCall?.({ toolName: "edit", toolCallId: "1", input: { path: "src/a.rs" } }, signal);
 			await module.beforeToolCall?.({ toolName: "edit", toolCallId: "2", input: { path: "src/b.rs" } }, signal);
@@ -347,77 +386,135 @@ describe("checks after an edit", () => {
 			expect((await deliver(module, outcome("edit", { path: "src/a.rs" }, "ok")))?.text).toContain("E0425");
 			write("errors.txt", `${E0425}\n${E0308}\n`);
 			const second = await deliver(module, outcome("edit", { path: "src/b.rs" }, "ok"));
+			expect(second?.text).toContain("reports a new error after this change:");
 			expect(second?.text).toContain("E0308");
 			expect(second?.text).not.toContain("E0425");
 		});
 
-		it("looks again after a shell command, which may have changed anything", async () => {
+		it("after a shell command that may change files, compares with a run started by the next read, never during a command", async () => {
 			write("errors.txt", "");
 			write("src/a.rs", "");
 			const { module } = setup({ checks, builtinChecks: false });
-			await module.beforeToolCall?.({ toolName: "edit", toolCallId: "1", input: { path: "src/a.rs" } }, signal);
+			await deliver(module, read("src/a.rs"));
+			await settle();
 			expect(await deliver(module, outcome("edit", { path: "src/a.rs" }, "ok"))).toBeUndefined();
 			// A generator wrote a broken file: that error is not the next edit's doing.
+			const generate = outcome("bash", { command: "./generate.sh" }, "");
+			await module.beforeToolCall?.({ toolName: "bash", toolCallId: "g", input: generate.input }, signal);
+			// A read while the command runs starts no check: it would compete with the command's build.
+			write("errors.txt", `${E0308}\n`);
+			await deliver(module, read("src/a.rs"));
+			await settle();
 			write("errors.txt", `${E0425}\n`);
-			await deliver(module, outcome("bash", { command: "./generate.sh" }, ""));
-			await module.beforeToolCall?.({ toolName: "edit", toolCallId: "2", input: { path: "src/a.rs" } }, signal);
+			await deliver(module, generate);
+			await deliver(module, read("src/a.rs"));
+			await settle();
+			// Looking changes nothing: the result from after the generator still holds.
+			await deliver(module, outcome("bash", { command: "git diff | head -50 2>&1" }, ""));
 			expect(await deliver(module, outcome("edit", { path: "src/a.rs" }, "ok"))).toBeUndefined();
 		});
 
-		it("says nothing when an edit's own check never ran", async () => {
+		it("starts no background check while a command that may change files runs", async () => {
+			write("src/a.rs", "");
+			const counted = [{ files: "*.rs", command: "echo run >> runs.txt" }];
+			const { module } = setup({ checks: counted, builtinChecks: false });
+			await module.beforeToolCall?.({ toolName: "bash", toolCallId: "b", input: { command: "cargo build" } }, signal);
+			await deliver(module, read("src/a.rs"));
+			await settle();
+			expect(existsSync(join(dir, "runs.txt"))).toBe(false);
+			// The command ended: a shell command starts none either; the next read does.
+			await deliver(module, outcome("bash", { command: "cargo build" }, ""));
+			await settle();
+			expect(existsSync(join(dir, "runs.txt"))).toBe(false);
+			await deliver(module, read("src/a.rs"));
+			await settle();
+			expect(readFileSync(join(dir, "runs.txt"), "utf8")).toBe("run\n");
+		});
+
+		it("counts an edit whose own check never ran into the next one", async () => {
 			write("errors.txt", "");
 			write("src/a.rs", "");
 			const { module } = setup({ checks, builtinChecks: false });
-			await module.beforeToolCall?.({ toolName: "edit", toolCallId: "1", input: { path: "src/a.rs" } }, signal);
+			await deliver(module, read("src/a.rs"));
+			await settle();
 			// The first edit's result was never offered for rewriting (its budget ran out).
 			module.onToolResult?.(outcome("edit", { path: "src/a.rs" }, "ok"));
 			write("errors.txt", `${E0425}\n`);
-			expect(await deliver(module, outcome("edit", { path: "src/a.rs" }, "ok"))).toBeUndefined();
+			const result = await deliver(module, outcome("edit", { path: "src/a.rs" }, "ok"));
+			expect(result?.text).toContain("reports a new error after this change and 1 earlier edit:");
 		});
+	});
+
+	it("reads a linter's failure that has no error line, and caps what it shows with a count (D-110)", async () => {
+		write("a.py", "");
+		const ruff = Array.from({ length: 5 }, (_, i) => `a.py:${i + 1}:8: F401 [*] \`m${i}\` imported but unused`);
+		write("ruff.txt", `${ruff.join("\n")}\nFound 5 errors.\n`);
+		const checks = [{ files: "*.py", command: "cat ruff.txt; exit 1" }];
+		const { module, logs } = setup({ checks, maxDiagnosticLines: 3 });
+		const result = await deliver(module, outcome("edit", { path: "a.py" }, "ok"));
+		expect(result?.text).toContain(
+			`${ruff.slice(0, 3).join("\n")}\n[… 2 more errors; run \`cat ruff.txt; exit 1\` to see all]`,
+		);
+		expect(result?.text).not.toContain("Found 5 errors");
+		expect(logs.join("\n")).toContain("failed but no errors could be read");
 	});
 
 	it("stops trying a checker that is not installed", async () => {
 		write("a.rs", "");
 		const checks = [{ files: "*.rs", command: "exo-no-such-checker {file}" }];
 		const { module, logs } = setup({ checks });
-		await module.beforeToolCall?.({ toolName: "edit", toolCallId: "1", input: { path: "a.rs" } }, signal);
-		expect(logs.join("\n")).toContain("not installed, not tried again: exo-no-such-checker 'a.rs'");
 		expect(await deliver(module, outcome("edit", { path: "a.rs" }, "ok"))).toBeUndefined();
+		expect(logs.join("\n")).toContain("not installed, not tried again: exo-no-such-checker 'a.rs'");
 	});
 
 	it("sends what a check slower than its hold finds as late help, unless something made it stale (D-098)", async () => {
 		const E0308 = "error[E0308]: mismatched types\n  --> src/b.rs:9:1";
-		const E0425 = "error[E0425]: cannot find value `x` in this scope\n  --> src/a.rs:3:5";
+		const E0425 = "error[E0425]: cannot find value `x` in this scope\n  --> a.rs:3:5";
 		write("a.rs", "");
 		write("errors.txt", "");
 		// A stand-in for a slow `cargo check`: slow once the marker file exists.
-		const checks = [
-			{ files: "*.rs", command: "if [ -f slow ]; then sleep 0.6; fi; cat errors.txt; test ! -s errors.txt" },
-		];
+		const command = "if [ -f slow ]; then sleep 0.6; fi; cat errors.txt; test ! -s errors.txt";
+		const checks = [{ files: "*.rs", command }];
 		const { module, late, records, logs } = setup({ checks, checkHoldMs: 200 });
-		const edit = () => module.beforeToolCall?.({ toolName: "edit", toolCallId: "1", input: { path: "a.rs" } }, signal);
-		await edit();
+		await deliver(module, outcome("read", { path: "a.rs" }, ""));
+		await settle();
 		write("slow", "");
 		write("errors.txt", `${E0308}\n`);
 		// The edit's result goes back after the hold, without the check.
 		expect(await deliver(module, outcome("edit", { path: "a.rs" }, "ok"))).toBeUndefined();
-		await new Promise((resolve) => setTimeout(resolve, 900));
+		// Reading and printing do not make it stale.
+		await deliver(module, outcome("bash", { command: "cat errors.txt" }, ""));
+		await settle(900);
 		expect(logs).toEqual([]);
-		expect(late).toEqual([
-			`[exo tools] if [ -f slow ]; then sleep 0.6; fi; cat errors.txt; test ! -s errors.txt reports a new error after your edit to a.rs:\n${E0308}`,
-		]);
+		expect(late).toEqual([`[exo tools] ${command} reports a new error after your edit to a.rs:\n${E0308}`]);
 		expect(module.status?.()).toContain("1 new error(s) shown");
 		expect(records).toEqual([]);
 
-		// A shell command before the check ends: its result would mix that command's changes in.
-		rmSync(join(dir, "slow"));
-		await edit();
-		write("slow", "");
+		// A shell command starting before the check ends stops it: the check would compete with
+		// the command's build, and its result would mix the command's changes in. Nothing is logged.
 		write("errors.txt", `${E0308}\n${E0425}\n`);
 		await deliver(module, outcome("edit", { path: "a.rs" }, "ok"));
-		module.onToolResult?.(outcome("bash", { command: "touch b.rs" }, ""));
-		await new Promise((resolve) => setTimeout(resolve, 900));
+		await module.beforeToolCall?.({ toolName: "bash", toolCallId: "b", input: { command: "cargo build" } }, signal);
+		await settle(900);
 		expect(late).toHaveLength(1);
+		module.onToolResult?.(outcome("bash", { command: "cargo build" }, ""));
+		expect(logs).toEqual([]);
+	});
+
+	it("does not wait for a check that usually takes longer than its hold (D-110)", async () => {
+		write("a.sh", "echo hi\n");
+		const checks = [{ files: "*.sh", command: "sleep 0.3; bash -n {file}" }];
+		const { module, late } = setup({ checks, checkHoldMs: 200 });
+		for (let i = 0; i < 3; i++) {
+			await deliver(module, outcome("edit", { path: "a.sh" }, "ok"));
+			await settle(500);
+		}
+		write("a.sh", "if then\n");
+		const started = Date.now();
+		expect(await deliver(module, outcome("edit", { path: "a.sh" }, "ok"))).toBeUndefined();
+		expect(Date.now() - started).toBeLessThan(150);
+		await settle(600);
+		expect(late.join("\n")).toContain("a new error after your edit to a.sh");
 	});
 
 	it("checks nothing when switched off or for files no check covers", async () => {

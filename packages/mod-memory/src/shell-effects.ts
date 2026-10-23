@@ -2,13 +2,18 @@ import { commandBase, shellCommands, verifyingRun } from "@exocortex/core";
 import { repoPath } from "./paths.ts";
 
 /**
- * What a shell command line does to the working tree, as far as its words say (M1):
- * - `changes`: it rewrites, moves, deletes or restores files, installs something, or redirects
- *   output into a file of the repo. A pass after it may be its doing and not the edits'.
+ * What a shell command line does to the working tree, as far as its words say (M1, D-109):
+ * - `replaces`: git puts other code in place (a checkout of paths or a branch, a restore, a
+ *   stash, a reset, a merge, a pull). A pass after it is git's doing: no fix is learned.
+ * - `changes`: it rewrites, moves or deletes files of the repo, installs something, or redirects
+ *   output into a file of the repo. The lesson sidecar is shown it, marked, and judges whether
+ *   the pass was its doing (a formatter, an install) or it was part of the fix.
  * - `reads`: every command on it only looks, or is a run of the tests or the build.
  * - `other`: neither can be told (a script, a generator, an unknown tool).
  */
-export type ShellEffect = "changes" | "reads" | "other";
+export type ShellEffect = "replaces" | "changes" | "reads" | "other";
+
+const RANK: Readonly<Record<ShellEffect, number>> = { reads: 0, other: 1, changes: 2, replaces: 3 };
 
 const READ_ONLY: ReadonlySet<string> = new Set([
 	...["cat", "ls", "grep", "egrep", "fgrep", "rg", "ag", "fd", "head", "tail", "wc", "echo", "printf", "pwd", "cd"],
@@ -20,13 +25,27 @@ const READ_ONLY: ReadonlySet<string> = new Set([
 
 /** Commands that change files or what is installed, whatever their arguments. */
 const ALWAYS_CHANGES: ReadonlySet<string> = new Set([
-	...["rm", "mv", "cp", "ln", "patch", "truncate", "dd", "rsync", "chmod", "chown", "rmdir", "unlink", "install"],
-	...["apt", "apt-get", "brew", "dnf", "yum", "pacman", "apk", "rustfmt", "black", "gofmt", "goimports", "autopep8"],
-	...["isort", "shfmt"],
+	...["patch", "dd", "rsync", "install", "apt", "apt-get", "brew", "dnf", "yum", "pacman", "apk", "rustfmt", "black"],
+	...["gofmt", "goimports", "autopep8", "isort", "shfmt"],
+]);
+/** Commands that change the files they are given: they change the repo only when one of them is in it. */
+const CHANGES_ARGUMENTS: ReadonlySet<string> = new Set([
+	"rm",
+	"mv",
+	"cp",
+	"ln",
+	"truncate",
+	"chmod",
+	"chown",
+	"rmdir",
+	"unlink",
+	"touch",
+	"mkdir",
 ]);
 
-const GIT_CHANGES =
-	/^(checkout|restore|stash|reset|revert|apply|am|cherry-pick|merge|rebase|pull|clean|switch|rm|mv|submodule|worktree)$/;
+/** Git commands that put other code in place of what is in the tree. */
+const GIT_REPLACES = /^(checkout|restore|stash|reset|revert|apply|am|cherry-pick|merge|rebase|pull|switch)$/;
+const GIT_CHANGES = /^(clean|rm|mv|submodule|worktree)$/;
 const GIT_READS =
 	/^(status|diff|log|show|blame|ls-files|ls-tree|grep|rev-parse|rev-list|describe|remote|branch|tag|shortlog|cat-file|config|fetch|reflog|merge-base|name-rev|whatchanged|add|commit|push)$/;
 /** Subcommands that install, remove or rewrite: `pip install`, `cargo add`, `go mod tidy`, `ruff format`. */
@@ -68,16 +87,13 @@ const LOG_FILE = /\.(log|txt|out|err|tmp)$/i;
 
 /** Reads a command line for what it does to the files under `cwd`. */
 export function shellEffect(line: string, cwd: string): ShellEffect {
-	if (writesInto(line, cwd)) return "changes";
 	const commands = shellCommands(line);
-	if (!commands) return "other";
-	let effect: ShellEffect = "reads";
-	for (const { words } of commands) {
+	let effect: ShellEffect = commands ? "reads" : "other";
+	for (const { words } of commands ?? []) {
 		const one = commandEffect(words, cwd);
-		if (one === "changes") return "changes";
-		if (one === "other") effect = "other";
+		if (RANK[one] > RANK[effect]) effect = one;
 	}
-	return effect;
+	return effect === "replaces" || !writesInto(line, cwd) ? effect : "changes";
 }
 
 function commandEffect(words: readonly string[], cwd: string): ShellEffect {
@@ -85,6 +101,9 @@ function commandEffect(words: readonly string[], cwd: string): ShellEffect {
 	const name = commandBase(first);
 	if (name === "") return "reads";
 	if (name === "git") return gitEffect(args);
+	if (CHANGES_ARGUMENTS.has(name)) {
+		return args.some((arg) => !arg.startsWith("-") && isRepoFile(arg, cwd)) ? "changes" : "reads";
+	}
 	if (rewrites(name, args, cwd)) return "changes";
 	if (name === "sed" || READ_ONLY.has(name)) return "reads";
 	if (name === "find") return args.some((arg) => /^-(delete|exec|execdir|ok)$/.test(arg)) ? "other" : "reads";
@@ -111,9 +130,10 @@ function gitEffect(args: readonly string[]): ShellEffect {
 	const rest = [...args];
 	while (rest[0]?.startsWith("-")) rest.splice(0, /^-[Cc]$/.test(rest[0]) ? 2 : 1);
 	const [sub = "", next = ""] = rest;
-	if (sub === "stash") return /^(list|show)$/.test(next) ? "reads" : "changes";
+	if (sub === "stash") return /^(list|show)$/.test(next) ? "reads" : "replaces";
 	// Making a branch moves nothing in the tree.
 	if (/^(checkout|switch)$/.test(sub) && rest.some((arg) => /^-[bBcC]$/.test(arg))) return "reads";
+	if (GIT_REPLACES.test(sub)) return "replaces";
 	if (GIT_CHANGES.test(sub)) return "changes";
 	return GIT_READS.test(sub) ? "reads" : "other";
 }
@@ -132,6 +152,7 @@ function writesInto(line: string, cwd: string): boolean {
 	return false;
 }
 
+/** Whether a path names a file of the repo that is not a log: `/tmp/x` and `build.log` are not. */
 function isRepoFile(target: string, cwd: string): boolean {
 	return repoPath(cwd, target) !== undefined && !LOG_FILE.test(target);
 }

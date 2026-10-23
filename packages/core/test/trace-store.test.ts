@@ -271,6 +271,26 @@ describe("trace store under contention (two connections on one file)", () => {
 		expect(errors.map(String)).toEqual([expect.stringMatching(/dropped 16 /)]);
 	});
 
+	it("reports a failed write once, even to a reporter that writes to the trace again", () => {
+		let session: ReturnType<TraceStore["startSession"]> | undefined;
+		const reported: unknown[] = [];
+		const { store, path } = open({
+			maxBuffered: 1,
+			onError: (e) => {
+				reported.push(e);
+				// What the adapter's problem log did before D-111's fix: record the failure in the trace.
+				session?.append({ kind: "exo.problem", data: String(e) });
+			},
+		});
+		session = store.startSession({ harness: "pi", cwd: "/" });
+		store.flush();
+		const other = openDatabase(path);
+		other.exec("DROP TABLE events");
+		other.close();
+		session.append({ kind: "user.input", data: 1 });
+		expect(reported).toHaveLength(1);
+	});
+
 	it("waits a little longer at close, then gives up and says what was lost (D1)", () => {
 		const { store, errors, path } = open({ busyTimeoutMs: 1, closeBusyTimeoutMs: 20 });
 		const session = store.startSession({ harness: "pi", cwd: "/" });

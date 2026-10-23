@@ -1,9 +1,13 @@
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { extname } from "node:path";
 import type { JsonValue } from "@exocortex/core";
 import { resolveToolPath, shownPath } from "./paths.ts";
 
-/** Pi's note at the end of a read that stopped early (`read.js:131-142`). */
+/**
+ * Pi's note at the end of a read that stopped early (`read.js:129-142`): "Showing lines …" when
+ * its size limit stopped it, "N more lines in file" when the read's own `limit` did.
+ */
 const CONTINUE_NOTE =
 	/\n\n\[(?:Showing lines (\d+)-(\d+) of (\d+)[^\]\n]*|(\d+) more lines in file)\. Use offset=(\d+) to continue\.\]$/;
 const MAX_OUTLINE_LINE_CHARS = 160;
@@ -13,18 +17,24 @@ export interface ReadView {
 	readonly text: string;
 	readonly numbered: boolean;
 	readonly outlined: number;
+	/** The file and content the outline was of: one is shown once a session. */
+	readonly outlineKey?: string;
 }
 
 export interface ReadViewOptions {
 	readonly numbers: boolean;
 	readonly outline: boolean;
 	readonly outlineMaxEntries: number;
+	/** Outlines already shown, by {@link ReadView.outlineKey}. */
+	readonly outlined: ReadonlySet<string>;
 }
 
 /**
  * A text `read` result with each line numbered (`cat -n` style: the number, a tab, the line), and,
- * when the read stopped before the end of the file, the declarations in the rest of it with their
- * line numbers, quoted from the file. Undefined for anything that is not a plain text read: an
+ * when pi's size limit stopped the read before the end of the file, the declarations in the rest
+ * of it with their line numbers, quoted from the file. A read its own `limit` stopped gets no
+ * outline: the model chose what to see. Each file's outline is shown once while the
+ * file is unchanged (D-110). Undefined for anything that is not a plain text read: an
  * image, an error, the note pi gives for a line too long to show (D-094).
  */
 export function readView(
@@ -42,12 +52,17 @@ export function readView(
 	const numbered = options.numbers ? numberLines(body, first) : body;
 	const nextOffset = note ? Number(note[5]) : undefined;
 	const outline =
-		options.outline && nextOffset !== undefined
-			? outlineFrom(input, nextOffset, cwd, options.outlineMaxEntries)
+		options.outline && nextOffset !== undefined && note?.[1] !== undefined
+			? outlineFrom(input, nextOffset, cwd, options.outlineMaxEntries, options.outlined)
 			: undefined;
 	if (!options.numbers && !outline) return undefined;
 	const parts = [numbered, ...(note ? [note[0].replace(/^\n\n/, "")] : []), ...(outline ? [outline.text] : [])];
-	return { text: parts.join("\n\n"), numbered: options.numbers, outlined: outline?.entries ?? 0 };
+	return {
+		text: parts.join("\n\n"),
+		numbered: options.numbers,
+		outlined: outline?.entries ?? 0,
+		...(outline ? { outlineKey: outline.key } : {}),
+	};
 }
 
 /** Numbers lines from `first`; a file's final newline does not get a number of its own. */
@@ -63,18 +78,22 @@ function outlineFrom(
 	from: number,
 	cwd: string,
 	max: number,
-): { readonly text: string; readonly entries: number } | undefined {
+	outlined: ReadonlySet<string>,
+): { readonly text: string; readonly entries: number; readonly key: string } | undefined {
 	const path = input["path"];
 	if (typeof path !== "string") return undefined;
 	const pattern = DECLARATIONS[extname(path).toLowerCase()];
 	if (!pattern) return undefined;
 	const absolute = resolveToolPath(path, cwd);
-	let lines: string[];
+	let content: string;
 	try {
-		lines = readFileSync(absolute, "utf8").split(/\r?\n/);
+		content = readFileSync(absolute, "utf8");
 	} catch {
 		return undefined;
 	}
+	const key = `${absolute}\0${createHash("sha1").update(content).digest("hex")}`;
+	if (outlined.has(key)) return undefined;
+	const lines = content.split(/\r?\n/);
 	const found: string[] = [];
 	for (let i = from - 1; i < lines.length; i++) {
 		const line = lines[i] ?? "";
@@ -89,6 +108,7 @@ function outlineFrom(
 	return {
 		text: `[exo tools] Declarations in the rest of ${shownPath(absolute, cwd)} (from line ${from}), verbatim:\n${shown.join("\n")}${more}`,
 		entries: shown.length,
+		key,
 	};
 }
 

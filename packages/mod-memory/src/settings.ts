@@ -8,24 +8,21 @@ export const SettingsSchema = Type.Object(
 	{
 		/** Card store; one per machine, cards scoped by repo (D-018). Default ~/.exocortex/memory.db. The user's to set (D-087). */
 		dbPath: Type.Optional(Type.String({ minLength: 1, ...USER_ONLY })),
-		/** Learn cards from verified error→fix pairs in this session. */
+		/**
+		 * Learn cards from verified error→fix pairs in this session. A lesson sidecar judges each fix
+		 * and words its card: without a sidecar engine nothing is learned.
+		 */
 		learn: Type.Boolean({ default: true }),
 		/** Inject matching cards into failing tool results. */
 		inject: Type.Boolean({ default: true }),
-		/**
-		 * Have a background sidecar read each fix: it decides whether the edits explain the pass and
-		 * are worth a card, and words the lesson. Off, or with no sidecar engine: every fix that code
-		 * does not refuse becomes a card with a deterministic summary of the edit.
-		 */
-		distill: Type.Boolean({ default: true }),
-		thinking: Type.Boolean({ default: false }),
 		maxCards: Type.Integer({ minimum: 1, maximum: 5, default: 2 }),
 		/** Injection budget (~4 chars per token; brief §6.4 caps it near 400 tokens). */
 		maxInjectChars: Type.Integer({ minimum: 200, default: 1_600 }),
 		/**
-		 * D-072: a card is the same problem as a failure when the failure mentions at least this share
-		 * of the names the card was learned with (tests, symbols, error codes). 0 matches on the
-		 * signature alone.
+		 * D-072: a card is the same problem as a failure when one of the failure's error lines has the
+		 * card's key and the failure mentions at least this share of the names the card was learned
+		 * with (tests, symbols, error codes). 0 matches on the key alone. A pass of a run narrowed to
+		 * some tests covers a failure when it names this share of them (D-109).
 		 */
 		minDetail: Type.Number({ minimum: 0, maximum: 1, default: 0.6 }),
 		/**
@@ -40,27 +37,26 @@ export const SettingsSchema = Type.Object(
 		 * later prompt leaves unsaid. Off until it has been tried in daily use (D-052).
 		 */
 		preferences: Type.Boolean({ default: false }),
-		/** At most this many preferences are added to one prompt. */
+		/** At most this many preferences are added to one prompt, of those the selection sidecar picks. */
 		maxPreferences: Type.Integer({ minimum: 1, maximum: 10, default: 5 }),
 		maxPreferenceChars: Type.Integer({ minimum: 200, default: 900 }),
 		/** A preference not stated as a standing rule applies once it was said in this many sessions. */
 		preferenceMinSessions: Type.Integer({ minimum: 1, default: 2 }),
 		/**
-		 * Have a sidecar pick which preferences fit a prompt and are not already stated in it, before
-		 * the agent starts. Off, or when the sidecar fails: all of them, minus keyword matches.
+		 * The most the agent's start waits for the sidecar's pick of the preferences that fit a prompt
+		 * and are not stated in it; once a few were timed, half again their 90th percentile, if less
+		 * (D-098). Without a pick (no engine, a failure, a timeout) none are added (D-109).
 		 */
-		preferenceSelect: Type.Boolean({ default: true }),
-		/** The most the agent's start waits for the pick; once a few were timed, half again their 90th percentile, if less (D-098). */
 		preferenceSelectTimeoutMs: Type.Integer({ minimum: 500, default: 4_000 }),
 		/**
 		 * With an embeddings server (D-062): a failing output whose error line is at least this similar
 		 * (cosine) to a card's trigger recalls the card. Tune per embedding model.
 		 */
 		minSimilarity: Type.Number({ minimum: 0, maximum: 1, default: 0.85 }),
-		/** Deadline for an embedding lookup on the hot path; past it, keywords decide. */
+		/** Deadline for an embedding lookup on the hot path; past it, keywords decide, and the user is told. */
 		embedTimeoutMs: Type.Integer({ minimum: 100, default: 1_500 }),
 	},
-	{ additionalProperties: true },
+	{ additionalProperties: true, retired: ["lessonThinking", "distill", "preferenceSelect"] },
 );
 
 export type MemorySettings = Static<typeof SettingsSchema> & { readonly dbPath: string };

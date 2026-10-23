@@ -400,6 +400,19 @@ describe("computeTraceMetrics", () => {
 			).toEqual([{ occurrences: 2, hints: 1, after: "stopped", fixed: true }]);
 		});
 
+		it("reads a hint sent as late help (D-108)", () => {
+			const [call, result] = bash("cargo build", ERROR);
+			const id = String((call?.data as { toolCallId?: string } | undefined)?.toolCallId);
+			const hint = event("exo.action", { action: "hint", toolCallId: id }, { synthetic: true, module: "triage" });
+			expect(
+				recurring(
+					bash("cargo build", ERROR),
+					[call, result, hint].flatMap((e) => (e ? [e] : [])),
+					bash("ls", null),
+				),
+			).toEqual([{ occurrences: 2, hints: 1, after: "stopped", fixed: false }]);
+		});
+
 		it("credits the second hint when the error outlived the first", () => {
 			expect(
 				recurring(
@@ -431,7 +444,7 @@ describe("computeTraceMetrics", () => {
 				recurring(
 					bash("cargo build", ERROR),
 					bash("cargo build", ERROR, "repeat 2"),
-					bash("cargo build", ERROR, "repeat 3 + 2 hypotheses"),
+					bash("cargo build", ERROR, "repeat 3"),
 					bash("ls", null),
 				),
 			).toEqual([{ occurrences: 3, hints: 0, after: "recurred", fixed: false }]);

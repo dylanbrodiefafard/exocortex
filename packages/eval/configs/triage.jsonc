@@ -1,6 +1,6 @@
-// Error triage: surfaces buried first errors, flags repeated failures, and adds a grounded
-// sidecar hint from the second occurrence. Slice by the error-recovery tag; watch the
-// repeated-error rate.
+// Error triage (D-108): a diagnosis on a repeated failure or a run that stops converging, from a
+// fork of the agent's context when the engine forks for free, sent as late help; a notice from
+// the loop threshold. Slice by the error-recovery tag; watch the repeated-error rate.
 {
 	"modules": {
 		"triage": { "enabled": true }

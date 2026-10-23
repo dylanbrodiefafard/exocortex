@@ -4,11 +4,10 @@ import { cacheReport, cacheSummary } from "./cache-stats.ts";
 import { type DoctorFinding, doctorReport, runDoctor } from "./doctor.ts";
 import type { ForkTracker } from "./fork.ts";
 import { OVERRIDES_ENTRY } from "./modules.ts";
+import { problemLines } from "./problems.ts";
 import type { Runtime } from "./runtime.ts";
 
-const PING_TIMEOUT_MS = 30_000;
-
-const COMMANDS = ["status", "doctor", "cache", "review", "add", "ping", "on", "off"];
+const COMMANDS = ["status", "doctor", "cache", "review", "add", "on", "off"];
 /** Modes some modules accept besides on/off. */
 const MODULE_MODES: Readonly<Record<string, readonly string[]>> = { supervisor: ["suggest", "auto"] };
 
@@ -21,7 +20,6 @@ const MODULE_MODES: Readonly<Record<string, readonly string[]>> = { supervisor: 
  *   in the editor (D-097); `/exo supervisor review` is the same;
  * - `/exo add`: adds a follow-up that arrived while the user was typing below their draft (D-097);
  * - `/exo doctor`: checks the engine against what the profile says it can do (D-099);
- * - `/exo ping`: one tiny sidecar call (and one embedding, if configured), to check the servers are reachable;
  * - `/exo off` / `/exo on`: kill switch for every module (brief §5.3), this session only;
  *   toggles are kept in the session (an `exo.overrides` entry), so `/reload` and `/resume` keep them;
  * - `/exo <module> on|off`: toggle one module, e.g. `/exo trimmer on`;
@@ -46,7 +44,7 @@ export function registerExoCommand(
 	const subcommands = () => [...COMMANDS, ...runtime.moduleIds()];
 	pi.registerCommand("exo", {
 		description:
-			"Exocortex: status | doctor | cache | review | add | ping | on | off | <module> on|off | supervisor suggest|auto",
+			"Exocortex: status | doctor | cache | review | add | on | off | <module> on|off | supervisor suggest|auto",
 		getArgumentCompletions: (prefix) =>
 			subcommands()
 				.filter((name) => name.startsWith(prefix.trim()))
@@ -54,7 +52,6 @@ export function registerExoCommand(
 		handler: async (args, ctx) => {
 			const [sub = "status", arg, ...rest] = args.trim().split(/\s+/).filter(Boolean);
 			const own: Readonly<Record<string, () => void | Promise<void>>> = {
-				ping: () => ping(runtime, ctx),
 				doctor: () => doctor(runtime, ctx, options.fork, arg === "thinking", thinkingFound),
 				status: () => say(ctx, status(runtime)),
 				cache: () => say(ctx, runtime.config?.enabled ? cacheReport(runtime.cacheStats) : "Exocortex: disabled"),
@@ -176,6 +173,7 @@ function status(runtime: Runtime): string {
 		);
 	}
 	lines.push(cacheSummary(runtime.cacheStats));
+	lines.push(...problemLines(runtime.problems, Date.now()));
 	return lines.join("\n");
 }
 
@@ -201,46 +199,6 @@ async function doctor(
 		...(found ? { thinkingFound: found } : {}),
 	});
 	say(ctx, doctorReport(findings), findings.some((f) => f.status === "fail") ? "warning" : "info");
-}
-
-async function ping(runtime: Runtime, ctx: ExtensionCommandContext): Promise<void> {
-	const pool = runtime.pool;
-	if (!pool) {
-		say(ctx, "Exocortex: no sidecar engine configured", "warning");
-		return;
-	}
-	const result = await pool.run({
-		module: "exo.ping",
-		priority: "interactive",
-		timeoutMs: PING_TIMEOUT_MS,
-		request: {
-			messages: [{ role: "user", content: "Reply with the single word: pong" }],
-			maxTokens: 16,
-			thinking: false,
-		},
-	});
-	if (result.ok) {
-		const cached = result.usage.cachedTokens === null ? "" : `, ${result.usage.cachedTokens} cached`;
-		say(
-			ctx,
-			`Exocortex sidecar OK in ${result.latencyMs} ms (${result.usage.promptTokens} prompt tokens${cached}): ${result.value.trim().slice(0, 60)}`,
-		);
-	} else {
-		say(ctx, `Exocortex sidecar ${result.outcome}: ${result.error}`, "error");
-	}
-	await pingEmbeddings(runtime, ctx);
-}
-
-/** Also checks the embeddings server, when one is configured. */
-async function pingEmbeddings(runtime: Runtime, ctx: ExtensionCommandContext): Promise<void> {
-	const embedder = runtime.embedder;
-	if (!embedder) return;
-	const started = performance.now();
-	const vectors = await embedder.embed(["ping"], { timeoutMs: PING_TIMEOUT_MS });
-	const ms = Math.round(performance.now() - started);
-	if (vectors?.[0])
-		say(ctx, `Exocortex embeddings OK in ${ms} ms (${embedder.model}, ${vectors[0].length} dimensions)`);
-	else say(ctx, `Exocortex embeddings (${embedder.model}) did not answer: modules fall back to keywords`, "warning");
 }
 
 /** Notifies in UI modes; prints to stderr in print/json mode, where the UI is a no-op. */

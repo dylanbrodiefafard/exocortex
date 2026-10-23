@@ -12,7 +12,8 @@ import { type MemoryStore, openMemoryStore } from "./store.ts";
 const stores = new Map<string, MemoryStore>();
 
 /** The shape of what is saved with the session (M9); a different version is not read. */
-const STATE_VERSION = 1;
+/** 2 (D-109): card ids started again with the store's schema 2, so an older state's ids are not these cards. */
+const STATE_VERSION = 2;
 
 /**
  * Memory, Phase 5 v1 (brief §6.4 narrowed by research R5.1–R5.5): pitfall cards only. This file
@@ -20,13 +21,14 @@ const STATE_VERSION = 1;
  * - `learn.ts`: a verified error→fix pair becomes a card (D-049, D-072), once `admission.ts` and
  *   the lesson sidecar have not refused it;
  * - `recall.ts`: a failing tool result gets the cards for its problem appended, and each card is
- *   credited by what its command did next;
+ *   credited by what its run did next;
  * - `preference-session.ts`: with `preferences` on (D-060, D-064), how the user likes work done
  *   is learned from their own messages and added to prompts that leave it unsaid;
  * - `interview.ts`: `/exo memory interview` asks a few questions to start from (D-066).
  *
- * What a task has been shown (cards, preferences) is saved with the harness session, so a module
- * rebuilt by `/exo` or a reload carries on where the last instance stopped (M9).
+ * What a session has been shown (cards, preferences) is saved with the harness session, so a module
+ * rebuilt by `/exo` or a reload carries on where the last instance stopped (M9). The user's
+ * messages end nothing (D-109): a fix, or a card's outcome, can span a question to the user.
  */
 export function createMemory(raw: Readonly<Record<string, unknown>>, ctx: ModuleContext): ExoModule {
 	const { settings, problems } = parseSettings(raw);
@@ -82,15 +84,15 @@ export function createMemory(raw: Readonly<Record<string, unknown>>, ctx: Module
 
 		onUserTurn(turn) {
 			if (resolved?.known === false) retry();
-			if (turn.origin !== "user") return;
-			recaller.finishTask();
-			learner.reset();
-			preferences.heard(turn);
+			if (turn.origin === "user") preferences.heard(turn);
 		},
 
 		contextForUserTurn: (turn, signal) => preferences.context(turn, signal),
 
-		onCompacted: () => preferences.compacted(),
+		onCompacted() {
+			recaller.compacted();
+			preferences.compacted();
+		},
 
 		command(args, dialog) {
 			if (args.trim() === "interview") return interview(dialog, deps, preferences);
@@ -98,18 +100,23 @@ export function createMemory(raw: Readonly<Record<string, unknown>>, ctx: Module
 		},
 
 		onToolResult(tool) {
-			recaller.observe(tool);
-			if (settings.learn) learner.observe(tool);
+			// Before the learner: a fix this result completes is the fix of any card it shows helped.
+			const helped = recaller.observe(tool);
+			if (settings.learn) learner.observe(tool, helped);
 		},
 
 		async rewriteToolResult(draft, signal) {
 			return settings.inject ? recaller.rewrite(draft, signal) : undefined;
 		},
 
-		async onSettle(info) {
-			if (info.outcome === "completed") recaller.finishTask();
+		/** The agent stopped (whatever other modules then do): the background sidecar can read and write. */
+		onSettled(info) {
 			learner.settled();
-			return preferences.settled(info);
+			preferences.settled(info);
+		},
+
+		async onSettle() {
+			return preferences.notice();
 		},
 
 		status() {
@@ -120,12 +127,13 @@ export function createMemory(raw: Readonly<Record<string, unknown>>, ctx: Module
 		},
 
 		/**
-		 * The instance is going away: at a session's end, or replaced mid-task. Cards whose outcome is
-		 * already settled are credited now, since no later hook may come; the rest stay in the saved
-		 * state for the next instance. The store stays open: it is shared by the process.
+		 * The instance is going away: at a session's end, or replaced. Every card shown is credited
+		 * with what is known, since no later hook may come; a showing is credited once, so an
+		 * instance rebuilt from the saved state cannot count it twice. The store stays open: it is
+		 * shared by the process.
 		 */
 		dispose() {
-			recaller.finishTask(false);
+			recaller.dispose();
 		},
 	};
 }

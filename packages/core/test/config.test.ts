@@ -22,8 +22,9 @@ describe("loadConfig", () => {
 				reservedForMain: 2,
 				sessionTokenBudget: 0,
 				backgroundWhenIdleOnly: true,
+				thinking: "auto",
 			},
-			embeddings: { timeoutMs: 2_000 },
+			embeddings: {},
 			modules: {},
 		});
 		expect(sources).toEqual([
@@ -124,7 +125,7 @@ describe("a project's config has limited authority (D5, D-087)", () => {
 			{ MINE: "k" },
 		);
 		expect(config.engine).toEqual({ baseUrl: "http://127.0.0.1:8080/v1", apiKey: "$MINE", profile: "generic" });
-		expect(config.embeddings).toEqual({ timeoutMs: 2_000 });
+		expect(config.embeddings).toEqual({});
 		expect(config.trace.dbPath).toBe("/home/u/.exocortex/exocortex.db");
 		expect(config.pool.reservedForMain).toBe(2);
 		expect(config.modules).toEqual({ trimmer: { enabled: true } });
@@ -246,18 +247,28 @@ describe("config validation (D7)", () => {
 
 	it("accepts known modules with valid settings, and leaves the settings as written", () => {
 		const { config, problems } = check(`{ "modules": {
-			"supervisor": { "enabled": true, "maxTokensPerCall": 2000, "mode": "auto", "checks": ["npm test"] },
-			"strict": { "enabled": true, "maxTokensPerCall": 100 },
+			"supervisor": { "enabled": true, "mode": "auto", "checks": ["npm test"] },
+			"strict": { "enabled": true },
 			"anything": { "whatever": 1 }
 		} }`);
 		expect(problems).toEqual([]);
 		expect(config.enabled).toBe(true);
-		expect(config.modules["supervisor"]).toEqual({
-			enabled: true,
-			maxTokensPerCall: 2000,
-			mode: "auto",
-			checks: ["npm test"],
-		});
+		expect(config.modules["supervisor"]).toEqual({ enabled: true, mode: "auto", checks: ["npm test"] });
+	});
+
+	it("leaves out settings that no longer exist and names them, instead of switching off (D-106)", () => {
+		const { config, problems, retired } = check(`{
+			"embeddings": { "timeoutMs": 2000 },
+			"modules": { "supervisor": { "enabled": true, "thinking": false, "maxTokensPerCall": 2000, "mode": "auto" } }
+		}`);
+		expect(problems).toEqual([]);
+		expect(config.enabled).toBe(true);
+		expect(config.modules["supervisor"]).toEqual({ enabled: true, mode: "auto" });
+		expect(retired).toEqual([
+			"embeddings.timeoutMs",
+			"modules.supervisor.thinking",
+			"modules.supervisor.maxTokensPerCall",
+		]);
 	});
 
 	it("fails closed on a module id nobody knows", () => {
@@ -278,11 +289,7 @@ describe("config validation (D7)", () => {
 	});
 
 	it("caps timeouts at what a timer can hold", () => {
-		for (const text of [
-			`{ "pool": { "timeoutMs": 2147483648 } }`,
-			`{ "pool": { "maxHoldMs": 2147483648 } }`,
-			`{ "embeddings": { "timeoutMs": 9999999999 } }`,
-		]) {
+		for (const text of [`{ "pool": { "timeoutMs": 2147483648 } }`, `{ "pool": { "maxHoldMs": 2147483648 } }`]) {
 			const { config, problems } = load({ [GLOBAL]: text });
 			expect(config.enabled).toBe(false);
 			expect(problems).toHaveLength(1);

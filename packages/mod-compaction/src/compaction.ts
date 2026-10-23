@@ -13,7 +13,7 @@ import {
 	strings,
 } from "./facts.ts";
 import { type EarlySummary, type Narrative, UNVERIFIED_NOTE, writeEarlySummary, writeNarrative } from "./narrative.ts";
-import { type FactsView, factsFromSummary, MAX_FILES, renderSummary, type Shown } from "./render.ts";
+import { type FactsView, factsFromSummary, MAX_MODIFIED_FILES, renderSummary, type Shown } from "./render.ts";
 import { type CompactionSettings, parseSettings } from "./settings.ts";
 import {
 	type Baseline,
@@ -132,6 +132,26 @@ export function createCompaction(raw: Readonly<Record<string, unknown>>, ctx: Mo
 	/** The summary written before compaction was due (D-098), and whether one is being written. */
 	let early: EarlySummary | undefined;
 	let writingEarly = false;
+	/**
+	 * Stops the early summary being written (D-111). It is a long call that holds the engine's one
+	 * fork: it ends when the agent starts again (a message, or a tool result of a run a module
+	 * continued), when compaction comes (which needs the fork), and with this instance.
+	 */
+	let earlyStop: AbortController | undefined;
+	const stopEarly = (): void => {
+		earlyStop?.abort();
+		earlyStop = undefined;
+	};
+	/**
+	 * Why early summaries were not written, each said once per instance: the early summary is
+	 * tried at every stop past the threshold, and an engine that cannot fork would say so each time.
+	 */
+	const earlyProblems = new Set<string>();
+	const logEarly = (problem: string, message: string): void => {
+		if (earlyProblems.has(problem)) return;
+		earlyProblems.add(problem);
+		ctx.log(message);
+	};
 	/** Compactions seen: an early summary begun before one is of a context that is gone. */
 	let compactionsSeen = 0;
 
@@ -141,36 +161,48 @@ export function createCompaction(raw: Readonly<Record<string, unknown>>, ctx: Mo
 	 * background priority, while the agent is idle; nothing waits for it.
 	 */
 	const writeEarly = (context: SettleInfo["context"]): void => {
-		if (!settings.earlySummary || !context || writingEarly) return;
+		if (!settings.earlySummary || !settings.fork || !context || writingEarly) return;
 		const { tokens, compactAt } = context;
 		if (tokens < settings.earlySummaryAt * compactAt) return;
 		if (early && tokens - early.tokens < EARLY_REFRESH_SHARE * compactAt) return;
 		writingEarly = true;
 		const at = Date.now();
 		const asOf = compactionsSeen;
+		const stop = new AbortController();
+		earlyStop = stop;
+		// Being stopped is not a problem worth telling.
+		const log = (problem: string, message: string): void => {
+			if (!stop.signal.aborted) logEarly(problem, message);
+		};
 		ctx
 			.forkPrefix()
-			.then((fork) => (fork ? writeEarlySummary(ctx, settings, fork) : undefined))
+			.then((fork) => {
+				if (stop.signal.aborted) return undefined;
+				// Said, since nothing else shows it: the agent's last reply failed, or a request is running.
+				if (!fork) log("no fork", "early summary not written: no fork of the agent's context");
+				return fork ? writeEarlySummary(ctx, settings, fork, stop.signal, log) : undefined;
+			})
 			.then((written) => {
-				if (!written || asOf !== compactionsSeen) return;
+				if (!written || stop.signal.aborted || asOf !== compactionsSeen) return;
 				early = { ...written, at, tokens };
 				ctx.record({ kind: "exo.compaction", data: { action: "early_summary", tokens, compactAt } });
 			})
-			.catch((error: unknown) => ctx.log(`early summary failed: ${String(error)}`))
+			.catch((error: unknown) => logEarly("threw", `early summary failed: ${String(error)}`))
 			.finally(() => {
 				writingEarly = false;
+				if (earlyStop === stop) earlyStop = undefined;
 			});
 	};
 
 	return {
 		id: COMPACTION_ID,
 
-		async onSettle(info) {
+		onSettled(info) {
 			writeEarly(info.context);
-			return undefined;
 		},
 
 		onUserTurn(turn) {
+			stopEarly();
 			// What an extension sent is not the user's request. An accepted suggestion is part of the
 			// task's history: it lists what was still missing.
 			if (turn.origin === "extension" && turn.text.length <= MAX_EXTENSION_TEXT_CHARS) {
@@ -181,6 +213,7 @@ export function createCompaction(raw: Readonly<Record<string, unknown>>, ctx: Mo
 		},
 
 		onToolResult(tool) {
+			stopEarly();
 			const record = commandRecord(tool, clock + 1);
 			const path = tool.input["path"];
 			if (record) {
@@ -198,6 +231,8 @@ export function createCompaction(raw: Readonly<Record<string, unknown>>, ctx: Mo
 		},
 
 		async compact(request, signal) {
+			// Compaction needs the fork, and one being written early is of a context about to go.
+			stopEarly();
 			// The summary does not depend on the workspace: it is written while git is read.
 			const writing = writeNarrative(ctx, settings, request, signal, early).catch((error: unknown) => {
 				ctx.log(`summary failed: ${String(error)}`);
@@ -232,7 +267,6 @@ export function createCompaction(raw: Readonly<Record<string, unknown>>, ctx: Mo
 			const view: FactsView = { ...requests, modified: files.shown, read, commands, lastEditAt };
 
 			const narrative = await writing;
-			if (!narrative && settings.fallback === "harness") return undefined;
 			ctx.record({
 				kind: "exo.compaction",
 				data: {
@@ -243,11 +277,14 @@ export function createCompaction(raw: Readonly<Record<string, unknown>>, ctx: Mo
 					userMessages: requests.requests.length + requests.requestsOmitted,
 					commands: commands.filter((c) => c.outcome !== "unlisted").length,
 					unverified: narrative?.unverified.length ?? 0,
+					...(narrative && narrative.unverified.length > 0 ? { unverifiedNames: [...narrative.unverified] } : {}),
 					early: narrative?.early ?? "none",
 				},
 			});
 			return {
 				summary: renderSummary(view, narrativeSections(narrative), settings),
+				// Without a handover the facts follow the harness's own summary (D-111).
+				...(narrative ? {} : { part: "facts" as const }),
 				details: { facts: factsJson(facts) },
 				commit: () => {
 					compactions += 1;
@@ -271,6 +308,7 @@ export function createCompaction(raw: Readonly<Record<string, unknown>>, ctx: Mo
 		},
 
 		dispose() {
+			stopEarly();
 			save();
 		},
 
@@ -353,7 +391,7 @@ function filesOf(
 		];
 		return notes.length === 0 ? path : `${path} (${notes.join(", ")})`;
 	};
-	const listed = modified.slice(-MAX_FILES);
+	const listed = modified.slice(-MAX_MODIFIED_FILES);
 	const read = mergePaths(tracked.read.map(spell), request.filesRead.map(spell)).filter(
 		(path) => !modified.includes(path),
 	);

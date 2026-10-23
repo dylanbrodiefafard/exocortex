@@ -42,6 +42,8 @@ export const TRACE_EVENT_KINDS = [
 	"exo.memory",
 	/** How a test run whose exit code a pipe hid was read: from its output, or by a sidecar (D-075). */
 	"exo.run",
+	/** An error caught in a hook, or a module's note on something it could not do (D-106). */
+	"exo.problem",
 ] as const;
 
 export type TraceEventKind = (typeof TRACE_EVENT_KINDS)[number];
@@ -198,6 +200,11 @@ export function openTraceStore(options: TraceStoreOptions): TraceStore {
 	let closed = false;
 	/** Flushes in a row that could not get the database. */
 	let failedFlushes = 0;
+	/**
+	 * A flush is running: what its error reports append waits for the timer. A reporter that
+	 * writes to the trace would otherwise flush again from inside the report, without end.
+	 */
+	let flushing = false;
 	/** Operations refused because `maxPending` was reached. */
 	let dropped = 0;
 
@@ -224,15 +231,19 @@ export function openTraceStore(options: TraceStoreOptions): TraceStore {
 		buffer.push(op);
 		// While the database is locked, the retry timer decides when to try again: a synchronous
 		// attempt per append would block the caller for the busy timeout each time.
-		if (buffer.length >= maxBuffered && failedFlushes === 0) flush();
+		if (buffer.length >= maxBuffered && failedFlushes === 0 && !flushing) flush();
 		else schedule(flushIntervalMs);
 	}
 
 	function flush(): void {
+		if (flushing) return;
+		flushing = true;
 		try {
 			flushNow();
 		} catch (error) {
 			report(error);
+		} finally {
+			flushing = false;
 		}
 	}
 
@@ -247,8 +258,10 @@ export function openTraceStore(options: TraceStoreOptions): TraceStore {
 			// The batch stays buffered. Another writer holding the lock is ordinary; anything else
 			// is worth one report.
 			rollback(db);
-			if (failedFlushes === 0 && !isBusy(error)) report(error);
+			// Counted before the report: a reporter that appends again must find the failure known
+			// and leave the retry to the timer, not flush again from inside this one.
 			failedFlushes += 1;
+			if (failedFlushes === 1 && !isBusy(error)) report(error);
 			schedule(Math.min(flushIntervalMs * 2 ** Math.min(failedFlushes, 16), MAX_RETRY_DELAY_MS));
 			return;
 		}

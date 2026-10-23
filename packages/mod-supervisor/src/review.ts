@@ -1,12 +1,12 @@
-import { type JsonValue, loadPrompt, type ModuleContext, SIDECAR_MAX_TOKENS } from "@exocortex/core";
+import { type JsonValue, loadPrompt, type ModuleContext, SIDECAR_MAX_TOKENS, startAndEnd } from "@exocortex/core";
 import { type Static, Type } from "typebox";
 import { fitDiff } from "./evidence.ts";
 import { changedSignatures, usesOf } from "./review-context.ts";
 import type { SupervisorSettings } from "./settings.ts";
 import { diffHeaderPath, parseDiff } from "./signals.ts";
 
-const FIND_PROMPT = loadPrompt(new URL("../prompts/review-find.v1.md", import.meta.url));
-const VERIFY_PROMPT = loadPrompt(new URL("../prompts/review-verify.v1.md", import.meta.url));
+const FIND_PROMPT = loadPrompt(new URL("../prompts/review-find.v2.md", import.meta.url));
+const VERIFY_PROMPT = loadPrompt(new URL("../prompts/review-verify.v2.md", import.meta.url));
 
 const SEVERITIES = ["high", "medium", "low"] as const;
 type Severity = (typeof SEVERITIES)[number];
@@ -20,7 +20,6 @@ const FindingsSchema = Type.Object({
 			scenario: Type.String(),
 			severity: Type.Union(SEVERITIES.map((s) => Type.Literal(s))),
 		}),
-		{ maxItems: 10 },
 	),
 });
 
@@ -51,7 +50,7 @@ export interface ReviewResult {
 	/** Passes asked, and those that answered. */
 	readonly passes: number;
 	readonly answered: number;
-	/** Findings the passes proposed, those that quoted a line the change added, and the distinct bugs among them. */
+	/** Findings the passes proposed, those that quoted a line the change added or a caller it left behind, and the distinct bugs among them. */
 	readonly proposed: number;
 	readonly anchored: number;
 	readonly distinct: number;
@@ -73,6 +72,8 @@ export interface ReviewInput {
 	readonly diff: string;
 	/** Keys ({@link findingKey}) of bugs already reported in this task: not reported again. */
 	readonly reported: ReadonlySet<string>;
+	/** How much of the change a pass reads, in characters: sized from the context window. */
+	readonly maxChars: number;
 }
 
 /**
@@ -93,10 +94,14 @@ const SAME_BUG_SIMILARITY = 0.5;
 const MIN_VOTES = 2;
 const NO_REQUEST = "(No request was given: review the change for bugs on its own terms.)";
 const NO_USES = "(none looked up)";
+/** Shares of a review prompt's budget for the request and for the uses; the change gets the rest. */
+const REQUEST_SHARE = 0.15;
+const USES_SHARE = 0.1;
 
 /**
  * Reviews a change for bugs (D-097). Several passes read it, each with its files in another order,
- * and propose findings. Code keeps those that quote a line the change added, groups the ones that
+ * and propose findings. Code keeps those that quote a line the change added, or a line of a caller
+ * it left behind that the passes were shown (D-107), groups the ones that
  * describe the same bug, and drops those fewer than two passes found or that an earlier review of
  * the task reported. A check call then tries to disprove each one left; only those it finds real
  * are kept, most severe first. Undefined when no pass
@@ -104,7 +109,7 @@ const NO_USES = "(none looked up)";
  */
 export async function reviewChange(
 	ctx: ModuleContext,
-	settings: SupervisorSettings,
+	settings: Pick<SupervisorSettings, "reviewPasses" | "reviewMaxFindings">,
 	input: ReviewInput,
 	signal: AbortSignal,
 ): Promise<ReviewResult | undefined> {
@@ -112,14 +117,21 @@ export async function reviewChange(
 	if (!pool) return undefined;
 	const sections = fileSections(input.diff);
 	if (sections.length === 0) return emptyResult(settings.reviewPasses);
-	const request = input.requests.length > 0 ? input.requests.join("\n\n") : NO_REQUEST;
+	// The request, the uses and the change share one budget (D-107): the change gets what the others leave.
+	const request = startAndEnd(
+		input.requests.length > 0 ? input.requests.join("\n\n") : NO_REQUEST,
+		Math.floor(input.maxChars * REQUEST_SHARE),
+		{ mark: "… (middle of a long request left out) …", startShare: 0.75 },
+	);
 	const uses = await usesOf(ctx, changedSignatures(input.diff), input.diff, signal);
 	const usesView = {
 		uses_label: "Other places that use a function whose declaration the change rewrote or removed",
-		uses: uses ?? NO_USES,
+		uses: startAndEnd(uses?.text ?? NO_USES, Math.floor(input.maxChars * USES_SHARE)),
 	};
+	const diffRoom = Math.max(1_000, input.maxChars - request.length - usesView.uses.length);
 	const run = (content: string, temperature: number) => ({
 		module: "supervisor",
+		kind: "judge" as const,
 		priority: "critical" as const,
 		timeoutMs: NO_TIME_LIMIT,
 		signal,
@@ -127,7 +139,6 @@ export async function reviewChange(
 			messages: [{ role: "user" as const, content }],
 			maxTokens: SIDECAR_MAX_TOKENS,
 			temperature,
-			thinking: settings.reviewThinking,
 		},
 	});
 
@@ -138,7 +149,7 @@ export async function reviewChange(
 				...run(
 					FIND_PROMPT.render({
 						request,
-						diff: fitDiff(order.map((s) => s.text).join("\n"), settings.reviewMaxChars),
+						diff: fitDiff(order.map((s) => s.text).join("\n"), diffRoom),
 						max_findings: String(Math.max(settings.reviewMaxFindings, 3)),
 						...usesView,
 					}),
@@ -155,7 +166,8 @@ export async function reviewChange(
 	if (answered.length === 0) return undefined;
 
 	const added = addedLines(input.diff);
-	const anchored = passes.map((found) => (found ?? []).flatMap((f) => anchor(f, added)));
+	const callers = uses?.lines ?? new Map<string, ReadonlySet<string>>();
+	const anchored = passes.map((found) => (found ?? []).flatMap((f) => anchor(f, added, callers)));
 	const buckets = group(anchored);
 	const fresh = buckets.filter((b) => !input.reported.has(findingKey(b.finding)));
 	const candidates = fresh
@@ -167,12 +179,19 @@ export async function reviewChange(
 		candidates.map(async (bucket) => {
 			const finding = bucket.finding;
 			const section = sections.find((s) => s.path === finding.file);
+			// A finding about a caller the change left behind is checked against the whole change.
+			const shown = section
+				? { diff_label: `The change to ${finding.file}`, diff: fitDiff(section.text, diffRoom) }
+				: {
+						diff_label: `The whole change (the report is about ${finding.file}, a place it left behind)`,
+						diff: fitDiff(input.diff, diffRoom),
+					};
 			const result = await pool.run({
 				...run(
 					VERIFY_PROMPT.render({
 						request,
 						file: finding.file,
-						diff: fitDiff(section?.text ?? "", settings.reviewMaxChars),
+						...shown,
 						quote: finding.quote,
 						title: finding.title,
 						scenario: finding.scenario,
@@ -282,17 +301,29 @@ function addedLines(diff: string): Map<string, Set<string>> {
 }
 
 /**
- * The finding pinned to a line the change added, or nothing: one that quotes no such line is
- * about code the change did not write, or about nothing in it. A finding that names the wrong
- * file is moved to the one file whose added lines have its quote.
+ * The finding pinned to a line the change added, or to a line of a caller it left behind that the
+ * passes were shown (D-107), or nothing: one that quotes neither is about code the change did not
+ * write or touch, or about nothing in it. A finding that names the wrong file is moved to the one
+ * file whose lines have its quote.
  */
-function anchor(finding: Proposed, added: ReadonlyMap<string, ReadonlySet<string>>): Proposed[] {
+function anchor(
+	finding: Proposed,
+	added: ReadonlyMap<string, ReadonlySet<string>>,
+	callers: ReadonlyMap<string, ReadonlySet<string>>,
+): Proposed[] {
 	const quote = normalize(finding.quote.replace(/^\+/, ""));
 	if (quote.replace(/\s/g, "").length < MIN_QUOTE_CHARS) return [];
 	const file = normalizePath(finding.file);
-	if (added.get(file)?.has(quote)) return [{ ...finding, file, quote }];
-	const holders = [...added].filter(([, lines]) => lines.has(quote)).map(([path]) => path);
-	return holders.length === 1 && holders[0] !== undefined ? [{ ...finding, file: holders[0], quote }] : [];
+	for (const lines of [added, normalizedLines(callers)]) {
+		if (lines.get(file)?.has(quote)) return [{ ...finding, file, quote }];
+		const holders = [...lines].filter(([, held]) => held.has(quote)).map(([path]) => path);
+		if (holders.length === 1 && holders[0] !== undefined) return [{ ...finding, file: holders[0], quote }];
+	}
+	return [];
+}
+
+function normalizedLines(lines: ReadonlyMap<string, ReadonlySet<string>>): Map<string, Set<string>> {
+	return new Map([...lines].map(([path, held]) => [normalizePath(path), new Set([...held].map(normalize))]));
 }
 
 function normalizePath(path: string): string {

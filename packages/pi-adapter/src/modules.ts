@@ -1,18 +1,24 @@
-import type {
-	AgentBeforeSettleEvent,
-	BoundaryResult,
-	ExtensionAPI,
-	ExtensionContext,
-	SessionBeforeCompactEvent,
-	ToolCallEvent,
-	ToolResultEvent,
+import {
+	type AgentBeforeSettleEvent,
+	type BoundaryResult,
+	type CompactionResult,
+	type ExtensionAPI,
+	type ExtensionContext,
+	getAgentDir,
+	compact as piCompact,
+	type SessionBeforeCompactEvent,
+	SettingsManager,
+	type ToolCallEvent,
+	type ToolResultEvent,
 } from "@earendil-works/pi-coding-agent";
 import {
 	type Committable,
 	type CompactionRequest,
+	type CompactionSummary,
 	canonicalJson,
 	type ExoModule,
 	hiddenRun,
+	holdFor,
 	type JsonValue,
 	judgeHiddenRun,
 	type ModuleContext,
@@ -39,6 +45,7 @@ import { remainingMs, withBudget } from "./budget.ts";
 import type { ForkTracker } from "./fork.ts";
 import { createHoldUi } from "./hold.ts";
 import {
+	assistantTextsOfRun,
 	exitCodeOf,
 	fullOutputPathOf,
 	isEscapeKey,
@@ -92,37 +99,136 @@ const OFFER_WIDGET_KEY = "exo.offer";
  */
 const OFFER_SHORTCUT = "alt+r";
 
-/**
- * Pi's default `compaction.reserveTokens` (`core/compaction/compaction.js:55`): it compacts once the
- * context passes the window less this (`:173-176`). The extension API does not expose the setting.
- */
-const PI_RESERVE_TOKENS = 16_384;
+/** Pi's retry settings (`SettingsManager.getRetrySettings`, `core/settings-manager.js:659-666`). */
+type PiRetrySettings = ReturnType<SettingsManager["getRetrySettings"]>;
 
-/** What settle hooks are told: how the run ended, its last words and how full the context is. */
-function settleInfo(event: AgentBeforeSettleEvent, ctx: ExtensionContext): SettleInfo {
-	const context = contextOf(ctx);
-	return { outcome: event.outcome, lastAssistantText: lastAssistantText(event), ...(context ? { context } : {}) };
+/**
+ * Pi's settings that decide where it compacts (PI_API_NOTES §9), and how pi retries a summary
+ * request: its own summary written for it is retried as pi would (D-111).
+ */
+interface PiCompactionSettings {
+	readonly enabled: boolean;
+	readonly reserveTokens: number;
+	/** Undefined when they could not be read: pi's defaults then (3 retries from 2 s). */
+	readonly retry?: PiRetrySettings;
 }
 
-/** How full the context is and where pi compacts it, when pi knows (D-098). */
-function contextOf(ctx: ExtensionContext): { readonly tokens: number; readonly compactAt: number } | undefined {
+/** Pi's default retry settings (`core/settings-manager.js:659-666`). */
+const PI_DEFAULT_RETRY: PiRetrySettings = {
+	enabled: true,
+	maxRetries: 3,
+	baseDelayMs: 2_000,
+	maxAgentDelayMs: 60_000,
+};
+
+/** The main model's context window in tokens, when pi knows it. */
+function contextWindowOf(ctx: ExtensionContext): number | undefined {
 	try {
-		const usage = ctx.getContextUsage();
-		if (!usage || usage.tokens === null || !(usage.contextWindow > PI_RESERVE_TOKENS)) return undefined;
-		return { tokens: usage.tokens, compactAt: usage.contextWindow - PI_RESERVE_TOKENS };
+		const window = ctx.getContextUsage()?.contextWindow ?? ctx.model?.contextWindow;
+		return typeof window === "number" && window > 0 ? window : undefined;
 	} catch {
 		return undefined;
 	}
 }
 
+/** Pi's default `compaction.reserveTokens` (`core/settings-manager.js`, `DEFAULT_COMPACTION_TOKEN_SETTINGS`). */
+const PI_DEFAULT_RESERVE_TOKENS = 16_384;
+
+/**
+ * Pi's compaction settings as pi resolves them for the session's model: its settings files, a
+ * model override, then its defaults (`SettingsManager.getCompactionSettings`, PI_API_NOTES §9).
+ * Pi's defaults when they cannot be read.
+ */
+function readPiCompactionSettings(ctx: ExtensionContext): PiCompactionSettings {
+	try {
+		const manager = SettingsManager.create(ctx.cwd, getAgentDir(), { projectTrusted: ctx.isProjectTrusted() });
+		const settings = manager.getCompactionSettings(ctx.model);
+		return { enabled: settings.enabled, reserveTokens: settings.reserveTokens, retry: manager.getRetrySettings() };
+	} catch {
+		return { enabled: true, reserveTokens: PI_DEFAULT_RESERVE_TOKENS };
+	}
+}
+
+/**
+ * How full the context is and where pi compacts it, when pi knows (D-098, D-111): once the context
+ * passes the window less `reserveTokens` (`core/compaction/compaction.js:173-176`), or, with
+ * auto-compaction off, only when it overflows the window.
+ */
+function contextOf(
+	ctx: ExtensionContext,
+	pi: PiCompactionSettings,
+): { readonly tokens: number; readonly compactAt: number } | undefined {
+	try {
+		const usage = ctx.getContextUsage();
+		if (!usage || usage.tokens === null) return undefined;
+		const compactAt = pi.enabled ? usage.contextWindow - pi.reserveTokens : usage.contextWindow;
+		return compactAt > 0 ? { tokens: usage.tokens, compactAt } : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/** Pi's own summary of what a compaction drops, written with the main model (D-111). */
+type HarnessSummary = (
+	event: SessionBeforeCompactEvent,
+	ctx: ExtensionContext,
+	signal: AbortSignal,
+	retry: PiRetrySettings,
+) => Promise<CompactionResult>;
+
+/**
+ * Pi's exported `compact` (`core/compaction/compaction.js:685`), the summary pi writes when no
+ * extension supplies one (PI_API_NOTES §9), called as pi calls it (`core/agent-session.js:2108-2111`):
+ * - requests go through the model registry, which resolves auth, headers and env at request time
+ *   and routes a virtual model, as the agent's own requests do;
+ * - a transient failure (a 429, an overloaded engine) is retried with pi's retry settings. Pi's
+ *   retry callbacks only feed its own UI events, which an extension cannot emit.
+ */
+const piSummary: HarnessSummary = (event, ctx, signal, retry) => {
+	const model = ctx.model;
+	if (!model) return Promise.reject(new Error("no model is selected"));
+	return piCompact(
+		event.preparation,
+		model,
+		undefined,
+		undefined,
+		event.customInstructions,
+		signal,
+		ctx.thinkingLevel,
+		(streamModel, context, streamOptions) => ctx.modelRegistry.streamSimple(streamModel, context, streamOptions),
+		undefined,
+		retry,
+	);
+};
+
+/** The main model's context window, when pi knows it. */
+function windowOf(ctx: ExtensionContext): number | null {
+	const window = ctx.model?.contextWindow;
+	return typeof window === "number" && window > 0 ? window : null;
+}
+
+/** Put before the facts when even pi's own summary could not be written (D-111). */
+const NO_HANDOVER =
+	"(No summary of the earlier conversation could be written. What follows was tracked as it happened.)";
+
 /** Status-line key set while a module's background job runs (D-097); the eval driver waits on it. */
 const BACKGROUND_STATUS_KEY = "exo.background";
-/** Hard cap on how long the rewrites of one batch of tool results may hold the agent loop, across all modules and results (D-098). */
-const REWRITE_BUDGET_MS = 20_000;
-/** Hard cap on how long modules may look before a tool runs, across all modules: the tool waits (D-094). */
+/**
+ * A guard against an Exocortex bug holding the agent loop over one batch of tool results, not a
+ * share handed out (D-106): each module keeps to the hold it set for itself, and the modules run in
+ * turn, each with what is left of this.
+ */
+const REWRITE_BUDGET_MS = 60_000;
+/** A rewriter that hangs may take this share of {@link REWRITE_BUDGET_MS}, at most. */
+const REWRITE_GUARD_PARTS = 3;
+/** A guard on how long a module may look before a tool runs: the tool waits (D-094). The modules look at once, each with all of it (D-106). */
 const TOOL_CALL_BUDGET_MS = 5_000;
-/** A sidecar reading a piped test run's output holds the tool result: a short reply to a short prompt. */
-const HIDDEN_RUN_BUDGET_MS = 4_000;
+/**
+ * The most a sidecar reading a piped test run's output may hold the tool result (D-106): the hold
+ * is what such readings usually take (`holdFor`), up to this. A fixed 4 s timed out 7 calls in 25
+ * on a busy engine, for replies of 15 tokens.
+ */
+const HIDDEN_RUN_BUDGET_MS = 15_000;
 /** The name the reading's sidecar call and trace event go under: it serves every module. */
 const HIDDEN_RUN_MODULE = "runs";
 /**
@@ -133,6 +239,8 @@ const HIDDEN_RUN_MODULE = "runs";
 const COMPACT_BUDGET_MS = 15 * 60_000;
 /** Hard cap on how long modules may hold a new user prompt before the agent starts on it. */
 const USER_TURN_BUDGET_MS = 6_000;
+/** How long settle hooks may run before the status line says the work is being checked. */
+const SETTLE_PROGRESS_AFTER_MS = 300;
 /** Hard cap on how long modules' `dispose` may hold a session's end. */
 const DISPOSE_BUDGET_MS = 2_000;
 /**
@@ -169,6 +277,10 @@ export interface ModuleHostOptions {
 	readonly maxContinuations?: number;
 	/** Gives a compaction the main agent's context to continue from (D-093); none without it. */
 	readonly fork?: ForkTracker;
+	/** Replaces pi's own summary, for tests (D-111). */
+	readonly harnessSummary?: HarnessSummary;
+	/** Replaces reading pi's compaction settings, for tests. */
+	readonly piCompactionSettings?: (ctx: ExtensionContext) => PiCompactionSettings;
 }
 
 /** A module instance, the settings it was built from, and the switch that turns its context off. */
@@ -202,6 +314,12 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 	const userTurnBudgetMs = options.budgetsMs?.userTurn ?? USER_TURN_BUDGET_MS;
 	const disposeBudgetMs = options.budgetsMs?.dispose ?? DISPOSE_BUDGET_MS;
 	const maxContinuations = options.maxContinuations ?? MAX_CONSECUTIVE_CONTINUATIONS;
+	const harnessSummary = options.harnessSummary ?? piSummary;
+	const readPiSettings = options.piCompactionSettings ?? readPiCompactionSettings;
+	/** Pi's compaction settings: read once per session, then as pi handed them to a compaction. */
+	let piCompaction: PiCompactionSettings | undefined;
+	/** The user was told this session that compaction fell back to pi's own summary (D-111). */
+	let toldFallback = false;
 	const hold = createHoldUi(onError);
 	let slots: Slot[] = [];
 	let cwd = process.cwd();
@@ -451,7 +569,7 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 		const draft = ctx.ui.getEditorText().trimEnd();
 		ctx.ui.setEditorText(draft === "" ? taken.action.text : `${draft}\n\n${taken.action.text}`);
 		showOffer(ctx, undefined);
-		commit(taken.id, taken.action);
+		commitSettle(taken.id, taken.action, "suggest");
 		return true;
 	}
 
@@ -519,7 +637,7 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 			);
 			started = true;
 		}
-		commit(id, action);
+		commitSettle(id, action, now.kind);
 		return started;
 	}
 
@@ -571,6 +689,15 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 		}
 	}
 
+	/** Tells a module how its settle action was delivered (a continuation may go out as a suggestion). */
+	function commitSettle(id: string, action: SettleAction, delivered: SettleAction["kind"]): void {
+		try {
+			action.commit?.(delivered);
+		} catch (error) {
+			onError(`${id}.commit`, error);
+		}
+	}
+
 	function each(where: string, fn: (module: ExoModule) => void): void {
 		for (const module of modules()) {
 			try {
@@ -604,6 +731,8 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 			await disposeAll();
 			cwd = ctx.cwd;
 			sessionId = ctx.sessionManager.getSessionId();
+			piCompaction = undefined;
+			toldFallback = false;
 			suggested = undefined;
 			turn = undefined;
 			continuations = 0;
@@ -625,6 +754,8 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 			// What a background job read, and what an offered follow-up was about, is about to change.
 			stopJobs();
 			dropOffer(lastCtx);
+			// What the last settle said is about the previous run (D-106).
+			if (lastCtx) hold.settled(lastCtx, undefined);
 			newBatch();
 			const accepted = suggested !== undefined && sameText(suggested, event.text);
 			suggested = undefined;
@@ -735,23 +866,25 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 	}
 
 	/**
-	 * Lets modules look before a tool runs (D-094), each with an equal share of what is left of the
-	 * budget. A call another tool made (`parentToolCallId`) is not offered: it has no result of its
+	 * Lets modules look before a tool runs (D-094). They look at once, each with the whole budget
+	 * (D-106): none depends on another, and shares of it ran one module's look into the next one's
+	 * time. A call another tool made (`parentToolCallId`) is not offered: it has no result of its
 	 * own in the conversation.
 	 */
 	async function beforeToolCall(event: ToolCallEvent, parent: AbortSignal | undefined): Promise<void> {
 		const lookers = modules().filter((m) => m.beforeToolCall);
 		if (lookers.length === 0 || event.parentToolCallId !== undefined) return;
 		const call: ToolCall = { toolName: event.toolName, toolCallId: event.toolCallId, input: toObject(event.input) };
-		const deadline = Date.now() + toolCallBudgetMs;
-		for (const [index, module] of lookers.entries()) {
-			await withBudget(
-				remainingMs(deadline) / (lookers.length - index),
-				parent,
-				(signal) => module.beforeToolCall?.(call, signal),
-				reporter(`${module.id}.beforeToolCall`),
-			);
-		}
+		await Promise.all(
+			lookers.map((module) =>
+				withBudget(
+					toolCallBudgetMs,
+					parent,
+					(signal) => module.beforeToolCall?.(call, signal),
+					reporter(`${module.id}.beforeToolCall`),
+				),
+			),
+		);
 	}
 
 	/**
@@ -784,27 +917,20 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 		parent: AbortSignal | undefined,
 	): Promise<RunVerdict | undefined> {
 		if (slots.length === 0 || !hiddenRun(tool)) return undefined;
+		const budgetMs = holdFor(runtime.pool, HIDDEN_RUN_MODULE, "run_verdict", hiddenRunBudgetMs);
 		const reading = await withBudget(
-			hiddenRunBudgetMs,
+			budgetMs,
 			parent,
 			(signal) => {
 				if (readHiddenRun(tool) === "unknown" && runtime.pool) hold.progress("Reading the test run's result…");
-				return judgeHiddenRun(
-					tool,
-					{ pool: runtime.pool, module: HIDDEN_RUN_MODULE, timeoutMs: hiddenRunBudgetMs },
-					signal,
-				);
+				return judgeHiddenRun(tool, { pool: runtime.pool, module: HIDDEN_RUN_MODULE, timeoutMs: budgetMs }, signal);
 			},
 			reporter("modules.readHidden"),
 		);
-		if (!reading) return undefined;
-		runtime.record({
-			kind: "exo.run",
-			module: HIDDEN_RUN_MODULE,
-			synthetic: true,
-			data: { toolCallId, ...reading },
-		});
-		return reading.verdict;
+		// Recorded either way: a reading that ran out of time is a result too (D-106).
+		const data = reading ?? { verdict: "unknown" as const, source: "timeout" as const };
+		runtime.record({ kind: "exo.run", module: HIDDEN_RUN_MODULE, synthetic: true, data: { toolCallId, ...data } });
+		return data.verdict;
 	}
 
 	/**
@@ -819,14 +945,20 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 		if (!current || providers.length === 0) return undefined;
 		const parent = signalOf(ctx);
 		const deadline = Date.now() + userTurnBudgetMs;
+		// At once, each with the whole budget (D-106); the parts keep the modules' order.
+		const results = await Promise.all(
+			providers.map((module) =>
+				withBudget(
+					remainingMs(deadline),
+					parent,
+					(signal) => module.contextForUserTurn?.(current, signal),
+					reporter(`${module.id}.contextForUserTurn`),
+				),
+			),
+		);
 		const parts: { readonly module: string; readonly text: string; readonly result: UserTurnContext }[] = [];
 		for (const [index, module] of providers.entries()) {
-			const result = await withBudget(
-				remainingMs(deadline) / (providers.length - index),
-				parent,
-				(signal) => module.contextForUserTurn?.(current, signal),
-				reporter(`${module.id}.contextForUserTurn`),
-			);
+			const result = results[index];
 			const text = typeof result?.text === "string" ? result.text.trim() : "";
 			if (result && text !== "") parts.push({ module: module.id, text, result });
 		}
@@ -859,17 +991,18 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 			...outcome,
 			toolCallId: event.toolCallId,
 			current: outcome.output,
-			fullOutputPath: fullOutputPathOf(event.details, event.structuredContent),
+			fullOutputPath: fullOutputPathOf(event.details, event.structuredContent, outcome.output),
 			status: statusOf(outcome.output),
 		};
 		const deadline = rewriteDeadline();
 		const notes: RewriteNote[] = [];
 		const applied: { readonly module: string; readonly result: Committable }[] = [];
 		let current = draft.current;
-		for (const [index, module] of rewriters.entries()) {
-			// An equal share of what is left: a slow module cannot use up the time of the ones after it.
+		for (const module of rewriters) {
+			// A guard, not a share (D-106): each module keeps to its own, far shorter hold, and one that
+			// hangs costs a third of the batch's guard, so the ones after it still run.
 			const result = await withBudget(
-				remainingMs(deadline) / (rewriters.length - index),
+				Math.min(remainingMs(deadline), rewriteBudgetMs / REWRITE_GUARD_PARTS),
 				parent,
 				(signal) => module.rewriteToolResult?.({ ...draft, current }, signal),
 				reporter(`${module.id}.rewriteToolResult`),
@@ -890,30 +1023,38 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 		return rewrittenResult(event, current, notes);
 	}
 
+	/** What settle hooks are told: how the run ended, its last words and how full the context is. */
+	function settleInfo(event: AgentBeforeSettleEvent, ctx: ExtensionContext): SettleInfo {
+		piCompaction ??= readPiSettings(ctx);
+		const context = contextOf(ctx, piCompaction);
+		const window = contextWindowOf(ctx);
+		return {
+			outcome: event.outcome,
+			lastAssistantText: lastAssistantText(event),
+			assistantTexts: assistantTextsOfRun(event),
+			...(context ? { context } : {}),
+			...(window === undefined ? {} : { contextWindow: window }),
+		};
+	}
+
 	/**
-	 * Offers compaction to modules (D-017): the first summary wins and is traced as
-	 * `exo.compaction`; otherwise (or on any failure) pi compacts as usual.
+	 * Offers compaction to modules (D-017): the first whole summary wins and is traced as
+	 * `exo.compaction`. Without one, a module's tracked facts follow pi's own summary, written here
+	 * with pi's `compact` (D-111), so the user's requests and the work state survive a sidecar that
+	 * failed; the user is told once per session. Without either, pi compacts as usual.
 	 */
 	async function compact(event: SessionBeforeCompactEvent, ctx: ExtensionContext) {
+		const { preparation } = event;
+		piCompaction = {
+			...(piCompaction ?? readPiSettings(ctx)),
+			enabled: preparation.settings.enabled,
+			reserveTokens: preparation.settings.reserveTokens,
+		};
 		const compactors = modules().filter((m) => m.compact);
 		if (compactors.length === 0) return undefined;
-		const { preparation } = event;
-		const span = [...preparation.messagesToSummarize, ...preparation.turnPrefixMessages];
-		const modified = new Set([...preparation.fileOps.written, ...preparation.fileOps.edited]);
-		const request: Omit<CompactionRequest, "previousDetails"> = {
-			reason: event.reason,
-			conversation: serializeSpan(span),
-			userMessages: span.filter((m) => m.role === "user").map((m) => textOf(m.content)),
-			previousSummary: preparation.previousSummary ?? null,
-			filesRead: [...preparation.fileOps.read].filter((f) => !modified.has(f)),
-			filesModified: [...modified],
-			tokensBefore: preparation.tokensBefore,
-			customInstructions: event.customInstructions ?? null,
-			// After an overflow the last request was never answered: there is nothing to continue from.
-			fork: (event.reason === "overflow" ? undefined : await options.fork?.prefix(ctx)) ?? null,
-			conversationSince: (timestamp) => serializeSpan(span.filter((m) => (m.timestamp ?? 0) > timestamp)),
-		};
+		const request = await compactionRequest(event, ctx);
 		const deadline = Date.now() + compactBudgetMs;
+		let facts: { readonly module: string; readonly result: CompactionSummary } | undefined;
 		for (const module of compactors) {
 			if (event.signal.aborted) break;
 			const previousDetails = previousCompactionDetails(event.branchEntries, module.id);
@@ -924,6 +1065,10 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 				reporter(`${module.id}.compact`),
 			);
 			if (!result || typeof result.summary !== "string" || result.summary === "") continue;
+			if (result.part === "facts") {
+				facts ??= { module: module.id, result };
+				continue;
+			}
 			commit(module.id, result);
 			return {
 				compaction: {
@@ -934,7 +1079,84 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 				},
 			};
 		}
-		return undefined;
+		if (!facts || event.signal.aborted) return undefined;
+		return withHarnessSummary(event, ctx, facts.module, facts.result, deadline);
+	}
+
+	/** The compaction as modules are told of it, without what each module kept with the previous one. */
+	async function compactionRequest(
+		event: SessionBeforeCompactEvent,
+		ctx: ExtensionContext,
+	): Promise<Omit<CompactionRequest, "previousDetails">> {
+		const { preparation } = event;
+		const span = [...preparation.messagesToSummarize, ...preparation.turnPrefixMessages];
+		const modified = new Set([...preparation.fileOps.written, ...preparation.fileOps.edited]);
+		return {
+			reason: event.reason,
+			conversation: serializeSpan(span),
+			userMessages: span.filter((m) => m.role === "user").map((m) => textOf(m.content)),
+			previousSummary: preparation.previousSummary ?? null,
+			filesRead: [...preparation.fileOps.read].filter((f) => !modified.has(f)),
+			filesModified: [...modified],
+			tokensBefore: preparation.tokensBefore,
+			contextWindow: windowOf(ctx),
+			customInstructions: event.customInstructions ?? null,
+			// After an overflow the last request was never answered: there is nothing to continue from.
+			fork: (event.reason === "overflow" ? undefined : await options.fork?.prefix(ctx)) ?? null,
+			conversationSince: (timestamp) => serializeSpan(span.filter((m) => (m.timestamp ?? 0) > timestamp)),
+		};
+	}
+
+	/**
+	 * Pi's own summary with a module's facts after it (D-111). When pi's summary fails as well,
+	 * the facts alone: a compaction that fails leaves an overflowed session unable to go on.
+	 */
+	async function withHarnessSummary(
+		event: SessionBeforeCompactEvent,
+		ctx: ExtensionContext,
+		moduleId: string,
+		facts: CompactionSummary,
+		deadline: number,
+	) {
+		const { preparation } = event;
+		let failure: string | undefined;
+		const written = await withBudget(
+			remainingMs(deadline),
+			event.signal,
+			(signal) =>
+				harnessSummary(event, ctx, signal, piCompaction?.retry ?? PI_DEFAULT_RETRY).catch((error: unknown) => {
+					failure = error instanceof Error ? error.message : String(error);
+					return undefined;
+				}),
+			reporter("compaction.harnessSummary"),
+		);
+		if (event.signal.aborted) return undefined;
+		const summary = written ? `${written.summary.trimEnd()}\n\n${facts.summary}` : `${NO_HANDOVER}\n\n${facts.summary}`;
+		const said = written
+			? "compaction: Exocortex's summary could not be written; pi wrote its own, with the tracked requests, files and commands after it"
+			: `compaction: neither Exocortex nor pi could write a summary${failure ? ` (${failure})` : ""}; the tracked requests, files and commands stand in for it`;
+		options.log(said);
+		runtime.record({
+			kind: "exo.compaction",
+			synthetic: true,
+			module: moduleId,
+			data: { action: "harness_summary", written: written !== undefined, ...(failure ? { error: failure } : {}) },
+		});
+		if (!toldFallback && ctx.hasUI) {
+			toldFallback = true;
+			ctx.ui.notify(`${said} (see /exo status)`, "warning");
+		}
+		commit(moduleId, facts);
+		const piDetails = written && isRecord(written.details) ? written.details : {};
+		return {
+			compaction: {
+				summary,
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: preparation.tokensBefore,
+				...(written?.usage ? { usage: written.usage } : {}),
+				details: { ...piDetails, exo: { ...facts.details, module: moduleId } },
+			},
+		};
 	}
 
 	/**
@@ -946,14 +1168,24 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 	async function settle(event: AgentBeforeSettleEvent, ctx: ExtensionContext) {
 		lastCtx = ctx;
 		endStartedTurns(ctx);
+		const info = settleInfo(event, ctx);
+		// Every module hears of the stop, whatever the acting ones below return (D-106).
+		each("onSettled", (m) => m.onSettled?.(info));
 		const asked = modules().filter((m) => m.onSettle);
 		if (asked.length === 0) return undefined;
-		const info = settleInfo(event, ctx);
 		const stop = new AbortController();
 		settling = stop;
 		const unwatch = watchEscape(ctx, () => stop.abort());
 		const deadline = Date.now() + settleBudgetMs;
-		hold.progress("checking the work…");
+		// Said only once a module takes a noticeable while: most settles are instant (D-106).
+		const slow = setTimeout(() => {
+			// A timer's throw would be uncaught: it would end interactive pi.
+			try {
+				hold.progress("checking the work…");
+			} catch (error) {
+				onError("modules.settle.progress", error);
+			}
+		}, SETTLE_PROGRESS_AFTER_MS);
 		// Nothing to report leaves nothing on the status line.
 		hold.settled(ctx, undefined);
 		try {
@@ -967,11 +1199,12 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 				if (stop.signal.aborted) break;
 				if (!action) continue;
 				const applied = apply(module.id, action, ctx);
-				if (applied.used && !applied.offered) commit(module.id, action);
+				if (applied.used && !applied.offered) commitSettle(module.id, action, action.kind);
 				if (action.kind !== "notify") return applied.result; // one actionable result per settle
 			}
 			return undefined;
 		} finally {
+			clearTimeout(slow);
 			unwatch();
 			if (settling === stop) settling = undefined;
 		}
@@ -1015,15 +1248,16 @@ export function registerModuleHost(pi: ExtensionAPI, options: ModuleHostOptions)
 		if (!ctx.hasUI) return { used: false };
 		suggested = action.text;
 		if (ctx.ui.getEditorText().trim() !== "") {
+			// The line above the editor says what it is and how to add it; the status line would repeat it (D-106).
 			showOffer(ctx, { id: moduleId, action });
-			hold.settled(ctx, `exo: ${action.summary} (${OFFER_SHORTCUT} adds it to your message)`);
+			hold.settled(ctx, undefined);
 			return { used: true, offered: true };
 		}
 		// A follow-up offered earlier is about an older state: this one replaces it.
 		if (offer) showOffer(ctx, undefined);
-		hold.settled(ctx, `exo: ${action.summary} (suggestion in editor)`);
+		// The editor and one status line; a notification as well said it a third time (D-106).
+		hold.settled(ctx, `exo: ${action.summary} (follow-up in the editor: Enter sends it)`);
 		ctx.ui.setEditorText(action.text);
-		ctx.ui.notify(`${action.summary}. Suggested follow-up is in the editor: Enter sends it.`, "info");
 		return { used: true };
 	}
 

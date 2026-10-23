@@ -1,8 +1,8 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ChatRequest, CompactionRequest, ExoModule } from "@exocortex/core";
-import { createTestModuleContext, type SidecarReply } from "@exocortex/testkit";
+import { type ChatRequest, type CompactionRequest, type ExoModule, SIDECAR_THINKING_TOKENS } from "@exocortex/core";
+import { createTestModuleContext, type SidecarReply, TruncatedReply } from "@exocortex/testkit";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createCompaction } from "../src/compaction.ts";
 import { grounded, parseSummary } from "../src/narrative.ts";
@@ -54,6 +54,7 @@ function request(extra: Partial<CompactionRequest> = {}): CompactionRequest {
 		filesRead: ["src/lib.rs", "README.md"],
 		filesModified: ["src/lib.rs"],
 		tokensBefore: 120_000,
+		contextWindow: null,
 		customInstructions: null,
 		fork: null,
 		conversationSince: () => "",
@@ -127,7 +128,8 @@ describe("compaction", () => {
 		expect(prompts[0]).toContain("## Relevant Files\n- [file or directory path: why it matters");
 		expect(prompts[0]).toMatch(/Do not mention the summary process or that context was compacted\.$/);
 		expect(prompts[0]).not.toContain("<prior-summary>");
-		expect(t.requests[0]).toMatchObject({ thinking: false, maxTokens: 4_096 });
+		// A summary judges what mattered: it thinks, with room for that on top of the summary (D-106).
+		expect(t.requests[0]).toMatchObject({ thinking: true, maxTokens: 12_288 + SIDECAR_THINKING_TOKENS });
 		expect(t.records).toEqual([
 			{
 				kind: "exo.compaction",
@@ -147,17 +149,27 @@ describe("compaction", () => {
 		expect(module.status?.()).toBe("compaction");
 	});
 
-	it("merges the previous handover, keeps the latest conversation and passes user focus", async () => {
+	it("merges the previous handover, keeps the latest conversation that fits the window and passes user focus", async () => {
 		const prompts: string[] = [];
-		const { module, t } = setup({ maxConversationChars: 2_000 }, (p) => {
+		const { module, t } = setup({}, (p) => {
 			prompts.push(p);
 			return SUMMARY;
 		});
 		const previousSummary = `${SUMMARY.replace("Fixing the borrow", "Was parsing")}\n\n${FACTS.replace("implement forth", "old")}`;
-		const conversation = `${"x".repeat(5_000)}THE END src/lib.rs`;
+		// A window too small for it: the transcript keeps its newest 20,000 characters.
+		const conversation = `${"x".repeat(25_000)}THE END src/lib.rs`;
 		const summary = await summaryOf(
 			module,
-			request({ previousSummary, conversation, customInstructions: "the parser", userMessages: ["from the span"] }),
+			request({
+				previousSummary,
+				conversation,
+				contextWindow: 16_000,
+				customInstructions: "the parser",
+				userMessages: ["from the span"],
+			}),
+		);
+		expect(t.logs).toContain(
+			`summary from the transcript: its oldest ${conversation.length - 20_000} characters left out to fit the context window`,
 		);
 		expect(prompts[0]).toContain("<prior-summary>\n## Objective");
 		expect(prompts[0]).toContain("- Was parsing in Interpreter::eval.");
@@ -194,29 +206,69 @@ describe("compaction", () => {
 		expect(await prior(FACTS)).not.toContain("<prior-summary>");
 	});
 
-	it("leaves compaction to the harness when the sidecar fails or ignores the template, unless the fallback is deterministic", async () => {
+	it("hands over only the facts, for the harness's own summary to come first, when the sidecar cannot write one (D-111)", async () => {
+		const facts = { summary: FACTS, part: "facts" };
 		const failing = setup({}, () => new Error("down"));
-		expect(await summaryOf(failing.module, request())).toBeUndefined();
-		expect(failing.t.records).toEqual([]);
+		expect(await failing.module.compact?.(request(), signal)).toMatchObject({
+			...facts,
+			summary: `${FACTS}\n\n## Files modified\n\n- src/lib.rs\n\n## Files read\n\n- README.md`,
+		});
+		expect(failing.t.records[0]?.data).toMatchObject({ narrative: false, updated: false });
+		expect(failing.t.logs.join("\n")).toContain("summary error");
 		const noEngine = setup();
-		expect(await summaryOf(noEngine.module, request())).toBeUndefined();
+		expect(await noEngine.module.compact?.(request({ filesRead: [], filesModified: [] }), signal)).toMatchObject(facts);
 		const chatty = setup({}, () => "Sure! I will keep implementing forth.");
-		expect(await summaryOf(chatty.module, request())).toBeUndefined();
+		const chattyResult = await chatty.module.compact?.(request({ filesRead: [], filesModified: [] }), signal);
+		expect(chattyResult).toMatchObject(facts);
 		expect(chatty.t.logs).toContain("summary did not follow the template: not used");
-		const deterministic = setup({ fallback: "deterministic" }, () => "## Objective\n- cut off");
-		const summary = await summaryOf(deterministic.module, request({ filesRead: [], filesModified: [] }));
-		expect(summary).toBe(FACTS);
-		expect(deterministic.t.records[0]?.data).toMatchObject({ narrative: false, updated: false });
+		// The facts are kept with the compaction like any other summary's, for the next one.
+		expect(chattyResult?.details?.["facts"]).toMatchObject({ requests: ["implement forth"] });
+		// Settings retired by D-111 are read without them.
+		expect(setup({ fallback: "deterministic", maxConversationChars: 60_000 }).t.logs).toEqual([]);
 	});
 
-	it("truncates huge user messages and long file lists, and reports invalid settings", async () => {
+	it("asks again at twice the limit for a summary cut off at it, and never uses one cut off (D-111)", async () => {
+		const cut = (text: string) => new TruncatedReply(text);
+		let calls = 0;
+		const once = setup({ maxSummaryTokens: 1_000 }, () => {
+			calls += 1;
+			return calls === 1 ? cut(SUMMARY) : SUMMARY;
+		});
+		expect(await summaryOf(once.module, request())).toContain("## Objective");
+		expect(once.t.requests.map((r) => r.maxTokens - SIDECAR_THINKING_TOKENS)).toEqual([1_000, 2_000]);
+
+		const twice = setup({ maxSummaryTokens: 1_000 }, () => cut(SUMMARY));
+		expect(await twice.module.compact?.(request(), signal)).toMatchObject({ part: "facts" });
+		expect(twice.t.requests).toHaveLength(2);
+		expect(twice.t.logs).toContain("summary was cut off at 20 tokens: not used");
+
+		// No room in the window for the larger limit and the thinking room: asking again would be refused.
+		const full = setup({ maxSummaryTokens: 1_000 }, () => cut(SUMMARY));
+		await full.module.compact?.(request({ contextWindow: 100 + 2_000 + SIDECAR_THINKING_TOKENS - 1 }), signal);
+		expect(full.t.requests).toHaveLength(1);
+		expect(full.t.logs).toContain("summary was cut off at 20 tokens: not used");
+		const roomy = setup({ maxSummaryTokens: 1_000 }, () => cut(SUMMARY));
+		await roomy.module.compact?.(request({ contextWindow: 100 + 2_000 + SIDECAR_THINKING_TOKENS }), signal);
+		expect(roomy.t.requests).toHaveLength(2);
+	});
+
+	it("lists the files changed, many of them, and the newest of those read, and reports invalid settings", async () => {
 		const invalid = setup({ maxSummaryTokens: 5 });
 		expect(invalid.t.logs.some((l) => l.startsWith("compaction /maxSummaryTokens"))).toBe(true);
-		const { module } = setup({ fallback: "deterministic", maxUserMessageChars: 200 });
-		const files = Array.from({ length: 45 }, (_, i) => `f${String(i).padStart(2, "0")}.ts`);
-		const summary = await summaryOf(module, request({ userMessages: ["y".repeat(5_000)], filesModified: files }));
+		const { module } = setup({ maxUserMessageChars: 200 });
+		const files = Array.from({ length: 105 }, (_, i) => `f${String(i).padStart(3, "0")}.ts`);
+		const read = Array.from({ length: 45 }, (_, i) => `r${String(i).padStart(2, "0")}.ts`);
+		const summary =
+			(await summaryOf(
+				module,
+				request({ userMessages: ["y".repeat(5_000)], filesModified: files, filesRead: read }),
+			)) ?? "";
 		expect(summary).toContain("… [truncated]");
-		expect(summary).toContain("- … and 5 more");
+		expect(summary).toContain("- f104.ts\n- … and 5 more");
+		expect(summary).not.toContain("- f004.ts");
+		// The newest read are kept.
+		expect(summary).toContain("- r05.ts");
+		expect(summary).not.toContain("- r04.ts");
 	});
 });
 
@@ -238,7 +290,6 @@ describe("parseSummary", () => {
 describe("grounded", () => {
 	it("marks names found nowhere in the transcript or workspace, except in the objective, and keeps every bullet", () => {
 		writeFileSync(join(dir, "real.rs"), "");
-		const logs: string[] = [];
 		const kept = grounded(
 			[
 				"## Objective",
@@ -261,7 +312,7 @@ describe("grounded", () => {
 				"A note that is not a bullet about other/ghost.rs",
 			].join("\n"),
 			"[Assistant]: I tried `RefCell` around `eval`",
-			{ cwd: dir, log: (m) => logs.push(m) },
+			{ cwd: dir },
 		);
 		expect(kept.text).toBe(
 			[
@@ -287,24 +338,18 @@ describe("grounded", () => {
 			].join("\n"),
 		);
 		expect(kept.unverified).toEqual(["docs/none.md", "Phantom", "made_up_fn", "src/ghost.rs"]);
-		expect(logs).toEqual(["unverified in the summary: docs/none.md, Phantom, made_up_fn, src/ghost.rs"]);
-		expect(grounded(SUMMARY, "src/lib.rs", { cwd: dir, log: (m) => logs.push(m) })).toEqual({
-			text: SUMMARY,
-			unverified: [],
-		});
-		expect(logs).toHaveLength(1);
+		expect(grounded(SUMMARY, "src/lib.rs", { cwd: dir })).toEqual({ text: SUMMARY, unverified: [] });
 	});
 
 	it("does not take a path outside the workspace, or a symbol, for a file to create", () => {
-		const next = (step: string) =>
-			grounded(`## Objective\n- x\n## Next Move\n1. ${step}`, "", { cwd: dir, log: () => {} }).unverified;
+		const next = (step: string) => grounded(`## Objective\n- x\n## Next Move\n1. ${step}`, "", { cwd: dir }).unverified;
 		expect(next("Write ../outside.rs")).toEqual(["../outside.rs"]);
 		expect(next("Call `new_fn`")).toEqual(["new_fn"]);
 		expect(next("Write notes.md")).toEqual([]);
 	});
 
 	it("keeps accepted suggestions among the requests and gates the sidecar's summary", async () => {
-		const { module } = setup({}, () =>
+		const { module, t } = setup({}, () =>
 			SUMMARY.replace("1. Run cargo test", "1. Open `nowhere_fn`, then run cargo test"),
 		);
 		module.onUserTurn?.({ text: "implement forth", origin: "user" });
@@ -320,6 +365,9 @@ describe("grounded", () => {
 		expect(summary).toContain(
 			"## Next Move\n1. Open nowhere_fn, then run cargo test after cloning the word body. [unverified: nowhere_fn]\n2. (none)\n\n## Relevant Files",
 		);
+		// The gate working is traced, not reported as a problem.
+		expect(t.records[0]?.data).toMatchObject({ unverified: 1, unverifiedNames: ["nowhere_fn"] });
+		expect(t.logs).toEqual([]);
 	});
 });
 
@@ -349,15 +397,15 @@ describe("the summary as a fork of the main agent's context (D-093)", () => {
 		);
 		function early(reply: (r: ChatRequest) => SidecarReply = (r) => (r.fork ? EARLY : SUMMARY)) {
 			const t = createTestModuleContext({ cwd: dir, ...engine, forkPrefix: fork, reply });
-			return { t, module: createCompaction({ earlySummary: true }, t.context) };
+			return { t, module: createCompaction({}, t.context) };
 		}
 
 		it("is written in the background once the context passes the threshold, not before", async () => {
 			const { module, t } = early();
-			expect(await module.onSettle?.(at(60_000), signal)).toBeUndefined();
+			module.onSettled?.(at(60_000));
 			await idle();
 			expect(t.requests).toEqual([]);
-			expect(await module.onSettle?.(at(75_000), signal)).toBeUndefined();
+			module.onSettled?.(at(75_000));
 			await idle();
 			expect(t.requests).toHaveLength(1);
 			expect(t.requests[0]?.fork).toBe(fork);
@@ -365,17 +413,17 @@ describe("the summary as a fork of the main agent's context (D-093)", () => {
 				{ kind: "exo.compaction", data: { action: "early_summary", tokens: 75_000, compactAt: 100_000 } },
 			]);
 			// Not again until the context grew by a tenth of the threshold.
-			await module.onSettle?.(at(80_000), signal);
+			module.onSettled?.(at(80_000));
 			await idle();
 			expect(t.requests).toHaveLength(1);
-			await module.onSettle?.(at(86_000), signal);
+			module.onSettled?.(at(86_000));
 			await idle();
 			expect(t.requests).toHaveLength(2);
 		});
 
 		it("is used as written when nothing came after it, and updated with only what did", async () => {
 			const { module, t } = early();
-			await module.onSettle?.(at(75_000), signal);
+			module.onSettled?.(at(75_000));
 			await idle();
 			const asWritten = await module.compact?.(request({ conversationSince: () => "" }), signal);
 			expect(asWritten?.summary).toContain("(written early)");
@@ -404,7 +452,7 @@ describe("the summary as a fork of the main agent's context (D-093)", () => {
 
 		it("is dropped once the context was compacted, and left alone by a summary with the user's own focus", async () => {
 			const { module, t } = early();
-			await module.onSettle?.(at(75_000), signal);
+			module.onSettled?.(at(75_000));
 			await idle();
 			const focused = await module.compact?.(request({ customInstructions: "the parser" }), signal);
 			expect(focused?.summary).not.toContain("(written early)");
@@ -423,7 +471,7 @@ describe("the summary as a fork of the main agent's context (D-093)", () => {
 				if (r.fork) await gate;
 				return r.fork ? EARLY : SUMMARY;
 			});
-			await module.onSettle?.(at(75_000), signal);
+			module.onSettled?.(at(75_000));
 			// pi compacts before the early summary is back.
 			module.onCompacted?.();
 			release();
@@ -432,7 +480,7 @@ describe("the summary as a fork of the main agent's context (D-093)", () => {
 			expect(after?.summary).not.toContain("(written early)");
 
 			const fresh = early();
-			await fresh.module.onSettle?.(at(75_000), signal);
+			fresh.module.onSettled?.(at(75_000));
 			await idle();
 			// The user moved to another branch: the context no longer begins with what the fork read.
 			const other = { body: { model: "m", messages: [{ role: "user", content: "something else entirely" }] } };
@@ -443,13 +491,46 @@ describe("the summary as a fork of the main agent's context (D-093)", () => {
 			expect(t.records.at(-1)?.data).toMatchObject({ early: "none" });
 		});
 
+		it("is stopped when the agent starts again, when compaction comes, and with the module (D-111)", async () => {
+			for (const stop of [
+				(m: ExoModule) => m.onUserTurn?.({ text: "next", origin: "user" }),
+				(m: ExoModule) =>
+					m.onToolResult?.({ toolName: "read", input: { path: "x" }, isError: false, exitCode: null, output: "" }),
+				(m: ExoModule) => m.dispose?.(),
+				(m: ExoModule) => void m.compact?.(request({ conversationSince: () => "" }), signal),
+			]) {
+				// The fork's reply never comes: only stopping the call ends it.
+				const { module, t } = early((r) => (r.fork ? new Promise<string>(() => {}) : SUMMARY));
+				module.onSettled?.(at(75_000));
+				await idle();
+				expect(t.requests).toHaveLength(1);
+				stop(module);
+				await idle();
+				// The fake engine answers a stopped call by failing it; nothing of it is kept or said.
+				expect(t.records.filter((r) => r.data && (r.data as { action?: string }).action === "early_summary")).toEqual(
+					[],
+				);
+				expect(t.logs).toEqual([]);
+				// Not stuck: the next stop past the threshold writes it again.
+				module.onSettled?.(at(90_000));
+				await idle();
+				expect(t.requests.filter((r) => r.fork).length).toBe(2);
+			}
+		});
+
 		it("is not written when switched off or with no fork to be had", async () => {
 			const off = createTestModuleContext({ cwd: dir, ...engine, forkPrefix: fork, reply: () => SUMMARY });
-			await createCompaction({}, off.context).onSettle?.(at(90_000), signal);
+			createCompaction({ earlySummary: false }, off.context).onSettled?.(at(90_000));
+			createCompaction({ fork: false }, off.context).onSettled?.(at(90_000));
 			const none = createTestModuleContext({ cwd: dir, ...engine, reply: () => SUMMARY });
-			await createCompaction({ earlySummary: true }, none.context).onSettle?.(at(90_000), signal);
+			const module = createCompaction({}, none.context);
+			module.onSettled?.(at(90_000));
+			await idle();
+			module.onSettled?.(at(99_000));
 			await idle();
 			expect([...off.requests, ...none.requests]).toEqual([]);
+			// Said once, not at every stop.
+			expect(none.logs).toEqual(["early summary not written: no fork of the agent's context"]);
 		});
 	});
 
@@ -469,8 +550,8 @@ describe("the summary as a fork of the main agent's context (D-093)", () => {
 		expect(t.requests).toHaveLength(1);
 		const [sent] = t.requests;
 		expect(sent?.fork).toBe(fork);
-		// Asked off; the client applies it only where the engine keeps the prefix with it (F4, D-100).
-		expect(sent?.thinking).toBe(false);
+		// A fork thinks as the agent does: the client changes it only where the engine keeps the prefix (F4, D-100).
+		expect(sent?.thinking).toBe(true);
 		expect(sent?.messages).toHaveLength(1);
 		const prompt = String(sent?.messages[0]?.["content"]);
 		expect(prompt).toContain("do not call a tool");

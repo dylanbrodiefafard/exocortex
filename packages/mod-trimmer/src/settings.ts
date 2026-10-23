@@ -16,10 +16,15 @@ export const SettingsSchema = Type.Object(
 	{
 		/** Tools whose results may be trimmed (read/edit/write never are). */
 		tools: Type.Array(Type.String({ minLength: 1 }), { default: ["bash"] }),
-		/** Results at most this long are left alone (~4 chars per token). */
-		minChars: Type.Integer({ minimum: 500, default: 8_000 }),
-		headLines: Type.Integer({ minimum: 0, default: 40 }),
-		tailLines: Type.Integer({ minimum: 0, default: 80 }),
+		/**
+		 * A result pi did not cut is trimmed only when it is longer than this (~4 chars per token)
+		 * and reads as a log: it failed, or has errors or routine lines (D-110). Pi cuts what is
+		 * longer than 50 KB or 2,000 lines to its end; that is always trimmed, from pi's saved copy,
+		 * so the start of the output is not lost.
+		 */
+		minChars: Type.Integer({ minimum: 500, default: 40_000 }),
+		headLines: Type.Integer({ minimum: 0, default: 100 }),
+		tailLines: Type.Integer({ minimum: 0, default: 200 }),
 		contextLines: Type.Integer({ minimum: 0, default: 3 }),
 		/**
 		 * An error's block (snippet, traceback, stacks, a failing test's output) is kept whole up to
@@ -45,35 +50,32 @@ export const SettingsSchema = Type.Object(
 		 * beyond it still show the line that names them (three times as many).
 		 */
 		maxErrorWindows: Type.Integer({ minimum: 0, default: 40 }),
-		/** Runs of this many lines that differ only in numbers collapse; never errors or lines with a source position. */
-		collapseRuns: Type.Integer({ minimum: 2, default: 3 }),
-		maxLineChars: Type.Integer({ minimum: 80, default: 400 }),
+		/**
+		 * Runs of this many lines that differ only in numbers collapse to their first and last
+		 * line; never errors or lines with a source position.
+		 */
+		collapseRuns: Type.Integer({ minimum: 2, default: 8 }),
+		/** Longer lines are cut, except the lines of a failure, which are always shown whole. */
+		maxLineChars: Type.Integer({ minimum: 80, default: 2_000 }),
 		/**
 		 * Ceiling for a trimmed result, footer included. Over it, the selection gives up in turn:
-		 * error blocks (down to 4), head and tail lines, block lines, then line length (D-083).
+		 * error blocks (down to 4), head and tail lines, block lines, then line length (D-083);
+		 * last, whole lines from the middle, marked with their line numbers (D-110).
 		 */
-		maxChars: Type.Integer({ minimum: 2_000, default: 24_000 }),
-		/** Sidecar line selection when the deterministic tier still leaves this much (research R2.2). */
-		sidecar: Type.Boolean({ default: false }),
-		sidecarAboveChars: Type.Integer({ minimum: 500, default: 8_000 }),
-		/** Outputs longer than this (after cleanup) skip the sidecar: too slow to prefill on the hot path. */
-		sidecarMaxInputChars: Type.Integer({ minimum: 1_000, default: 60_000 }),
-		/** Cap on lines the sidecar may keep. */
-		sidecarMaxLines: Type.Integer({ minimum: 10, default: 150 }),
-		/**
-		 * The most the sidecar may hold the agent loop; the deterministic result is the fallback. Once
-		 * this session has timed a few such calls, the hold is half again their 90th percentile, if less (D-098).
-		 */
-		sidecarTimeoutMs: Type.Integer({ minimum: 500, default: 6_000 }),
-		thinking: Type.Boolean({ default: false }),
+		maxChars: Type.Integer({ minimum: 2_000, default: 40_000 }),
 		/**
 		 * Where full outputs are saved when the harness did not save one; default: OS temp dir. Each
-		 * session gets its own `session-<id>` directory under it, removed when the process exits. The
+		 * session gets its own `session-<id>` directory under it, kept so a resumed session can still
+		 * read them; directories untouched for 7 days are removed when Exocortex starts (D-110). The
 		 * user's to set (D-087).
 		 */
 		saveDir: Type.Optional(Type.String({ minLength: 1, ...USER_ONLY })),
 	},
-	{ additionalProperties: true },
+	{
+		additionalProperties: true,
+		// The sidecar line selection (D-110): no benefit measured, and a strong model reads the output itself.
+		retired: ["sidecar", "sidecarAboveChars", "sidecarMaxInputChars", "sidecarMaxLines", "sidecarTimeoutMs"],
+	},
 );
 
 export type TrimmerSettings = Static<typeof SettingsSchema>;

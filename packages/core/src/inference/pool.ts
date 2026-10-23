@@ -23,16 +23,30 @@ const PRIORITY_ORDER: readonly SidecarPriority[] = ["critical", "interactive", "
 /** Engine-level priority (vLLM semantics, lower first); the main agent sends none, i.e. 0. */
 const ENGINE_PRIORITY: Readonly<Record<SidecarPriority, number>> = { critical: 0, interactive: 1, background: 2 };
 
+/**
+ * What a sidecar call does, which decides whether it thinks (D-106). One rule for every module,
+ * from what real-model tests showed, instead of a `thinking` switch per module that defaulted off:
+ * - `judge`: it weighs evidence to reach a conclusion (a verdict, a review, a lesson, a summary, a
+ *   diagnosis, what a request asks for). It thinks, has room to reason, and is asked for its JSON
+ *   in the prompt rather than held to a grammar (D-101). Without thinking Qwen3.8 missed a plain bug
+ *   13 times in 13 and called a reusable lesson a one-off 4 times in 4.
+ * - `pick`: it classifies or selects from what is in front of it, quickly, often while the agent
+ *   waits (did this test run pass; which preferences fit this prompt). No thinking.
+ * A fork thinks as the agent does whatever its kind, except where the engine lets a fork change it (F4).
+ */
+export type SidecarKind = "judge" | "pick";
+
 export interface SidecarCall<S extends TSchema | undefined = undefined> {
-	/** Module id: used for per-module limits and recorded with the call. */
+	/** Module id: recorded with the call. */
 	readonly module: string;
 	readonly priority: SidecarPriority;
+	readonly kind: SidecarKind;
 	/**
 	 * With `fork`, the call continues from the main agent's context (D-093). It is refused at once,
 	 * as `error`, when the engine cannot do that for free or an earlier fork missed the cache: have
-	 * a prompt that stands alone ready. One fork runs at a time.
+	 * a prompt that stands alone ready. One fork runs at a time. Whether it thinks comes from `kind`.
 	 */
-	readonly request: Omit<ChatRequest, "jsonSchema" | "priority" | "cacheWrite">;
+	readonly request: Omit<ChatRequest, "jsonSchema" | "priority" | "cacheWrite" | "thinking">;
 	/** When set, the reply must be JSON matching this schema (one repair attempt). */
 	readonly schema?: S;
 	readonly schemaName?: string;
@@ -159,15 +173,10 @@ export interface SidecarPool {
 	close(): void;
 }
 
-export interface ModuleLimits {
-	readonly maxTokensPerCall: number;
-}
-
 export interface SidecarPoolOptions {
 	readonly client: InferenceClient;
 	readonly target: EngineTarget;
 	readonly config: ExoConfig["pool"];
-	readonly moduleLimits: (module: string) => ModuleLimits;
 	readonly onRecord?: (record: SidecarCallRecord) => void;
 	readonly now?: () => number;
 }
@@ -186,22 +195,13 @@ export const SIDECAR_MAX_TOKENS = 4096;
  */
 export const SIDECAR_THINKING_TOKENS = 32_768;
 
-/**
- * There is no limit on how many calls a module makes (D-092): a module's work is as many calls as
- * its design needs, and a count cut off the last of them. What bounds sidecar use is the pool's
- * slots, each call's deadline and `pool.sessionTokenBudget`.
- */
-export const DEFAULT_MODULE_LIMITS: ModuleLimits = { maxTokensPerCall: SIDECAR_MAX_TOKENS };
+/** Whether a call of this kind thinks, after `pool.thinking` (D-106). */
+export function kindThinks(kind: SidecarKind, policy: ExoConfig["pool"]["thinking"]): boolean {
+	return policy === "always" || (policy !== "never" && kind === "judge");
+}
 
 /** How long one stretch of holding a `background` call for the main agent may last (`pool.maxHoldMs`). */
 const DEFAULT_MAX_HOLD_MS = 10 * 60_000;
-
-/** Per-module limits from config, with defaults for unset fields. */
-export function moduleLimitsFrom(modules: ExoConfig["modules"]): (module: string) => ModuleLimits {
-	return (module) => ({
-		maxTokensPerCall: modules[module]?.maxTokensPerCall ?? DEFAULT_MODULE_LIMITS.maxTokensPerCall,
-	});
-}
 
 interface Job {
 	readonly call: SidecarCall<TSchema | undefined>;
@@ -395,9 +395,9 @@ export function createSidecarPool(options: SidecarPoolOptions): SidecarPool {
 	}
 
 	function submit<S extends TSchema | undefined>(call: SidecarCall<S>): Promise<SidecarResult<S>> {
-		const limits = options.moduleLimits(call.module);
-		const room = thinks(options.target, call.request) ? SIDECAR_THINKING_TOKENS : 0;
-		const request = { ...call.request, maxTokens: Math.min(call.request.maxTokens, limits.maxTokensPerCall) + room };
+		const asked = { ...call.request, thinking: kindThinks(call.kind, config.thinking) };
+		const room = thinks(options.target, asked) ? SIDECAR_THINKING_TOKENS : 0;
+		const request = { ...asked, maxTokens: asked.maxTokens + room };
 		if (closed) return Promise.resolve(rejectNow(call, request.maxTokens, "closed", "pool is closed"));
 		if (budgetSpent()) return Promise.resolve(rejectNow(call, request.maxTokens, "rejected_budget", BUDGET_SPENT));
 		const refusal = request.fork && forkRefusal(request.fork);

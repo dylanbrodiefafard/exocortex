@@ -1,0 +1,9 @@
+// Supervisor (suggest) without what D-107 turned on by default: no review of the changes and no
+// request to verify what an `uncertain` verdict could not see. The A/B for those defaults: each
+// costs a follow-up when it acts, so read turns and wall-clock beside success, and a task that
+// passes here and fails in `supervisor` is a fix made for a bug that was not there.
+{
+	"modules": {
+		"supervisor": { "enabled": true, "mode": "suggest", "review": false, "verifyUncertain": false }
+	}
+}

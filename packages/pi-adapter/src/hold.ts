@@ -53,11 +53,18 @@ export function createHoldUi(onError: (where: string, error: unknown) => void): 
 		progress(message) {
 			if (!holding) return;
 			holding.shown = true;
-			holding.ui.setStatus(STATUS_KEY, `exo: ${message}`);
-			holding.ui.setWorkingMessage(message);
+			try {
+				holding.ui.setStatus(STATUS_KEY, `exo: ${message}`);
+				holding.ui.setWorkingMessage(message);
+			} catch (error) {
+				// Called from timers and progress callbacks too: a UI that went stale must not throw there.
+				onError("modules.progress", error);
+			}
 		},
 
 		settled(ctx, text) {
+			// Nothing on the line and nothing to say: leave it alone.
+			if (text === undefined && settledStatus === undefined) return;
 			settledStatus = text;
 			if (holding?.shown) return;
 			if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, text);

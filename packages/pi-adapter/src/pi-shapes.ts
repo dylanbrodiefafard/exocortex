@@ -73,6 +73,30 @@ export function lastAssistantText(event: AgentBeforeSettleEvent): string {
 	return "";
 }
 
+/**
+ * The text of each assistant message since the user's last message, oldest first (empty ones left
+ * out). Read from the session's own messages, where a custom message (an Exocortex follow-up, a
+ * late note) has its own role and does not end the span; from the model's view, where it reads as
+ * the user's, only when those are missing. A compaction summary ends it: what came before is gone.
+ */
+export function assistantTextsOfRun(event: AgentBeforeSettleEvent): string[] {
+	const own: readonly unknown[] | undefined = Array.isArray(event.context.contextMessages)
+		? event.context.contextMessages
+		: undefined;
+	const messages: readonly unknown[] = own ?? event.context.llmMessages;
+	const texts: string[] = [];
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const message = messages[i];
+		if (!isRecord(message)) continue;
+		const role = message["role"];
+		if (role === "user" || role === "compactionSummary" || role === "branchSummary") break;
+		if (role !== "assistant") continue;
+		const text = textOf(message["content"]);
+		if (text.trim() !== "") texts.push(text);
+	}
+	return texts.reverse();
+}
+
 export function sameText(a: string, b: string): boolean {
 	return a.replace(/\s+/g, " ").trim() === b.replace(/\s+/g, " ").trim();
 }
@@ -94,17 +118,31 @@ export function rewrittenResult(event: ToolResultEvent, text: string, notes: rea
 	};
 }
 
-/** Bash reports where it saved untruncated output in `details` and `structuredContent`. */
-export function fullOutputPathOf(details: unknown, structured: unknown): string | null {
+/**
+ * Where bash saved untruncated output: in `details` and `structuredContent`, or, when the command
+ * timed out or was aborted (thrown, so neither is kept), only in the notice in the text
+ * (`[Showing lines … Full output: <path>]`, PI_API_NOTES `bash`).
+ */
+export function fullOutputPathOf(details: unknown, structured: unknown, text = ""): string | null {
 	const fromDetails = isRecord(details) ? details["fullOutputPath"] : undefined;
 	const fromStructured = isRecord(structured) ? structured["full_output_path"] : undefined;
-	const path = fromDetails ?? fromStructured;
+	const path = fromDetails ?? fromStructured ?? FULL_OUTPUT_NOTICE.exec(text)?.[1];
 	return typeof path === "string" && path !== "" ? path : null;
 }
 
-/** Bash ends a failing command's text with its exit status, after the output (PI_API_NOTES, `bash`). */
+/** Bash's notice after an output it cut, followed only by its status, if any. */
+const FULL_OUTPUT_NOTICE = /\n\n\[Showing [^\n]*\. Full output: ([^\n]+)\](?:\n\n(?:Command [^\n]*))?$/;
+
+/**
+ * Bash ends its text with how the command ended, after the output: its exit status, or that it
+ * timed out, was aborted or ended without an exit code (PI_API_NOTES, `bash`).
+ */
 export function statusOf(text: string): string | null {
-	return /\n\n(Command exited with code \d+)$/.exec(text)?.[1] ?? null;
+	return (
+		/(?:^|\n\n)(Command exited with code \d+|Command timed out after \d+ seconds|Command aborted|Command terminated without an exit code)$/.exec(
+			text,
+		)?.[1] ?? null
+	);
 }
 
 /**

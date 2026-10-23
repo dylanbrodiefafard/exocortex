@@ -75,14 +75,21 @@ function git(args: string) {
 }
 
 const LEDGER = {
-	is_task: true,
-	follows_previous: false,
-	criteria: ["greet puts a comma after the greeting"],
+	relation: "new_task",
+	added_criteria: ["greet puts a comma after the greeting"],
+	dropped_criteria: [],
 	check_commands: [],
 	do_not_run: [],
 };
 const COMPLETE = { verdict: "complete", missing: [], asked_user: false, reason: "done" };
 const INCOMPLETE = { verdict: "incomplete", missing: ["Add the comma"], asked_user: false, reason: "no comma" };
+const UNCERTAIN = {
+	verdict: "uncertain",
+	missing: [],
+	unverified: ["Check greet with an empty name"],
+	asked_user: false,
+	reason: "no test",
+};
 const DONE = { outcome: "completed" as const, lastAssistantText: "Done." };
 const REAL = { verdict: "real", reason: "strip() is called on a name that may be None", scenario: "" };
 const REQUEST = { text: "Make greet put a comma after Hello.", origin: "user" as const };
@@ -108,7 +115,7 @@ function scriptedClient(script: Script): InferenceClient {
 			} else if (isCheck(prompt)) {
 				const title = /^Bug: (.*)$/m.exec(prompt)?.[1] ?? "";
 				reply = script.check?.(title) ?? REAL;
-			} else if (prompt.includes("acceptance checklist and evidence")) reply = script.verdict;
+			} else if (prompt.includes("whether a coding agent finished a task")) reply = script.verdict;
 			else if (prompt.includes("the last message a coding agent wrote")) reply = { asked_user: false, claims: [] };
 			else reply = LEDGER;
 			return {
@@ -133,8 +140,8 @@ function context(
 			timeoutMs: 5_000,
 			sessionTokenBudget: 0,
 			backgroundWhenIdleOnly: true,
+			thinking: "auto",
 		},
-		moduleLimits: () => ({ maxTokensPerCall: 1024 }),
 	});
 	return {
 		cwd: repo,
@@ -187,7 +194,7 @@ describe("review after a complete verdict (D-097)", () => {
 		const action = await lastJob();
 		expect(action).toMatchObject({
 			kind: "suggest",
-			summary: "supervisor: review found a possible bug (high, 3/3 passes)",
+			summary: "supervisor: complete · review found a possible bug (high, 3/3 passes)",
 		});
 		const text = textOf(action);
 		expect(text).toContain("found a possible bug");
@@ -196,10 +203,9 @@ describe("review after a complete verdict (D-097)", () => {
 		expect(text).toContain("for any that is not, say why");
 		// The two tellings of the same bug, plus the low one on the same line, are one bucket of three votes.
 		expect(checkPrompts()).toHaveLength(1);
-		// The review thinks; the verdict keeps the supervisor's `thinking`, off (D-101).
+		// The review judges, so it thinks (D-101, D-106).
 		const reviewing = requests.filter((r) => isFind(promptOf(r)) || isCheck(promptOf(r)));
 		expect(reviewing.map((r) => r.thinking)).toEqual([true, true, true, true]);
-		expect(requests.filter((r) => !reviewing.includes(r)).every((r) => r.thinking === false)).toBe(true);
 		expect(reviews()).toEqual([
 			expect.objectContaining({ trigger: "settle", passes: 3, answered: 3, proposed: 5, anchored: 3, distinct: 1 }),
 		]);
@@ -207,9 +213,10 @@ describe("review after a complete verdict (D-097)", () => {
 			{ file: "app.py", title: "strip() on None crashes", severity: "high", votes: 3 },
 		]);
 
-		// Sending the follow-up continues the task.
+		// Shown in the editor (the host commits it), then sent: the same task goes on.
+		action?.commit?.("suggest");
 		await begin(sup, { text, origin: "suggestion" });
-		expect(records.at(-1)).toMatchObject({ kind: "exo.action", data: { action: "accepted", continuation: 1 } });
+		expect(records.at(-1)).toMatchObject({ kind: "exo.action", data: { action: "accepted", followUp: 1 } });
 	});
 
 	it("drops a finding the check finds is not a bug, and says so", async () => {
@@ -234,7 +241,7 @@ describe("review after a complete verdict (D-097)", () => {
 		]);
 	});
 
-	it("does not review when the verdict is not complete", async () => {
+	it("does not review when the verdict is incomplete", async () => {
 		const sup = createSupervisor({ review: true }, context({ verdict: INCOMPLETE, passes: [] }));
 		await begin(sup, REQUEST);
 		writeFileSync(join(repo, "app.py"), CHANGED);
@@ -252,11 +259,19 @@ describe("review after a complete verdict (D-097)", () => {
 
 		writeFileSync(join(repo, "app.py"), CHANGED);
 		await sup.onSettle?.(DONE, signal);
-		await lastJob();
+		expect(await lastJob()).toMatchObject({
+			summary: "supervisor: complete · review found nothing that held up (0 proposed by 2/2 passes)",
+		});
+		// Nothing changed since: neither the verdict nor the review is run again (D-107).
+		await sup.onSettle?.(DONE, signal);
+		expect(await lastJob()).toMatchObject({ summary: expect.stringContaining("nothing changed since the last check") });
+		expect(findPrompts()).toHaveLength(2);
+		expect(reviews()).toHaveLength(1);
+		// A change after the review is judged, and not reviewed a second time.
+		writeFileSync(join(repo, "app.py"), `${CHANGED}# more\n`);
 		await sup.onSettle?.(DONE, signal);
 		expect(await lastJob()).toMatchObject({ summary: "supervisor: complete" });
 		expect(findPrompts()).toHaveLength(2);
-		expect(reviews()).toHaveLength(1);
 	});
 
 	it("applies nothing and records nothing when stopped, and the task can be reviewed again", async () => {
@@ -278,6 +293,47 @@ describe("review after a complete verdict (D-097)", () => {
 		await sup.onSettle?.(DONE, signal);
 		expect(jobs).toHaveLength(2);
 		await lastJob(); // ended here, not in the next test
+	});
+
+	it("reviews an uncertain task too, and asks for the checks and the fixes in one follow-up (D-107)", async () => {
+		const sup = createSupervisor(
+			{ reviewPasses: 2 },
+			context({
+				verdict: UNCERTAIN,
+				passes: [[finding("strip() on None crashes")], [finding("strip() on None crashes")]],
+			}),
+		);
+		await begin(sup, REQUEST);
+		writeFileSync(join(repo, "app.py"), CHANGED);
+		await sup.onSettle?.(DONE, signal);
+		const action = await lastJob();
+		expect(action).toMatchObject({
+			kind: "suggest",
+			summary: "supervisor: 1 item(s) to verify · review found a possible bug (high, 2/2 passes)",
+		});
+		expect(textOf(action)).toContain("1. Check greet with an empty name");
+		expect(textOf(action)).toContain("app.py: strip() on None crashes");
+	});
+
+	it("keeps a bug in a caller the change left behind, quoted from the uses it was shown (D-107)", async () => {
+		writeFileSync(join(repo, "util.py"), "def shout(text):\n    return text.upper()\n");
+		writeFileSync(join(repo, "main.py"), "from util import shout\nprint(shout('hi'))\n");
+		await git("add -A && git -c user.name=t -c user.email=t@t commit -qm more");
+		const caller = {
+			file: "main.py",
+			quote: "print(shout('hi'))",
+			title: "main.py still calls shout without the new suffix",
+			scenario: "running main.py raises TypeError",
+			severity: "high",
+		};
+		const sup = createSupervisor({ reviewPasses: 2 }, context({ verdict: COMPLETE, passes: [[caller], [caller]] }));
+		await begin(sup, { text: "Let shout take a suffix.", origin: "user" });
+		writeFileSync(join(repo, "util.py"), "def shout(text, suffix):\n    return text.upper() + suffix\n");
+		await sup.onSettle?.(DONE, signal);
+		const action = await lastJob();
+		expect(textOf(action)).toContain("main.py: main.py still calls shout without the new suffix");
+		expect(checkPrompts()[0]).toContain("The whole change (the report is about main.py, a place it left behind)");
+		expect(checkPrompts()[0]).toContain("+def shout(text, suffix):");
 	});
 
 	it("shows each changed function whole, the files in another order per pass, and callers of a changed signature", async () => {
@@ -303,21 +359,20 @@ describe("review after a complete verdict (D-097)", () => {
 
 	it("changes nothing in the task when stopped after its findings were checked", async () => {
 		const passes = [[finding("strip() on None crashes")], [finding("strip() on None crashes")]];
-		const base = context({ verdict: COMPLETE, passes });
-		const ctx: ModuleContext = {
-			...base,
-			// The user presses Escape while the review reads the workspace's state for its follow-up.
-			runCommand: (command, options) => {
-				if (checkPrompts().length > 0 && command.startsWith("git")) jobs.at(-1)?.stop.abort();
-				return base.runCommand(command, options);
-			},
+		// The user presses Escape while the check reads the finding.
+		const check = () => {
+			jobs.at(-1)?.stop.abort();
+			return REAL;
 		};
-		const sup = createSupervisor({ review: true, reviewPasses: 2, mode: "auto" }, ctx);
+		const sup = createSupervisor(
+			{ review: true, reviewPasses: 2, mode: "auto" },
+			context({ verdict: COMPLETE, passes, check }),
+		);
 		await begin(sup, REQUEST);
 		writeFileSync(join(repo, "app.py"), CHANGED);
 		await sup.onSettle?.(DONE, signal);
 		expect(await lastJob()).toBeUndefined();
-		expect(sup.status?.()).toContain("0/3 continuations");
+		expect(sup.status?.()).toContain("0/3 auto continuations");
 		expect(reviews()).toEqual([]);
 	});
 
@@ -333,11 +388,16 @@ describe("review after a complete verdict (D-097)", () => {
 		await begin(sup, REQUEST);
 		writeFileSync(join(repo, "app.py"), CHANGED.replace("def greet(name):", `def greet(name):\n    ${LOG_LINE}`));
 		await sup.onSettle?.(DONE, signal);
-		expect(await lastJob()).toMatchObject({ kind: "continue" });
+		const continued = await lastJob();
+		expect(continued).toMatchObject({ kind: "continue" });
+		// Counted once the host sends it (D-107).
+		expect(sup.status?.()).toContain("0/1 auto continuations");
+		continued?.commit?.("continue");
+		expect(sup.status?.()).toContain("1/1 auto continuations");
 		expect(await sup.command?.("review")).toContain("Reviewing the changes in the background");
 		expect(await lastJob()).toMatchObject({
 			kind: "notify",
-			summary: expect.stringContaining("not sent: the task is at its follow-up limit"),
+			summary: expect.stringContaining("(follow-up limit reached)"),
 		});
 	});
 });
@@ -391,7 +451,10 @@ describe("/exo review (D-097)", () => {
 		writeFileSync(join(repo, "app.py"), CHANGED);
 		const offline = createSupervisor({}, { ...context({ verdict: COMPLETE, passes: [] }), pool: () => undefined });
 		await offline.command?.("review");
-		expect(await lastJob()).toMatchObject({ level: "warning", summary: expect.stringContaining("no answer") });
+		expect(await lastJob()).toMatchObject({
+			level: "warning",
+			summary: "supervisor: the review could not run: no pass got an answer from the engine",
+		});
 
 		const headless = createSupervisor({}, context({ verdict: COMPLETE, passes: [] }, { background: false }));
 		expect(await headless.command?.("review")).toContain("needs pi's interactive UI");
@@ -400,7 +463,7 @@ describe("/exo review (D-097)", () => {
 	it("keeps what it reported across a rebuild", async () => {
 		const saved: JsonValue[] = [];
 		const passes = [[finding("strip() on None crashes")], [finding("strip() on None crashes")]];
-		const sup = createSupervisor({ reviewPasses: 2 }, context({ verdict: COMPLETE, passes }, { saved }));
+		const sup = createSupervisor({ review: false, reviewPasses: 2 }, context({ verdict: COMPLETE, passes }, { saved }));
 		await begin(sup, REQUEST);
 		writeFileSync(join(repo, "app.py"), CHANGED);
 		await sup.onSettle?.(DONE, signal);
@@ -416,6 +479,31 @@ describe("/exo review (D-097)", () => {
 		);
 		await rebuilt.command?.("review");
 		expect(await lastJob()).toMatchObject({ summary: expect.stringContaining("nothing that held up") });
+	});
+});
+
+describe("a review's follow-up and the no-progress guard (D-107)", () => {
+	it("counts a `/exo review` follow-up that changed nothing like any other", async () => {
+		const passes = [[finding("strip() on None crashes")], [finding("strip() on None crashes")]];
+		const sup = createSupervisor(
+			{ mode: "auto", maxContinuations: 10, reviewPasses: 2 },
+			context({ verdict: INCOMPLETE, passes }),
+		);
+		await begin(sup, REQUEST);
+		writeFileSync(join(repo, "app.py"), CHANGED);
+		await sup.onSettle?.(DONE, signal);
+		await lastJob();
+		await sup.command?.("review");
+		const reviewed = await lastJob();
+		expect(reviewed).toMatchObject({ kind: "continue" });
+		reviewed?.commit?.("continue");
+		// Nothing changes after it: one more follow-up, then the guard stops them.
+		await sup.onSettle?.(DONE, signal);
+		const once = await lastJob();
+		expect(once).toMatchObject({ kind: "continue" });
+		once?.commit?.("continue");
+		await sup.onSettle?.(DONE, signal);
+		expect(await lastJob()).toMatchObject({ kind: "notify", summary: expect.stringContaining("changed nothing") });
 	});
 });
 

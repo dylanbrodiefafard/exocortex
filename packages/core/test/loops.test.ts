@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
 	callKey,
+	failingItems,
 	failureKey,
 	failureLines,
 	loopHistoryLength,
@@ -190,5 +191,87 @@ describe("failureKey", () => {
 		expect(failureLines("warning: 2 errors were ignored\nsrc/a.c:3:1: error: expected ';'")).toEqual([
 			"src/a.c:<n>: error: expected ';'",
 		]);
+	});
+});
+
+describe("failures under a wrapper (D-108)", () => {
+	const make = (body: string) => `./build/test_graph\n${body}\nmake: *** [Makefile:24: test] Error 1`;
+
+	it("are known by what failed, not by make's line", () => {
+		expect(failureLines(make("check failed: order mismatch, expected a,b got b,a"))).toEqual([
+			"check failed: order mismatch, expected a,b got b,a",
+		]);
+		const asan = make(
+			"==123==ERROR: AddressSanitizer: heap-use-after-free on address 0x1\nSUMMARY: AddressSanitizer: heap-use-after-free src/x.cpp:52 in f",
+		);
+		expect(failureLines(asan)).toEqual([
+			"==<pid>==ERROR: AddressSanitizer: heap-use-after-free on address <hex>",
+			"SUMMARY: AddressSanitizer: heap-use-after-free src/x.cpp:<n> in f",
+		]);
+		// With nothing else to go by, the end of the output stands for the failure.
+		expect(failureLines(make("./build/t"))).toContain("make: *** [Makefile:<n>: test] Error 1");
+		expect(failureLines("bash: line 1: 4242 Aborted (core dumped) ./t")).toEqual([
+			"bash: line <n>: <pid> Aborted (core dumped) ./t",
+		]);
+	});
+});
+
+describe("failingItems (D-108)", () => {
+	it("names the failing tests of each runner, without their messages or times", () => {
+		const items = (output: string) => failingItems(output)?.items;
+		expect(items("FAILED tests/test_x.py::test_total - assert 3 == 4\nFAILED tests/test_x.py::test_days - x")).toEqual([
+			"tests/test_x.py::test_days",
+			"tests/test_x.py::test_total",
+		]);
+		expect(items("FAIL: test_add (tests.test_calc.CalcTest.test_add)")).toEqual([
+			"test_add (tests.test_calc.CalcTest.test_add)",
+		]);
+		expect(items("test parse::ipv6 ... FAILED\n        FAIL [   0.004s] forth::stack")).toEqual([
+			"forth::stack",
+			"parse::ipv6",
+		]);
+		expect(items("--- FAIL: TestSteps (0.01s)\n    --- FAIL: TestSteps/two (0.00s)")).toEqual([
+			"TestSteps",
+			"TestSteps/two",
+		]);
+		expect(
+			items("[  FAILED  ] Graph.Order (3 ms)\n[  FAILED  ] 1 test, listed below:\n[  FAILED  ] Graph.Order"),
+		).toEqual(["Graph.Order"]);
+		expect(items("  2/5 Test  #2: order_test .......***Failed    0.01 sec")).toEqual(["order_test"]);
+		expect(items("not ok 3 - parses ipv6 # TODO")).toEqual(["parses ipv6"]);
+		expect(items("   × adds numbers 5ms\n  ✕ subtracts (3 ms)\n FAIL  src/a.test.ts > math > adds")).toEqual([
+			"adds numbers",
+			"src/a.test.ts > math > adds",
+			"subtracts",
+		]);
+		expect(failingItems("FAILED tests/t.py::test_x - y")?.kind).toBe("tests");
+		// Marks that stand for no test: node:test's header, ESLint's count.
+		expect(failingItems("✖ failing tests:\n\n✖ adds (1.2ms)")?.items).toEqual(["adds"]);
+		expect(failingItems("✖ 3 problems (3 errors, 0 warnings)")).toBeUndefined();
+	});
+
+	it("else names the places errors point at, once per error", () => {
+		expect(
+			failingItems(
+				"stats.hpp:111:49: error: no matching function\nstats.hpp:40:72: error: no type named\nmake: *** [all] Error 1",
+			),
+		).toEqual({ kind: "sites", items: ["stats.hpp", "stats.hpp"] });
+		expect(failingItems("error[E0502]: cannot borrow\n  --> src/lib.rs:42:9")?.items).toEqual(["src/lib.rs"]);
+		expect(failingItems("src/a.ts(3,1): error TS2322: Type")?.items).toEqual(["src/a.ts"]);
+		expect(failingItems("SUMMARY: AddressSanitizer: heap-use-after-free src/manifest.cpp:52 in parse")?.items).toEqual([
+			"src/manifest.cpp in parse",
+		]);
+		expect(failingItems("t: tests/t.cpp:34: int main(): Assertion `x' failed.")?.items).toEqual([
+			"tests/t.cpp int main()",
+		]);
+		expect(failingItems("b.o: in function `f': a.cpp:3: undefined reference to `mkb::find_kind'")?.items).toEqual([
+			"undefined reference to mkb::find_kind",
+		]);
+		expect(
+			failingItems(
+				'Traceback (most recent call last):\n  File "a.py", line 3, in <module>\n  File "b.py", line 9, in plan\nKeyError: 1',
+			)?.items,
+		).toEqual(["b.py in plan"]);
+		expect(failingItems("something went wrong")).toBeUndefined();
 	});
 });

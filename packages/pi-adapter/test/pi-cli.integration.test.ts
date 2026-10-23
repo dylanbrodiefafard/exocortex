@@ -229,32 +229,6 @@ describe("pi CLI with the Exocortex extension", { timeout: 30_000 }, () => {
 		expect(readTrace(run.dbPath).sessions).toEqual([]);
 	});
 
-	it("runs sidecar calls through the pool against the main model's endpoint and records them", async () => {
-		const run = await runPi([{ kind: "text", text: "pong", cachedTokens: 4 }], {}, "/exo ping");
-		expect(run.code).toBe(0);
-		expect(run.stderr).toMatch(/Exocortex sidecar OK in \d+ ms \(\d+ prompt tokens, 4 cached\): pong/);
-		// The only request is the sidecar's: streamed with usage, thinking off, to the main model's id.
-		expect(server?.requests).toEqual([
-			expect.objectContaining({
-				model: "fake-model",
-				stream: true,
-				stream_options: { include_usage: true },
-				max_tokens: 16,
-				chat_template_kwargs: { enable_thinking: false },
-			}),
-		]);
-		const { sidecarCalls } = readTrace(run.dbPath);
-		expect(sidecarCalls).toEqual([
-			expect.objectContaining({
-				module: "exo.ping",
-				priority: "interactive",
-				outcome: "ok",
-				attempts: 1,
-				usage: { promptTokens: 16, cachedTokens: 4, completionTokens: 1 },
-			}),
-		]);
-	});
-
 	it("reports sidecar status", async () => {
 		const run = await runPi([], {}, "/exo status");
 		expect(run.code).toBe(0);
@@ -268,12 +242,14 @@ describe("pi CLI with the Exocortex extension", { timeout: 30_000 }, () => {
 			{ kind: "text", text: "Added the README too. Everything is finished." },
 		];
 		const ledger = {
-			is_task: true,
-			follows_previous: false,
-			criteria: ["Update greeting", "Add a README"],
+			relation: "new_task",
+			added_criteria: ["Update greeting", "Add a README"],
+			dropped_criteria: [],
 			check_commands: [],
 			do_not_run: [],
 		};
+		// The agent's success claims are read beside the verdict (D-107).
+		const reading = { asked_user: false, claims: [] };
 		const verdicts = [
 			{ verdict: "incomplete", missing: ["Add a README"], asked_user: false, reason: "no README" },
 			{ verdict: "complete", missing: [], asked_user: false, reason: "done" },
@@ -286,8 +262,10 @@ describe("pi CLI with the Exocortex extension", { timeout: 30_000 }, () => {
 				respond: (body) => {
 					const request = body as { stream?: boolean; messages: { content: unknown }[] };
 					if (isMain(request)) return mainReplies[main++] ?? { kind: "text", text: "(extra)" };
-					const isVerdict = JSON.stringify(request.messages).includes("acceptance checklist and evidence");
-					const reply = isVerdict ? verdicts[verdict++] : ledger;
+					const text = JSON.stringify(request.messages);
+					const isVerdict = text.includes("whether a coding agent finished a task");
+					const isReading = text.includes("the last message a coding agent wrote");
+					const reply = isVerdict ? verdicts[verdict++] : isReading ? reading : ledger;
 					return { kind: "text", text: JSON.stringify(reply ?? {}) };
 				},
 			},
@@ -310,7 +288,26 @@ describe("pi CLI with the Exocortex extension", { timeout: 30_000 }, () => {
 		expect(dataOf(exo[2])).toMatchObject({ action: "continued", continuation: 1 });
 		const injected = events.find((e) => e.kind === "message" && e.synthetic);
 		expect(injected).toMatchObject({ module: "supervisor" });
-		expect(sidecarCalls.map((c) => c.priority)).toEqual(["interactive", "critical", "critical"]);
+		expect(sidecarCalls.map((c) => c.priority)).toEqual([
+			"interactive",
+			"critical",
+			"critical",
+			"critical",
+			"critical",
+		]);
+		// Sidecar calls go to the main model's id, streamed with usage; the ledger and verdicts judge, so
+		// they think and ask for their JSON in the prompt instead of a grammar (D-101, D-106).
+		const sidecarRequests = (server?.requests ?? []).filter((r) => !isMain(r));
+		expect(sidecarRequests).toHaveLength(5);
+		for (const request of sidecarRequests) {
+			expect(request).toMatchObject({
+				model: "fake-model",
+				stream: true,
+				stream_options: { include_usage: true },
+				chat_template_kwargs: { enable_thinking: true },
+			});
+			expect(request).not.toHaveProperty("response_format");
+		}
 	});
 
 	it("memory adds a learned preference right after the user's prompt, and the prefix stays stable (D-060)", async () => {
@@ -460,7 +457,10 @@ describe("pi CLI with the Exocortex extension", { timeout: 30_000 }, () => {
 			"build it",
 			{
 				exoConfig: {
-					modules: { trimmer: { enabled: true, minChars: 2000 }, triage: { enabled: true, sidecar: false } },
+					modules: {
+						trimmer: { enabled: true, minChars: 2000 },
+						triage: { enabled: true, sidecar: false, loopThreshold: 2 },
+					},
 				},
 			},
 		);
@@ -472,12 +472,12 @@ describe("pi CLI with the Exocortex extension", { timeout: 30_000 }, () => {
 		const [first] = toolMessages(1);
 		expect(first).toContain("src/x.c:3:1: error: boom");
 		expect(first).toMatch(/\[exo trimmer: showing \d+ of \d+ lines; full output: /);
-		// Trimming collapsed the noise, so the error is no longer buried: triage leaves it alone.
+		// A first failure: triage says nothing (D-108).
 		expect(first).not.toContain("exo triage");
 		const [firstAgain, second] = toolMessages(2);
 		expect(firstAgain).toBe(first); // earlier results are never touched (prompt cache)
 		expect(second).toContain(
-			"[exo triage: this failed again with the same errors as before (first: src/x.c:3:1: error: boom)",
+			"[exo triage: this has now failed 2 times with the same errors as before (first: src/x.c:3:1: error: boom)",
 		);
 		const rewrites = readTrace(run.dbPath).events.filter((e) => e.kind === "exo.rewrite");
 		expect(rewrites.map((e) => e.module)).toEqual(["trimmer", "trimmer", "triage"]);

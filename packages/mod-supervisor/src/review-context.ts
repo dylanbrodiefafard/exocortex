@@ -10,6 +10,8 @@ const USE_LINE_CHARS = 200;
 const MIN_NAME_CHARS = 3;
 const GREP_TIMEOUT_MS = 10_000;
 const GREP_OUTPUT_CHARS = 64 * 1024;
+/** The longest a timer runs: a search in a background job, which its signal stops. */
+const NO_TIME_LIMIT_MS = 2 ** 31 - 1;
 
 /** Lines that declare a function or method, and the name they declare, by language family. */
 const DECLARATIONS: readonly RegExp[] = [
@@ -50,43 +52,75 @@ export function changedSignatures(diff: string): string[] {
 	return [...names].slice(0, MAX_SYMBOLS);
 }
 
+/** Other places that use the changed functions: as the reviewer reads them, and each line shown, by file. */
+export interface Uses {
+	readonly text: string;
+	/** The text of each line shown (without its `path:line:` prefix), by path: what a finding about a caller may quote. */
+	readonly lines: ReadonlyMap<string, ReadonlySet<string>>;
+}
+
 /**
  * Where each name is used in the workspace now, outside the lines the change added: what a
  * reviewer needs to see that a caller was left behind. `git grep`, whole words, tracked and
  * untracked files that are not ignored. Undefined when nothing was found or git is unavailable.
+ * With a `signal` (a background job) the search has no time limit of its own: the signal stops it.
  */
 export async function usesOf(
 	ctx: ModuleContext,
 	names: readonly string[],
 	diff: string,
 	signal?: AbortSignal,
-): Promise<string | undefined> {
+): Promise<Uses | undefined> {
 	if (names.length === 0) return undefined;
 	const added = new Set(parseDiff(diff).flatMap((file) => file.added.map((line) => line.trim())));
 	const sections: string[] = [];
+	const lines = new Map<string, Set<string>>();
 	for (const name of names) {
 		if (signal?.aborted) break;
-		// `name` is a word (`declaredName`): safe in a shell command as it is.
-		const out = await ctx.runCommand(`git -c core.quotePath=false grep --untracked -n -I -w -F -e ${name} -- .`, {
-			timeoutMs: GREP_TIMEOUT_MS,
-			tailChars: GREP_OUTPUT_CHARS,
-			...(signal ? { signal } : {}),
-		});
-		// `git grep` exits 1 when nothing matches.
-		if (out.exitCode !== 0) continue;
-		const uses = out.outputTail
-			.split("\n")
-			.filter((line) => line.trim() !== "")
-			.filter((line) => {
-				const text = line.replace(/^[^:]*:\d+:/, "").trim();
-				return !added.has(text) && declaredName(text) !== name;
-			});
+		const uses = await usesOfName(ctx, name, added, signal);
 		if (uses.length === 0) continue;
-		const shown = uses.slice(0, MAX_USES).map((line) => clip(line, USE_LINE_CHARS));
+		const shown = uses.slice(0, MAX_USES);
+		for (const line of shown) {
+			const match = /^([^:]*):\d+:(.*)$/.exec(line);
+			if (!match?.[1] || match[2] === undefined) continue;
+			const held = lines.get(match[1]) ?? new Set<string>();
+			held.add(match[2].trim());
+			held.add(clip(match[2], USE_LINE_CHARS).trim());
+			lines.set(match[1], held);
+		}
 		const more = uses.length > MAX_USES ? [`… (${uses.length - MAX_USES} more not shown)`] : [];
-		sections.push([`\`${name}\`:`, ...shown, ...more].join("\n"));
+		sections.push([`\`${name}\`:`, ...shown.map((line) => clip(line, USE_LINE_CHARS)), ...more].join("\n"));
 	}
-	return sections.length === 0 ? undefined : sections.join("\n\n");
+	return sections.length === 0 ? undefined : { text: sections.join("\n\n"), lines };
+}
+
+/** The `path:line:text` lines that use `name`, outside the change's own lines and its declaration. */
+async function usesOfName(
+	ctx: ModuleContext,
+	name: string,
+	added: ReadonlySet<string>,
+	signal: AbortSignal | undefined,
+): Promise<string[]> {
+	// `name` is a word (`declaredName`): safe in a shell command as it is.
+	const out = await ctx.runCommand(`git -c core.quotePath=false grep --untracked -n -I -w -F -e ${name} -- .`, {
+		timeoutMs: signal ? NO_TIME_LIMIT_MS : GREP_TIMEOUT_MS,
+		tailChars: GREP_OUTPUT_CHARS,
+		...(signal ? { signal } : {}),
+	});
+	// `git grep` exits 1 when nothing matches; anything else is a failure worth knowing about.
+	if (out.exitCode !== 0) {
+		if (out.exitCode !== 1 && !signal?.aborted) {
+			ctx.log(`review: looking up the uses of ${name} failed: ${out.outputTail.trim().slice(-200)}`);
+		}
+		return [];
+	}
+	return out.outputTail
+		.split("\n")
+		.filter((line) => line.trim() !== "")
+		.filter((line) => {
+			const text = line.replace(/^[^:]*:\d+:/, "").trim();
+			return !added.has(text) && declaredName(text) !== name;
+		});
 }
 
 function clip(text: string, chars: number): string {

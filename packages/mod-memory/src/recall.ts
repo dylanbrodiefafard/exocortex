@@ -2,9 +2,7 @@ import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import {
 	cosineSimilarity,
-	errorSignature,
 	fileEdits,
-	firstErrorLine,
 	type JsonValue,
 	type ModuleContext,
 	outcomeOf,
@@ -14,10 +12,10 @@ import {
 } from "@exocortex/core";
 import { deadEndsIn } from "./dead-ends.ts";
 import type { MemoryDeps } from "./deps.ts";
-import { FAILURE_DETAIL_LINES, failureDetail } from "./detail.ts";
-import { commandKey } from "./episodes.ts";
+import { anchorOf, cardDetail, type Failure, failureOf, identity, lineOf, problemKey } from "./detail.ts";
 import { repoPath } from "./paths.ts";
-import { problemIn } from "./problem.ts";
+import { type Problem, problemIn } from "./problem.ts";
+import { covers, runOf } from "./runs.ts";
 import type { RepoScope } from "./scope.ts";
 import type { MemorySettings } from "./settings.ts";
 import type { Card, MemoryStore } from "./store.ts";
@@ -25,8 +23,11 @@ import { clip, inert, oneLine } from "./text.ts";
 
 /** Cards embedded per background backfill (cards learned before an embeddings server was configured). */
 const BACKFILL_BATCH = 64;
-/** A card's problem coming back this often after the card was shown means the card did not fix it. */
-const HURT_RECURRENCES = 2;
+/**
+ * A shown card's outcome is settled once this many test or build runs of other runners have gone
+ * by without its own: the agent has moved on from the failure it was shown for.
+ */
+const SETTLE_RUNS = 8;
 /** Edited files remembered per shown card: enough to see whether the agent went where the card pointed. */
 const MAX_EDITED_FILES = 24;
 /** Cards listed by `/exo memory cards`. */
@@ -41,54 +42,72 @@ interface Recalled {
 	readonly match: Match;
 }
 
-/** A card shown in this task, and what the command it was shown for did afterwards. */
+/** A card shown in this session, and what the run it was shown for did afterwards. */
 interface Shown {
 	readonly card: Card;
 	readonly match: Match;
-	readonly signature: string;
-	readonly command: string | undefined;
+	/** Names this showing for its credit: a showing is credited once (`store.credit`). */
+	readonly key: string;
+	/** The problem whose return counts against the card: its own, or for a similar card the failure's. */
+	readonly problem: Problem;
+	/** The run it was shown for (D-109): a pass of the same runner that covers the problem settles it. */
+	readonly runner: string | undefined;
+	readonly filters: readonly string[];
+	/** What the failure it was shown for is named by, where the card's problem is in it. */
+	readonly named: readonly string[];
 	/** Files of the repo edited since the card was shown. */
 	readonly edited: Set<string>;
 	/** Times the card's problem came back after it was shown. */
 	recurred: number;
+	/** Test or build runs of other runners since its own last ran. */
+	idle: number;
 	passed: boolean;
 	/** At the pass, the agent had edited a file the card names: the pass can be put down to the card. */
 	followed: boolean;
 }
 
 export interface Recaller {
-	/** The cards for a failing result, each at most once per task. Counted as shown when committed. */
+	/** The cards for a failing result, each at most once per session (until compaction). Counted as shown when committed. */
 	rewrite(draft: ToolResultDraft, signal: AbortSignal): Promise<ToolRewrite | undefined>;
-	/** What each card shown in this task sees next: edits, its problem again, or its command passing. */
-	observe(tool: ToolOutcome): void;
 	/**
-	 * Credits each card shown in the task by what its command did next, then forgets them. With
-	 * `final` false (the instance is going away mid-task) only what is already settled is credited:
-	 * the rest stays in {@link Recaller.state} for the next instance.
+	 * What each card shown sees next: edits, its problem again, its run passing, or other runs going
+	 * by. Returns the cards this result showed to have helped: a fix learned from it is theirs.
 	 */
-	finishTask(final?: boolean): void;
+	observe(tool: ToolOutcome): readonly number[];
+	/**
+	 * The instance is going away: every card still waiting for an outcome is credited with what
+	 * is known. A showing is credited once, so an instance rebuilt from the saved state cannot
+	 * credit it again.
+	 */
+	dispose(): void;
+	/** Text added earlier may be gone from the context: every card may be shown again. */
+	compacted(): void;
 	/** `/exo memory cards` lists this repo's cards; `/exo memory forget card <id>` retires one. */
 	command(args: string): string | undefined | Promise<string>;
-	/** What must survive a rebuild of the module: the cards shown in the task so far (M9). */
+	/** What must survive a rebuild of the module: the cards shown so far (M9). */
 	state(): JsonValue;
 	/** Cards shown by this instance. */
 	recalled(): number;
 }
 
 /**
- * Recall and credit (D-049, D-072).
- * - A failing tool result with a card's signature and enough of its names gets the lesson
- *   appended, within ~400 tokens, worded as a past fix to check. No LLM on the hot path.
- * - A card is credited `helped` when the command it was shown for went on to pass after edits to
- *   a file the card names (M4), `hurt` when its problem kept coming back; cards that hurt more
- *   than they help retire. A pass that came without touching the card's files credits nothing:
- *   the agent fixed it another way, or nothing was fixed.
+ * Recall and credit (D-049, D-072, D-109).
+ * - A failing tool result with a card's key on any of its failure lines, and enough of its names,
+ *   gets the lesson appended, within ~400 tokens, worded as a past fix to check. No LLM on the
+ *   hot path.
+ * - A card is credited `helped` when a run of the runner it was shown for went on to pass, covering
+ *   the problem, after edits to a file the card names (M4); a pass without them is `withheld`
+ *   (the agent fixed it another way). One whose problem came back and whose run never passed is
+ *   `hurt` once that is settled: the agent ran other tests for a while, or the session ended.
+ *   Cards that hurt more than they help retire.
  */
 export function createRecaller({ ctx, settings, store, scope, changed }: MemoryDeps, saved: unknown): Recaller {
 	const injected = new Map<number, Shown>();
-	/** Cards shown and already credited in this task: not shown again before the next one. */
+	/** Cards shown and settled in this session: not shown again until the context is compacted. */
 	const done = new Set<number>();
 	let recalled = 0;
+	/** Cards the result being observed showed to have helped. */
+	let helpedNow: number[] = [];
 	try {
 		restore(saved);
 	} catch (error) {
@@ -108,17 +127,22 @@ export function createRecaller({ ctx, settings, store, scope, changed }: MemoryD
 	}
 
 	function restoreShown(item: Record<string, unknown>): Shown | undefined {
-		const { id, signature, command, match, recurred, edited } = item;
-		if (typeof id !== "number" || typeof signature !== "string") return undefined;
+		const { id, key, signature, detail, runner, filters, named, match, recurred, idle, edited } = item;
+		if (typeof id !== "number" || typeof signature !== "string" || typeof key !== "string") return undefined;
 		const card = store.card(id);
 		if (!card || card.validTo !== null) return undefined;
+		const strings = (value: unknown) => asArray(value).filter((x) => typeof x === "string");
 		return {
 			card,
-			signature,
+			key,
+			problem: { signature, detail: strings(detail) },
 			match: MATCHES.find((m) => m === match) ?? "same",
-			command: typeof command === "string" ? command : undefined,
-			edited: new Set(asArray(edited).filter((path) => typeof path === "string")),
+			runner: typeof runner === "string" ? runner : undefined,
+			filters: strings(filters),
+			named: strings(named),
+			edited: new Set(strings(edited)),
 			recurred: typeof recurred === "number" ? recurred : 0,
+			idle: typeof idle === "number" ? idle : 0,
 			passed: item["passed"] === true,
 			followed: item["followed"] === true,
 		};
@@ -128,15 +152,10 @@ export function createRecaller({ ctx, settings, store, scope, changed }: MemoryD
 	 * The same problem first. Otherwise cards whose trigger shares most of the error's keywords, plus,
 	 * with an embeddings server, cards whose trigger means the same in other words (D-062).
 	 */
-	async function recallCards(
-		repo: string,
-		signature: string,
-		output: string,
-		signal: AbortSignal,
-	): Promise<Recalled[]> {
-		const byKeywords = recall(store, repo, signature, output, settings);
+	async function recallCards(repo: string, failure: Failure, output: string, signal: AbortSignal) {
+		const byKeywords = recall(store, repo, failure, output, settings);
 		if (byKeywords.some((r) => r.match !== "similar")) return byKeywords;
-		const bySimilarity = (await similarCards(repo, signature, output, signal)).map((card) => ({
+		const bySimilarity = (await similarCards(repo, failure.keys, output, signal)).map((card) => ({
 			card,
 			match: "similar" as const,
 		}));
@@ -144,11 +163,16 @@ export function createRecaller({ ctx, settings, store, scope, changed }: MemoryD
 		return rank([...merged.values()]).slice(0, settings.maxCards);
 	}
 
-	async function similarCards(repo: string, signature: string, output: string, signal: AbortSignal): Promise<Card[]> {
+	async function similarCards(
+		repo: string,
+		own: ReadonlySet<string>,
+		output: string,
+		signal: AbortSignal,
+	): Promise<Card[]> {
 		const embedder = ctx.embedder();
-		const line = firstErrorLine(output)?.line;
+		const line = anchorOf(output)?.line;
 		if (!embedder || !line) return [];
-		const live = store.cards(repo).filter((c) => c.validTo === null && c.signature !== signature);
+		const live = store.cards(repo).filter((c) => c.validTo === null && !own.has(c.signature));
 		const vectors = store.vectors("card", embedder.model, repo);
 		const missing = live.filter((c) => !vectors.has(c.id)).slice(0, BACKFILL_BATCH);
 		// Not awaited: the agent is waiting on this result. They are there for the next failure.
@@ -156,8 +180,15 @@ export function createRecaller({ ctx, settings, store, scope, changed }: MemoryD
 			embedCards(ctx, store, missing).catch((error: unknown) => ctx.log(`embedding failed: ${String(error)}`));
 		const known = live.filter((c) => vectors.has(c.id));
 		if (known.length === 0) return [];
+		const started = Date.now();
 		const [query] = (await embedder.embed([line], { timeoutMs: settings.embedTimeoutMs, signal })) ?? [];
-		if (!query) return [];
+		if (!query) {
+			// The embedder reports why; this says what it cost: the lookup by meaning was skipped.
+			if (!signal.aborted && Date.now() - started >= settings.embedTimeoutMs) {
+				ctx.log(`embedding lookup took over ${settings.embedTimeoutMs} ms: similar cards were found by keywords only`);
+			}
+			return [];
+		}
 		return known.filter((c) => cosineSimilarity(query, vectors.get(c.id) as Float32Array) >= settings.minSimilarity);
 	}
 
@@ -193,34 +224,65 @@ export function createRecaller({ ctx, settings, store, scope, changed }: MemoryD
 		return added;
 	}
 
-	/** A command's result: a shown card's problem again, or its command passing. True when either was seen. */
+	/**
+	 * A command's result: a shown card's problem again, its run passing, or a run of other tests
+	 * going by. True when anything was noted.
+	 */
 	function noteRun(tool: ToolOutcome): boolean {
-		const signature = failureSignature(tool);
-		const names = signature ? new Set(failureDetail(tool.output, FAILURE_DETAIL_LINES)) : undefined;
-		const passed = !names && outcomeOf(tool) === "passed" ? commandKey(tool) : undefined;
+		const line = tool.input["command"];
+		if (typeof line !== "string") return false;
+		const run = runOf(line, ctx.cwd);
+		const outcome = outcomeOf(tool);
+		const failed = outcome === "failed" && failureOf(tool.toolName, tool.output);
+		const text = `${line}\n${tool.output}`;
 		let seen = false;
 		for (const shown of injected.values()) {
-			// The failure the card was shown for, which for a similar error is not the card's own kind.
-			const problem = { signature: shown.signature, detail: shown.card.detail };
-			if (names && problemIn(problem, signature, names, settings.minDetail)) {
+			const own = run !== undefined && run.runner === shown.runner;
+			if (failed && problemIn(shown.problem, failed, settings.minDetail)) {
 				shown.recurred += 1;
 				seen = true;
-			} else if (passed !== undefined && passed === shown.command && !shown.passed) {
+			} else if (
+				own &&
+				outcome === "passed" &&
+				covers({ ...shown, runner: run.runner }, run, text, settings.minDetail)
+			) {
 				shown.passed = true;
 				shown.followed = follows(shown);
+				if (shown.followed) helpedNow.push(shown.card.id);
 				seen = true;
 			}
+			seen = idled(shown, own, run?.verifying === true) || seen;
 		}
 		return seen;
 	}
 
-	/** What a card shown in the task is credited with; "keep" when it is too early to say. */
+	/** A run of the shown card's runner resets its count of other runs; another test or build run adds to it. */
+	function idled(shown: Shown, own: boolean, verifying: boolean): boolean {
+		if (own) shown.idle = 0;
+		else if (verifying) shown.idle += 1;
+		return !own && verifying;
+	}
+
+	/** What a shown card is credited with; "keep" while it may still go either way (D-109 order). */
 	function verdict(shown: Shown, final: boolean): "hurt" | "helped" | "withheld" | "none" | "keep" {
-		if (shown.recurred >= HURT_RECURRENCES) return "hurt";
 		if (shown.passed) return shown.followed ? "helped" : "withheld";
-		// Mid-task, a card whose command has not passed yet may still go either way.
-		if (!final) return "keep";
+		if (!final && shown.idle < SETTLE_RUNS) return "keep";
 		return shown.recurred > 0 ? "hurt" : "none";
+	}
+
+	/** Credits the shown cards whose outcome is known, or all of them when `final`. */
+	function settle(final: boolean): void {
+		try {
+			for (const [id, shown] of [...injected]) credit(id, shown, final);
+			store.retireUnhelpful();
+		} catch (error) {
+			// What could not be credited is let go, not carried over.
+			ctx.log(`credit failed: ${String(error)}`);
+			for (const id of injected.keys()) done.add(id);
+			injected.clear();
+		} finally {
+			changed();
+		}
 	}
 
 	/** Credits one shown card and lets it go, unless it is too early to say. */
@@ -228,11 +290,13 @@ export function createRecaller({ ctx, settings, store, scope, changed }: MemoryD
 		const outcome = verdict(shown, final);
 		if (outcome === "keep") return;
 		injected.delete(id);
-		if (!final) done.add(id);
+		done.add(id);
 		if (outcome === "withheld") ctx.record({ kind: "exo.memory", data: { action: "credit_withheld", card: id } });
 		if (outcome !== "hurt" && outcome !== "helped") return;
-		store.credit(id, outcome);
-		ctx.record({ kind: "exo.memory", data: { action: "credited", card: id, outcome } });
+		// A showing an earlier instance already credited is not counted twice.
+		if (store.credit(id, outcome, shown.key)) {
+			ctx.record({ kind: "exo.memory", data: { action: "credited", card: id, outcome } });
+		}
 	}
 
 	function listCards(repo: RepoScope): string {
@@ -247,12 +311,29 @@ export function createRecaller({ ctx, settings, store, scope, changed }: MemoryD
 		return [...more, ...lines, "/exo memory forget card <id> removes one."].join("\n");
 	}
 
+	/** The problem a showing watches for: the card's own, or for a card of another kind of error, the failure's. */
+	function problemOf({ card, match }: Recalled, draft: ToolResultDraft): Problem {
+		if (match !== "similar") return card;
+		const anchor = anchorOf(draft.output);
+		return anchor
+			? { signature: problemKey(draft.toolName, anchor.line), detail: cardDetail(draft.output, anchor.index) }
+			: card;
+	}
+
+	/** What the failure a card is shown for is named by, at the line its problem is on. */
+	function namedIn({ card, match }: Recalled, draft: ToolResultDraft): string[] {
+		const at = match === "similar" ? anchorOf(draft.output) : lineOf(draft.toolName, draft.output, card.signature);
+		return at ? identity(draft.output, at.index) : [];
+	}
+
 	return {
 		async rewrite(draft, signal) {
-			const signature = failureSignature(draft);
+			const line = draft.input["command"];
+			if (outcomeOf(draft) !== "failed" || typeof line !== "string") return undefined;
 			const repo = await scope();
-			if (!signature || !repo.known) return undefined;
-			const cards = (await recallCards(repo.id, signature, draft.output, signal)).filter(
+			if (!repo.known) return undefined;
+			const failure = failureOf(draft.toolName, draft.output);
+			const cards = (await recallCards(repo.id, failure, draft.output, signal)).filter(
 				(r) => !injected.has(r.card.id) && !done.has(r.card.id) && !stale(r),
 			);
 			if (cards.length === 0) return undefined;
@@ -263,14 +344,21 @@ export function createRecaller({ ctx, settings, store, scope, changed }: MemoryD
 				// time budget showed nothing, and must not be credited for what the agent did next.
 				commit: () => {
 					try {
-						for (const { card, match } of cards) {
+						const run = runOf(line, ctx.cwd);
+						const at = Date.now();
+						for (const recalledCard of cards) {
+							const { card, match } = recalledCard;
 							injected.set(card.id, {
 								card,
 								match,
-								signature,
-								command: commandKey(draft),
+								key: `${ctx.sessionId}:${at}:${card.id}`,
+								problem: problemOf(recalledCard, draft),
+								runner: run?.runner,
+								filters: run?.filters ?? [],
+								named: namedIn(recalledCard, draft),
 								edited: new Set(),
 								recurred: 0,
+								idle: 0,
 								passed: false,
 								followed: false,
 							});
@@ -283,7 +371,7 @@ export function createRecaller({ ctx, settings, store, scope, changed }: MemoryD
 								action: "recalled",
 								cards: cards.map((r) => r.card.id),
 								matches: cards.map((r) => r.match),
-								signature,
+								signature: cards[0]?.card.signature ?? null,
 							},
 						});
 						changed();
@@ -295,31 +383,21 @@ export function createRecaller({ ctx, settings, store, scope, changed }: MemoryD
 		},
 
 		observe(tool) {
-			if (injected.size === 0) return;
+			if (injected.size === 0) return [];
+			helpedNow = [];
 			const edits = fileEdits(tool, 0);
-			if (edits ? noteEdits(edits.map((edit) => edit.path)) : noteRun(tool)) changed();
+			if (!(edits ? noteEdits(edits.map((edit) => edit.path)) : noteRun(tool))) return [];
+			if ([...injected.values()].some((shown) => verdict(shown, false) !== "keep")) settle(false);
+			else changed();
+			return helpedNow;
 		},
 
-		/**
-		 * (D-072, M4)
-		 * - `hurt`: the card's problem came back twice or more, or came back and the command never passed.
-		 * - `helped`: the command passed after edits to a file the card names.
-		 * - Neither: the agent never ran the command again, or it passed without the card's files
-		 *   being touched, so nothing shows what the card did.
-		 */
-		finishTask(final = true) {
-			try {
-				for (const [id, shown] of [...injected]) credit(id, shown, final);
-				store.retireUnhelpful();
-			} catch (error) {
-				// The task ends all the same: what could not be credited is let go, not carried over.
-				ctx.log(`credit failed: ${String(error)}`);
-				if (!final) for (const id of injected.keys()) done.add(id);
-				injected.clear();
-			} finally {
-				if (final) done.clear();
-				changed();
-			}
+		dispose: () => settle(true),
+
+		compacted() {
+			if (done.size === 0) return;
+			done.clear();
+			changed();
 		},
 
 		command(args) {
@@ -339,10 +417,15 @@ export function createRecaller({ ctx, settings, store, scope, changed }: MemoryD
 			return {
 				cards: [...injected.values()].map((shown) => ({
 					id: shown.card.id,
-					signature: shown.signature,
-					command: shown.command ?? null,
+					key: shown.key,
+					signature: shown.problem.signature,
+					detail: [...shown.problem.detail],
+					runner: shown.runner ?? null,
+					filters: [...shown.filters],
+					named: [...shown.named],
 					match: shown.match,
 					recurred: shown.recurred,
+					idle: shown.idle,
 					passed: shown.passed,
 					followed: shown.followed,
 					edited: [...shown.edited],
@@ -378,32 +461,32 @@ export async function embedCards(
 }
 
 /**
- * Cards for the failure in `output`, in this order (D-072):
- * 1. the same problem in this repo: the signature, and at least `minDetail` of the card's names;
- * 2. the same problem fixed in 2+ other repos (D-018 promotion). Only lessons a sidecar wrote,
- *    and without their file names (M8): a deterministic lesson quotes the other repo's code;
- * 3. cards of this repo for another kind of error whose trigger shares most of this error's
- *    keywords. A card with this signature that failed the name check is a different problem,
- *    not a similar one.
+ * Cards for the failure in `output`, in this order (D-072, D-109):
+ * 1. the same problem in this repo: a card whose key is on any of the failure's lines, and at
+ *    least `minDetail` of whose names the failure mentions;
+ * 2. the same problem fixed in 2+ other repos (D-018 promotion), without their file names (M8);
+ * 3. cards of this repo for another kind of error whose trigger shares most of the failure's
+ *    first line's keywords. A card with one of these keys that failed the name check is a
+ *    different problem, not a similar one.
  */
 export function recall(
 	store: MemoryStore,
 	scope: string,
-	signature: string,
+	failure: Failure,
 	output: string,
 	settings: Pick<MemorySettings, "maxCards" | "minOverlap" | "minDetail">,
 ): Recalled[] {
-	const names = new Set(failureDetail(output, FAILURE_DETAIL_LINES));
-	const sameProblem = store.bySignature(signature).filter((c) => problemIn(c, signature, names, settings.minDetail));
+	const own = failure.keys;
+	const sameProblem = store.bySignatures([...own]).filter((c) => problemIn(c, failure, settings.minDetail));
 	const local = sameProblem.filter((c) => c.scope === scope);
 	if (local.length > 0) return top(local, "same", settings.maxCards);
-	const elsewhere = sameProblem.filter((c) => c.scope !== scope && c.distilled).map((c) => ({ ...c, files: [] }));
+	const elsewhere = sameProblem.filter((c) => c.scope !== scope).map((c) => ({ ...c, files: [] }));
 	if (new Set(elsewhere.map((c) => c.scope)).size >= 2) return top(elsewhere, "elsewhere", settings.maxCards);
-	const line = firstErrorLine(output)?.line;
+	const line = anchorOf(output)?.line;
 	if (!line) return [];
 	const similar = store
 		.search(scope, line, settings.maxCards * 2)
-		.filter((m) => m.overlap >= settings.minOverlap && m.card.signature !== signature)
+		.filter((m) => m.overlap >= settings.minOverlap && !own.has(m.card.signature))
 		.map((m) => m.card);
 	return top(similar, "similar", settings.maxCards);
 }
@@ -458,9 +541,4 @@ function existsNear(cwd: string, file: string): boolean {
 		}
 		if (dirname(dir) === dir) return false;
 	}
-}
-
-function failureSignature(tool: ToolOutcome): string | undefined {
-	if (outcomeOf(tool) !== "failed" || typeof tool.input["command"] !== "string") return undefined;
-	return errorSignature(tool.toolName, tool.exitCode, tool.output);
 }

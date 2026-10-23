@@ -20,12 +20,8 @@ export interface Card {
 	readonly files: readonly string[];
 	/** The error line it was learned from (full-text retrieval). */
 	readonly trigger: string;
+	/** Written by the lesson sidecar, which found the fix worth keeping (D-109). */
 	readonly lesson: string;
-	/**
-	 * A sidecar wrote the lesson and found the fix worth keeping. Otherwise it is the deterministic
-	 * summary, which quotes the edit: it is never shown in another repo.
-	 */
-	readonly distilled: boolean;
 	/** Trace references and the fix, for audit. */
 	readonly evidence: string;
 	readonly seen: number;
@@ -45,7 +41,6 @@ export interface NewCard {
 	readonly trigger: string;
 	readonly lesson: string;
 	readonly evidence: string;
-	readonly distilled?: boolean;
 }
 
 /** Who retired a preference: the user's `forget`, a later interview answer, or a sidecar's reading of a message. */
@@ -60,8 +55,10 @@ interface RetiredPreference {
 }
 
 export interface MemoryStore {
-	/** Live cards for a signature, from every repo. The caller decides which are the same problem (D-072). */
+	/** Live cards for a key, from every repo. The caller decides which are the same problem (D-072). */
 	bySignature(signature: string): Card[];
+	/** Live cards for any of a failure's keys (D-109), from every repo. */
+	bySignatures(signatures: readonly string[]): Card[];
 	/**
 	 * Live cards of one repo whose trigger shares at least {@link MIN_SHARED_KEYWORDS} keywords with
 	 * `text`, best first. `overlap` is the smaller of the two shares: how much of the text's keywords
@@ -84,7 +81,11 @@ export interface MemoryStore {
 	 */
 	trim(scope: string, max: number): number;
 	markInjected(id: number): void;
-	credit(id: number, outcome: "helped" | "hurt"): void;
+	/**
+	 * Credits a card for one showing of it (`shown` names the showing). A showing is credited once,
+	 * however many instances of the module saw it: false when it already was.
+	 */
+	credit(id: number, outcome: "helped" | "hurt", shown: string): boolean;
 	/** RETIRE cards that hurt more than they help (R5.3): hurt − helped ≥ 2 after 3+ injections. */
 	retireUnhelpful(): number;
 	cards(scope?: string): Card[];
@@ -160,9 +161,11 @@ export interface StoredPreference {
 /**
  * The schema's version. Nothing is released, so there is one schema and no migrations (D-088): a
  * store at any other version is set aside and a new one started. The first change after a release
- * adds a migration here and stops setting stores aside.
+ * adds a migration here and stops setting stores aside. Version 2 (D-109): a card's key has no exit
+ * code, its names come from its own failure, it is always a sidecar's lesson, and credit is kept
+ * per showing.
  */
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 const SCHEMA = `
 	CREATE TABLE cards (
@@ -174,7 +177,6 @@ const SCHEMA = `
 		files TEXT NOT NULL DEFAULT '',
 		trigger TEXT NOT NULL,
 		lesson TEXT NOT NULL,
-		distilled INTEGER NOT NULL DEFAULT 0,
 		evidence TEXT NOT NULL,
 		seen INTEGER NOT NULL DEFAULT 1,
 		injected INTEGER NOT NULL DEFAULT 0,
@@ -185,6 +187,11 @@ const SCHEMA = `
 	);
 	CREATE INDEX cards_signature ON cards (signature, valid_to);
 	CREATE INDEX cards_scope ON cards (scope, valid_to);
+	CREATE TABLE credits (
+		card_id INTEGER NOT NULL,
+		shown TEXT NOT NULL,
+		PRIMARY KEY (card_id, shown)
+	);
 	CREATE VIRTUAL TABLE cards_fts USING fts5(trigger, lesson, card_id UNINDEXED, tokenize = 'unicode61');
 	CREATE TABLE preferences (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -247,7 +254,6 @@ interface Row {
 	trigger: string;
 	lesson: string;
 	evidence: string;
-	distilled: number;
 	seen: number;
 	injected: number;
 	helped: number;
@@ -314,7 +320,7 @@ export function openMemoryStore(
 		return atomically(() => {
 			const result = db
 				.prepare(
-					"INSERT INTO cards (scope, signature, detail, files, trigger, lesson, evidence, distilled, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+					"INSERT INTO cards (scope, signature, detail, files, trigger, lesson, evidence, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
 				)
 				.run(
 					card.scope,
@@ -324,7 +330,6 @@ export function openMemoryStore(
 					card.trigger,
 					card.lesson,
 					card.evidence,
-					card.distilled ? 1 : 0,
 					now(),
 				);
 			const id = Number(result.lastInsertRowid);
@@ -340,6 +345,14 @@ export function openMemoryStore(
 	return {
 		bySignature(signature) {
 			return (select(`${live} AND signature = ? ORDER BY id`).all(signature) as unknown as Row[]).map(toCard);
+		},
+
+		bySignatures(signatures) {
+			if (signatures.length === 0) return [];
+			const marks = signatures.map(() => "?").join(", ");
+			return (select(`${live} AND signature IN (${marks}) ORDER BY id`).all(...signatures) as unknown as Row[]).map(
+				toCard,
+			);
 		},
 
 		search(scope, text, limit) {
@@ -413,10 +426,15 @@ export function openMemoryStore(
 			db.prepare("UPDATE cards SET injected = injected + 1 WHERE id = ?").run(id);
 		},
 
-		credit(id, outcome) {
-			db.prepare(
-				`UPDATE cards SET ${outcome === "helped" ? "helped = helped + 1" : "hurt = hurt + 1"} WHERE id = ?`,
-			).run(id);
+		credit(id, outcome, shown) {
+			return atomically(() => {
+				const first = db.prepare("INSERT OR IGNORE INTO credits (card_id, shown) VALUES (?, ?)").run(id, shown);
+				if (Number(first.changes) === 0) return false;
+				db.prepare(
+					`UPDATE cards SET ${outcome === "helped" ? "helped = helped + 1" : "hurt = hurt + 1"} WHERE id = ?`,
+				).run(id);
+				return true;
+			});
 		},
 
 		retireUnhelpful() {
@@ -570,7 +588,6 @@ export function openMemoryStore(
 			files: row.files === "" ? [] : row.files.split("\n"),
 			trigger: row.trigger,
 			lesson: row.lesson,
-			distilled: row.distilled === 1,
 			evidence: row.evidence,
 			seen: row.seen,
 			injected: row.injected,

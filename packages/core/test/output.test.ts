@@ -5,7 +5,9 @@ import {
 	errorLineIndices,
 	errorSignature,
 	firstErrorLine,
+	isFileReference,
 	isRoutineLine,
+	isWrapperLine,
 	lineVerdicts,
 	normalizeErrorLine,
 	ungroundedReferences,
@@ -53,7 +55,9 @@ describe("classifyErrorLine", () => {
 		["UnicodeDecodeError: 'utf-8' codec can't decode byte 0xff", "specific"],
 		["src/a.ts(3,1): error TS2322: Type 'x' is not assignable", "specific"],
 		["Something failed badly", "generic"],
-		["Segmentation fault (core dumped)", "generic"],
+		["Segmentation fault (core dumped)", "specific"],
+		["bash: line 1: 4242 Aborted                 (core dumped) ./build/t", "specific"],
+		["Request aborted by the user", "generic"],
 	])("%s → %s", (line, kind) => {
 		expect(classifyErrorLine(line)).toBe(kind);
 	});
@@ -205,6 +209,44 @@ describe("firstErrorLine", () => {
 	});
 	it("finds indented go test failures", () => {
 		expect(errorLineIndices(["=== RUN TestA", "    --- FAIL: TestA (0.00s)", "ok"])).toEqual([1]);
+	});
+});
+
+describe("wrappers and crashes (D-108)", () => {
+	it("tells a line that only wraps a failure from one that says what failed", () => {
+		expect(isWrapperLine("make: *** [Makefile:24: test] Error 1")).toBe(true);
+		expect(isWrapperLine("make[2]: *** [CMakeFiles/t.dir/build.make:76: t] Error 1")).toBe(true);
+		expect(isWrapperLine("ninja: build stopped: subcommand failed.")).toBe(true);
+		expect(isWrapperLine("collect2: error: ld returned 1 exit status")).toBe(true);
+		expect(isWrapperLine("error: could not compile `forth` (lib) due to 2 previous errors")).toBe(true);
+		expect(isWrapperLine("src/a.c:3:1: error: boom")).toBe(false);
+	});
+
+	it("reads sanitizers, assertions and a program killed by a signal as crashes", () => {
+		for (const line of [
+			"==4242==ERROR: AddressSanitizer: heap-use-after-free on address 0x602000000010",
+			"SUMMARY: AddressSanitizer: heap-use-after-free src/manifest.cpp:52 in parse",
+			"WARNING: ThreadSanitizer: data race (pid=7)",
+			"src/a.cpp:10:5: runtime error: signed integer overflow",
+			"t: tests/t.cpp:34: int main(): Assertion `x == 7' failed.",
+			"Segmentation fault (core dumped)",
+			"bash: line 1: 4242 Segmentation fault      (core dumped) ./build/t",
+		])
+			expect([line, lineVerdicts([line])[0]]).toEqual([line, "error"]);
+		expect(lineVerdicts(["The request was aborted by the user"])[0]).toBe("mention");
+	});
+
+	it("puts what failed before make's line that it did", () => {
+		const out = "./build/t\ncheck failed: order mismatch\nmake: *** [Makefile:24: test] Error 1";
+		expect(firstErrorLine(out)?.line).toBe("check failed: order mismatch");
+		expect(firstErrorLine("make: *** [Makefile:24: test] Error 1")?.line).toBe("make: *** [Makefile:24: test] Error 1");
+	});
+
+	it("knows a file name from a code name", () => {
+		expect(isFileReference("src/lib.rs:42")).toBe(true);
+		expect(isFileReference("manifest.cpp")).toBe(true);
+		expect(isFileReference("self.stack")).toBe(false);
+		expect(isFileReference("Node.js")).toBe(false);
 	});
 });
 
