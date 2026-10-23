@@ -54,7 +54,7 @@ describe("sidecar lifecycle", () => {
 	});
 
 	it("reports a failing engine without throwing", async () => {
-		server = await startFakeOpenAIServer([{ kind: "error", status: 500, message: "boom" }]);
+		server = await startFakeOpenAIServer([{ kind: "error", status: 400, message: "refused" }]);
 		const h = setup({ engine: { baseUrl: server.baseUrl, model: "fake-model" } });
 		await h.pi.emit("session_start");
 		expect(await ask(h)).toMatchObject({ ok: false, outcome: "error" });

@@ -1,7 +1,7 @@
 import { startFakeOpenAIServer } from "@exocortex/testkit";
 import fc from "fast-check";
 import { Type } from "typebox";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { ExoConfig } from "../src/config.ts";
 import {
 	type ChatRequest,
@@ -15,10 +15,12 @@ import {
 	createSidecarPool,
 	holdFor,
 	type PoolStats,
+	RETRY_DELAYS_MS,
 	SIDECAR_THINKING_TOKENS,
 	type SidecarCallRecord,
 	type SidecarKind,
 	type SidecarPriority,
+	transient,
 } from "../src/inference/pool.ts";
 
 const TARGET: EngineTarget = {
@@ -203,6 +205,73 @@ describe("sidecar pool failure handling (never rejects)", () => {
 		await flush();
 		pending[0]?.reply('{"n": 3}');
 		expect(await result).toMatchObject({ ok: true, value: { n: 3 } });
+	});
+});
+
+describe("a dropped connection is tried again (D-112)", () => {
+	it("tells failures another try may not meet from those it would", () => {
+		expect(transient(new InferenceError("network", "TypeError: terminated"))).toBe(true);
+		expect(transient(new InferenceError("http", "HTTP 502", 502))).toBe(true);
+		expect(transient(new InferenceError("http", "HTTP 429", 429))).toBe(true);
+		expect(transient(new InferenceError("http", "HTTP 400: too long", 400))).toBe(false);
+		expect(transient(new InferenceError("http", "stream error: boom"))).toBe(false);
+		expect(transient(new InferenceError("stalled", "engine stopped answering"))).toBe(false);
+		expect(transient(new InferenceError("aborted", "request aborted"))).toBe(false);
+		expect(transient(new Error("network"))).toBe(false);
+	});
+
+	it("sends the request again after a drop, and gives up after the last wait", async () => {
+		vi.useFakeTimers();
+		try {
+			// The waits count against a call's deadline.
+			const { pool, pending, records } = makePool({ timeoutMs: 60_000 });
+			const recovered = pool.run(call("review"));
+			await vi.advanceTimersByTimeAsync(0);
+			pending[0]?.fail(new InferenceError("network", "TypeError: terminated"));
+			await vi.advanceTimersByTimeAsync((RETRY_DELAYS_MS[0] ?? 0) - 1);
+			expect(pending).toHaveLength(1);
+			await vi.advanceTimersByTimeAsync(1);
+			expect(pending).toHaveLength(2);
+			pending[1]?.fail(new InferenceError("http", "HTTP 503", 503));
+			await vi.advanceTimersByTimeAsync(RETRY_DELAYS_MS[1] ?? 0);
+			pending[2]?.reply("found it", 12);
+			expect(await recovered).toMatchObject({ ok: true, value: "found it", usage: { promptTokens: 12 } });
+
+			const lost = pool.run(call("lost"));
+			await vi.advanceTimersByTimeAsync(0);
+			for (let i = 0; i <= RETRY_DELAYS_MS.length; i++) {
+				pending.at(-1)?.fail(new InferenceError("network", "TypeError: terminated"));
+				await vi.advanceTimersByTimeAsync(RETRY_DELAYS_MS[i] ?? 0);
+			}
+			expect(await lost).toMatchObject({ ok: false, outcome: "error", error: expect.stringContaining("terminated") });
+			expect(pending).toHaveLength(3 + RETRY_DELAYS_MS.length + 1);
+			expect(records.map((r) => r.outcome)).toEqual(["ok", "error"]);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("does not try again what would be refused again, nor what the caller cancelled", async () => {
+		vi.useFakeTimers();
+		try {
+			const { pool, pending } = makePool();
+			const refused = pool.run(call("refused"));
+			await vi.advanceTimersByTimeAsync(0);
+			pending[0]?.fail(new InferenceError("http", "HTTP 400: bad field", 400));
+			expect(await refused).toMatchObject({ ok: false, outcome: "error" });
+
+			const controller = new AbortController();
+			const cancelled = pool.run({ ...call("cancelled"), signal: controller.signal });
+			await vi.advanceTimersByTimeAsync(0);
+			pending[1]?.fail(new InferenceError("network", "TypeError: terminated"));
+			await vi.advanceTimersByTimeAsync(10);
+			controller.abort();
+			expect(await cancelled).toMatchObject({ ok: false, outcome: "cancelled" });
+			await vi.advanceTimersByTimeAsync(10_000);
+			expect(pending).toHaveLength(2);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });
 

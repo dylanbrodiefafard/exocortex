@@ -1,0 +1,13 @@
+// Every module on with its defaults (D-106 to D-111): the overall effect of Exocortex against
+// all-off. The supervisor runs in suggest mode; the harness accepts each suggestion as the user's
+// next message.
+{
+	"modules": {
+		"supervisor": { "enabled": true, "mode": "suggest" },
+		"tools": { "enabled": true },
+		"triage": { "enabled": true },
+		"memory": { "enabled": true },
+		"trimmer": { "enabled": true },
+		"compaction": { "enabled": true }
+	}
+}

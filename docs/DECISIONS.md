@@ -2463,6 +2463,18 @@ Open check: Exocortex's injected `custom_message` reaches ninfer as a second con
   - **The early summary can be stopped.** It holds the engine's only fork (`pool.ts`: one fork at a time) for a long `judge` call. It now has its own abort, fired by the next user turn, by any tool result (the agent is running again, also in a run a module continued, so a triage fork is not blocked behind it), by `compact()` (which needs the fork), and by `dispose`. A stopped call is neither kept nor logged. It is also not written when `fork` is off. Pre-emption in the pool was not added: these stop points free the fork before any other fork can want it.
   - **Sized for strict engines.** The pool adds `SIDECAR_THINKING_TOKENS` (32,768) to a thinking call's `max_tokens`. vLLM refuses `prompt + max_tokens > window`. The transcript now leaves room for the prompt, the previous summary, a second try's limit (2 × `maxSummaryTokens`) and the whole thinking room. At 262k that keeps ~600k characters, not ~720k. A second try is made only when `prompt + 2 × limit + thinking room` fits the window. ninfer accepts a request over the window and stops at it (one replay, 2026-10-23: `max_tokens` = window + 1,000 answered `finish_reason: stop`), so this costs ninfer some transcript but nothing else.
 
+### D-112 — A sidecar call tries again after a dropped connection; the all-on eval config · accepted (2026-10-23; first all-on vs all-off eval run)
+- **What was wrong:**
+  - **One dropped stream lost the call.** In the first `all-on` run (`h-cpp-audio-stage`), four of the review's five passes failed with `InferenceError: TypeError: terminated` 19–25 s in, two at a time. That is a stream the server side closed. The engine was up (it answered at once), and the same load did not reproduce it: 4 parallel thinking streams with 15k- and 60k-token prompts, and 4 identical ones, all finished. The proxy in front of the engine (LiteLLM, then a relay) is the likely source. pi retries its own requests; the pool made one attempt.
+  - The fifth pass ran alone and was cut off at `max_tokens` after 118 s of reasoning (4,096 + 32,768). The review had no answer, and the run took 263 s against 87 s with every module off.
+- **The rules now:**
+  - **Transient failures are tried again**, twice, after 1 s and then 4 s (`RETRY_DELAYS_MS`, `transient()` in core `pool.ts`). Transient means a network error, an HTTP 5xx, or a 429. A refusal (other 4xx), an error inside the stream, a stalled engine (D-098), a cancel or an invalid reply is not tried again: it would happen again, or the engine is already struggling.
+  - The waits count against the call's deadline. A cancel during a wait ends the call without another request.
+  - It sits in the pool's `execute`, so a structured call's repair turn gets it too, and every module has it.
+- **Also checked:** the proxy lists `coding` with `max_input_tokens: 180000`, but it does not enforce that. A 198k-token prompt was served, and a 369k one was refused by the engine at its 262,144. Window-sized budgets (D-107, D-111) that use 262k are right for this setup.
+- **Added:** the eval config `all-on`: every module with its defaults, the supervisor in suggest mode. It measures what Exocortex does overall, against `all-off`.
+- **Not changed, and why:** the review's thinking room. One pass cut off at 36,864 tokens has been seen once. Its prompt was not kept, so it is unclear whether it was a long review or a reasoning loop. The all-on eval's traces will show whether it recurs.
+
 ---
 
 ## Open questions (carried from brief §10, updated)

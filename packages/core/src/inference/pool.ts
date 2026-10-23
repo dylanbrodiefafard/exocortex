@@ -610,13 +610,14 @@ async function execute(
 	onResponse: (response: ChatResponse) => void,
 ): Promise<{ value: unknown; finishReason: string | null }> {
 	const withPriority = { ...request, priority: ENGINE_PRIORITY[call.priority], cacheWrite: false as const };
+	const engine = retrying(client);
 	if (call.schema === undefined) {
-		const response = await client.chat(withPriority, signal, options);
+		const response = await engine.chat(withPriority, signal, options);
 		onResponse(response);
 		return { value: response.text, finishReason: response.finishReason };
 	}
 	const result = await completeStructured(
-		client,
+		engine,
 		target,
 		withPriority,
 		call.schema,
@@ -626,6 +627,56 @@ async function execute(
 		options,
 	);
 	return { value: result.value, finishReason: result.responses.at(-1)?.finishReason ?? null };
+}
+
+/**
+ * Waits before each new try of a request the connection or the server dropped (D-112). A proxy or
+ * relay between Exocortex and the engine drops a stream now and then: four of a review's five
+ * passes were lost that way in one eval run, while the same load sent again was served in full.
+ * pi retries its own requests; a sidecar call did not.
+ */
+export const RETRY_DELAYS_MS: readonly number[] = [1_000, 4_000];
+
+/**
+ * A failure that another try may not meet: the connection dropped, or the server failed (5xx) or
+ * was busy (429). A refusal (4xx), a stalled engine, a cancel or a bad reply would be met again.
+ */
+export function transient(error: unknown): boolean {
+	if (!(error instanceof InferenceError)) return false;
+	if (error.kind === "network") return true;
+	return error.kind === "http" && error.status !== undefined && (error.status >= 500 || error.status === 429);
+}
+
+/** The client, trying a request again after a transient failure ({@link RETRY_DELAYS_MS}). */
+function retrying(client: InferenceClient): InferenceClient {
+	return {
+		async chat(request, signal, options) {
+			for (let attempt = 0; ; attempt += 1) {
+				try {
+					return await client.chat(request, signal, options);
+				} catch (error) {
+					const delay = RETRY_DELAYS_MS[attempt];
+					if (delay === undefined || signal?.aborted || !transient(error)) throw error;
+					await pause(delay, signal);
+					if (signal?.aborted) throw error;
+				}
+			}
+		},
+	};
+}
+
+/** Waits, ending early when the call is cancelled. */
+function pause(ms: number, signal: AbortSignal | undefined): Promise<void> {
+	return new Promise((resolve) => {
+		const done = () => {
+			clearTimeout(timer);
+			signal?.removeEventListener("abort", done);
+			resolve();
+		};
+		const timer = setTimeout(done, ms);
+		timer.unref?.();
+		signal?.addEventListener("abort", done, { once: true });
+	});
 }
 
 /** A kind of call: its module and the reply it asks for. */
