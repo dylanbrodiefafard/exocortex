@@ -74,7 +74,8 @@
 			"review": false,
 			"reviewPasses": 5, // independent passes; a bug fewer than two report is dropped
 			"reviewMaxFindings": 3, // findings followed up at most, most severe first
-			"reviewMaxChars": 48000 // what each pass reads of the change (~4 chars per token)
+			"reviewMaxChars": 48000, // what each pass reads of the change (~4 chars per token)
+			"reviewThinking": true // the review thinks before it answers (D-101); off misses plain bugs
 		},
 		"trimmer": {
 			"enabled": false,

@@ -11,6 +11,7 @@ import {
 	type InferenceClient,
 	InferenceError,
 	type Liveness,
+	thinks,
 } from "./client.ts";
 import type { EngineTarget } from "./engine.ts";
 import { completeStructured, StructuredOutputError } from "./structured.ts";
@@ -177,6 +178,13 @@ export interface SidecarPoolOptions {
  * replies off (with thinking on, before the answer starts).
  */
 export const SIDECAR_MAX_TOKENS = 4096;
+
+/**
+ * Room for reasoning, on top of a call's limit, when its reply begins with it (D-101): the limit is
+ * for the answer. Qwen3.8 reasoned for up to 11,500 tokens over a small review, and a review pass
+ * held to 4,096 in all was cut off before it answered.
+ */
+export const SIDECAR_THINKING_TOKENS = 32_768;
 
 /**
  * There is no limit on how many calls a module makes (D-092): a module's work is as many calls as
@@ -388,7 +396,8 @@ export function createSidecarPool(options: SidecarPoolOptions): SidecarPool {
 
 	function submit<S extends TSchema | undefined>(call: SidecarCall<S>): Promise<SidecarResult<S>> {
 		const limits = options.moduleLimits(call.module);
-		const request = { ...call.request, maxTokens: Math.min(call.request.maxTokens, limits.maxTokensPerCall) };
+		const room = thinks(options.target, call.request) ? SIDECAR_THINKING_TOKENS : 0;
+		const request = { ...call.request, maxTokens: Math.min(call.request.maxTokens, limits.maxTokensPerCall) + room };
 		if (closed) return Promise.resolve(rejectNow(call, request.maxTokens, "closed", "pool is closed"));
 		if (budgetSpent()) return Promise.resolve(rejectNow(call, request.maxTokens, "rejected_budget", BUDGET_SPENT));
 		const refusal = request.fork && forkRefusal(request.fork);

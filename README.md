@@ -75,7 +75,7 @@ The check runs in the background, so you have the session back as soon as the ag
 - A separate call then tries to disprove each one. Only findings it can't disprove are kept, at most 3, most severe first.
 - What survives goes in your editor, with room for the agent to say a finding is not a bug.
 
-The review runs right after the verdict, in the same background job, with no time limit. Escape or sending a new message stops it, since the code it read is about to change.
+The review's model calls think before they answer (`"reviewThinking": true`, the default); without thinking, Qwen 3.8 missed a plain off-by-one in every pass. A review of a small change takes about a minute. It runs right after the verdict, in the same background job, with no time limit. Escape or sending a new message stops it, since the code it read is about to change.
 
 If the review finishes while you're typing, your draft is left alone. A line above the editor says what was found, and `alt+r` (or `/exo add`) adds the findings below your message. If you send without them, they're dropped. The same applies to any follow-up that arrives while you're typing.
 

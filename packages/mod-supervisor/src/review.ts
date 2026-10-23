@@ -127,7 +127,7 @@ export async function reviewChange(
 			messages: [{ role: "user" as const, content }],
 			maxTokens: SIDECAR_MAX_TOKENS,
 			temperature,
-			thinking: settings.thinking,
+			thinking: settings.reviewThinking,
 		},
 	});
 

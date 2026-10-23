@@ -45,6 +45,58 @@ export function untrackedFiles(ctx: ModuleContext): Promise<string[] | undefined
 	return gitPaths(ctx, "ls-files -z --others --exclude-standard");
 }
 
+/** A budget that hashes nothing: size and modification time stand for content. */
+const statOnly = () => ({ files: 0, bytes: 0 });
+
+/**
+ * The working tree as a task starts, as a commit to diff against (D-102): `git stash create`
+ * records the tracked files with the developer's uncommitted edits, and makes no stash entry and
+ * changes no file. With no such edits it prints nothing, and `HEAD` is the start. Undefined
+ * outside a repository or before its first commit. Files git does not track are recorded apart
+ * ({@link untrackedStates}).
+ */
+export async function taskStart(ctx: ModuleContext): Promise<string | undefined> {
+	for (const command of ["git stash create", "git rev-parse --verify HEAD"]) {
+		const out = await ctx.runCommand(command, { timeoutMs: GIT_TIMEOUT_MS }).catch(() => undefined);
+		const id = out?.exitCode === 0 && !out.timedOut ? out.outputTail.trim() : "";
+		if (isCommitId(id)) return id;
+	}
+	return undefined;
+}
+
+/** Whether `ref` names a commit this repository still has: a start snapshot is pruned with time. */
+export async function commitExists(ctx: ModuleContext, ref: string): Promise<boolean> {
+	if (!isCommitId(ref)) return false;
+	const out = await ctx
+		.runCommand(`git cat-file -e ${ref}^{commit}`, { timeoutMs: GIT_TIMEOUT_MS })
+		.catch(() => undefined);
+	return out?.exitCode === 0 && !out.timedOut;
+}
+
+/** Each file git does not track, with its size and time: which new files were there before the task (D-102). */
+export async function untrackedStates(ctx: ModuleContext): Promise<ReadonlyMap<string, string>> {
+	const files = (await untrackedFiles(ctx)) ?? [];
+	const states = await Promise.all(
+		files.map(async (file) => [file, await fileState(resolve(ctx.cwd, file), statOnly())] as const),
+	);
+	return new Map(states);
+}
+
+/** The new files that are not as they were when the task started: the task's, not the developer's. */
+export async function newSinceStart(
+	ctx: ModuleContext,
+	files: readonly string[],
+	atStart: ReadonlyMap<string, string>,
+): Promise<string[]> {
+	const kept = await Promise.all(
+		files.map(async (file) => {
+			const before = atStart.get(file);
+			return before === undefined || before !== (await fileState(resolve(ctx.cwd, file), statOnly()));
+		}),
+	);
+	return files.filter((_, index) => kept[index]);
+}
+
 /** What a file is now, in a few bytes: its content's hash, or that it is gone, a link, a directory or too big to read. */
 async function fileState(path: string, budget: { files: number; bytes: number }): Promise<string> {
 	try {

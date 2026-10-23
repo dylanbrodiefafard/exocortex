@@ -29,7 +29,16 @@ import {
 	tamperSignals,
 	unsupportedClaims,
 } from "./signals.ts";
-import { isCommitId, newFileDiffs, untrackedFiles, workspaceFingerprint } from "./workspace.ts";
+import {
+	commitExists,
+	isCommitId,
+	newFileDiffs,
+	newSinceStart,
+	taskStart,
+	untrackedFiles,
+	untrackedStates,
+	workspaceFingerprint,
+} from "./workspace.ts";
 
 export const SUPERVISOR_ID = "supervisor";
 
@@ -122,10 +131,14 @@ export interface Ledger {
 interface Task {
 	ledger: Promise<Ledger | undefined>;
 	/**
-	 * The commit the task started from (`git rev-parse HEAD`), so diffs cover commits made during
-	 * the task. A message that continues a task takes the earlier one's, once its ledger says so.
+	 * The working tree the task started from, as a commit ({@link taskStart}): `HEAD`, or a snapshot
+	 * with the developer's uncommitted edits, so diffs cover commits made during the task and leave
+	 * out what was already there (D-102). A message that continues a task takes the earlier one's,
+	 * once its ledger says so.
 	 */
 	startRef: Promise<string | undefined>;
+	/** Files git did not track when the task started, by size and time: the developer's, while unchanged (D-102). */
+	untrackedAtStart: Promise<ReadonlyMap<string, string>>;
 	/**
 	 * `HEAD` when this message arrived. Workspace fingerprints for "did the files change since the
 	 * tests ran" are all taken against it: `startRef` may change under a fingerprint already taken.
@@ -210,7 +223,7 @@ export function createSupervisor(raw: Readonly<Record<string, unknown>>, ctx: Mo
 	const { settings, problems } = parseSettings(raw);
 	for (const problem of problems) ctx.log(problem);
 	// The task the next settle judges, and the last one that had a ledger: what a later message may continue.
-	let task: Task | undefined = restoreTask(ctx.savedState);
+	let task: Task | undefined = restoreTask(ctx, ctx.savedState);
 	let anchor: Task | undefined = task;
 	let lastVerdict: string | undefined;
 
@@ -398,10 +411,11 @@ export function createSupervisor(raw: Readonly<Record<string, unknown>>, ctx: Mo
 				return;
 			}
 			const earlier = anchor;
-			const head = gitHead(ctx);
+			const head = taskStart(ctx);
 			const next: Task = {
 				ledger: Promise.resolve(undefined),
 				startRef: head,
+				untrackedAtStart: untrackedStates(ctx),
 				ownRef: head,
 				tools: [],
 				continuations: 0,
@@ -420,6 +434,7 @@ export function createSupervisor(raw: Readonly<Record<string, unknown>>, ctx: Mo
 					// The same task goes on: its starting commit, and what the supervisor already spent on it.
 					if (result.follows && earlier) {
 						next.startRef = earlier.startRef;
+						next.untrackedAtStart = earlier.untrackedAtStart;
 						next.continuations += earlier.continuations;
 						next.lastContinuationDiff ??= earlier.lastContinuationDiff;
 						next.noProgressStreak = earlier.noProgressStreak;
@@ -436,6 +451,12 @@ export function createSupervisor(raw: Readonly<Record<string, unknown>>, ctx: Mo
 					return undefined;
 				});
 			task = next;
+		},
+
+		/** The task's start is taken before the agent changes anything (D-102): its first tool waits for it. */
+		async beforeToolCall() {
+			const current = task;
+			if (current) await Promise.all([current.startRef, current.untrackedAtStart]).catch(() => undefined);
 		},
 
 		onToolResult(tool: ToolOutcome) {
@@ -512,7 +533,7 @@ function runOptions(settings: SupervisorSettings): RunOptions {
  * dropped, and each check command must pass the same rule as when it was first accepted, against
  * the saved requests.
  */
-function restoreTask(saved: unknown): Task | undefined {
+function restoreTask(ctx: ModuleContext, saved: unknown): Task | undefined {
 	if (!Value.Check(SavedSchema, saved)) return undefined;
 	const requests = saved.ledger.requests.map((request) => startAndEnd(request, REQUEST_CHARS, REQUEST_CUT));
 	const ledger: Ledger = {
@@ -522,10 +543,16 @@ function restoreTask(saved: unknown): Task | undefined {
 			requests.some((request) => acceptRequestCheck(command, request).ok),
 		),
 	};
-	const startRef = Promise.resolve(isCommitId(saved.startRef) ? saved.startRef : undefined);
+	const ref = saved.startRef;
+	// A start snapshot is pruned with time (D-102): without it the diff is against `HEAD`.
+	const startRef = isCommitId(ref)
+		? commitExists(ctx, ref).then((kept) => (kept ? ref : undefined))
+		: Promise.resolve(undefined);
 	return {
 		ledger: Promise.resolve(ledger),
 		startRef,
+		// Not saved: every untracked file counts as new, as before D-102.
+		untrackedAtStart: Promise.resolve(new Map()),
 		ownRef: startRef,
 		tools: [],
 		continuations: saved.continuations,
@@ -675,7 +702,8 @@ async function runReview(
 		const startRef = await task?.startRef;
 		const base = isCommitId(startRef) ? startRef : "HEAD";
 		const [tracked, untracked] = await Promise.all([git(ctx, `diff --function-context ${base}`), untrackedFiles(ctx)]);
-		const shown = await newFileDiffs(ctx.cwd, untracked ?? [], {
+		const added = task ? await newSinceStart(ctx, untracked ?? [], await task.untrackedAtStart) : (untracked ?? []);
+		const shown = await newFileDiffs(ctx.cwd, added, {
 			touched: touchedFiles(task?.tools ?? []),
 			maxFiles: MAX_NEW_FILES,
 			maxBytes: settings.reviewMaxChars,
@@ -923,7 +951,7 @@ async function gatherEvidence(
 		gitDiff(ctx, base),
 		untrackedFiles(ctx),
 	]);
-	const newFiles = untracked ?? [];
+	const newFiles = await newSinceStart(ctx, untracked ?? [], await task.untrackedAtStart);
 	// `git diff` leaves out files git does not track yet, which is where new work usually is.
 	const shown = await newFileDiffs(ctx.cwd, newFiles, {
 		touched: touchedFiles(task.tools),
@@ -1246,13 +1274,4 @@ async function gitDiff(ctx: ModuleContext, base: string): Promise<string | undef
 	if (diff === undefined || diff.length < GIT_OUTPUT_CHARS) return diff;
 	const firstWhole = diff.indexOf("\ndiff --git ");
 	return `(the diff is very long: the files at its start are not shown)\n${firstWhole === -1 ? "" : diff.slice(firstWhole + 1)}`;
-}
-
-async function gitHead(ctx: ModuleContext): Promise<string | undefined> {
-	try {
-		const head = (await git(ctx, "rev-parse --verify HEAD"))?.trim();
-		return isCommitId(head) ? head : undefined;
-	} catch {
-		return undefined;
-	}
 }

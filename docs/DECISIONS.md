@@ -2180,7 +2180,7 @@ Open check: Exocortex's injected `custom_message` reaches ninfer as a second con
 - **1. A fork may turn thinking off.**
   - **The problem:** every fork has carried the agent's thinking settings, because on ninfer at `e04fad3` the thinking switch changed the system block, so turning it off would break the cached prefix (the profile's F4 was off). A fork asked for a hint or a summary therefore first wrote out a reasoning block, at about 200 tokens a second.
   - **What the server does:** ninfer's `experimental` build documents `enable_thinking` as "the same new-turn thinking switch" as `reasoning_effort: "none"` (its `docs/serving.md`, "Chat Completions"). Whether turning it off keeps the prefix depends on the template, as its source shows:
-    - **Qwen3.8's effort template** puts the reasoning instructions in the system block when thinking is on (xhigh by default, or low) and none when it is off (`src/frontend/chat_template.cpp:626-651`, rendered at `:809-838`). A fork that turns thinking off differs from the agent's prompt at its first tokens and the cache serves almost none of it. Only an agent at `medium`, whose instructions are empty either way, keeps the prefix.
+    - **Qwen3.8's effort template** puts the reasoning instructions in the system block when thinking is on (xhigh by default, or low) and none when it is off (`src/frontend/chat_template.cpp:626-651`, rendered at `:809-838`). A fork that turns thinking off differs from the agent's prompt at its first tokens and the cache serves almost none of it. Only an agent at `medium`, whose instructions are empty either way, keeps the prefix: that was the reading of the template. **Measured (2026-10-22, D-101): no.** With the agent at `medium`, `/exo doctor thinking` found 0 of 3,372 prompt tokens cached for a fork without thinking, against 3,382 of 3,408 with it, so `thinkingToggle` stays off for this engine at every effort.
     - **A toggle-only template** (Qwen3.6) changes only the new turn.
     - So on the owner's model F4 stays off and forks keep the agent's thinking. The mechanism is for templates and efforts where it holds.
   - **The rule:** every fork call now asks for the module's `thinking` setting (off by default). The client applies it only where the profile has `thinkingToggle` (F4).
@@ -2207,6 +2207,32 @@ Open check: Exocortex's injected `custom_message` reaches ninfer as a second con
   - **Applies to every call:** a cached prefix is a saving wherever it comes from. `/exo status`'s token count follows the same rule.
 - **Kept:**
   - **One fork at a time** (D-093). The `experimental` build copies a read-only hit into its own lane, so concurrent forks would not block each other, but they would share prefill. The case is rare: triage's hint and compaction do not overlap.
+
+### D-101 — The review thinks, a call that thinks is not held to a grammar, and reasoning gets its own room · accepted (2026-10-22; found in the first real-model test on Qwen3.8 27B through ninfer; amends D-097's review settings, D-068's output limit and F3's use)
+- **What the test found.** A bug planted in a new function (`first = (page - 1) * per_page` under a docstring that says 1-indexed and gives `page_range(2, 10, 25) == (11, 20)`) and `/exo review`:
+  - **Thinking off** (the supervisor's `thinking`, which the review used): 0 of 13 passes reported it. The model read the line as correct.
+  - **Thinking on, `json_schema` enforced:** its reasoning found the bug every time and ended "Final answer with 2 findings"; the reply was `{"findings":[],"note":"One clear bug found."}` in 7 of 8 passes. The grammar holds only the answer after the reasoning, the model closed the list at once and put its conclusion in a field the schema did not forbid.
+  - **Thinking on, the JSON asked for in the prompt:** 5 of 5 passes reported it.
+  - **Thinking on in the client, 4,096 tokens per call:** one pass of five was cut off before it answered. A pass reasoned for 1,300 to 11,500 tokens over a 20-line change.
+- **Rules:**
+  - **1. The review thinks** (`reviewThinking`, default true), whatever the supervisor's `thinking` says; the verdict and the ledger keep that one (short JSON, D-008). The review runs in the background (D-097), so its minute costs no one a wait.
+  - **2. A call that thinks gets no `response_format`** (`constrains`): the JSON instruction, the lenient reader (D-080) and the one repair turn take its place. It applies to every module, since the cause is in how the engine applies a grammar after reasoning, not in the review's schema.
+  - **3. A call's token limit is for its answer.** A call whose reply begins with reasoning gets `SIDECAR_THINKING_TOKENS` (32,768) on top, in the pool, so no module has to know. That is a call with `thinking: true`, or a fork whose agent thinks (Qwen does unless told not to) and whose engine does not switch it off (F4, D-100). Forks were held to 4,096 in all: triage's hint from a fork and compaction's summary from a fork reason first, as the agent does.
+- **Measured end to end** (pi 1.0.2, `/exo review` on the planted bug): before, "found nothing that held up (0 proposed by 5/5 passes)" in about a second; after, "found a possible bug (high, 5/5 passes)" in 55 seconds, its check agreeing, a second claim one pass made dropped by the vote, and the finding offered above the user's half-typed draft without touching it.
+- **Not changed:** the supervisor's own `thinking` stays off by default; whether the verdict is better with it is an eval question (`supervisor-think`).
+
+### D-102 — A task starts from the working tree as it was, not from `HEAD` · accepted (2026-10-22; found in the first real-model test; amends how the supervisor's `startRef` is taken, D-071, D-084, D-097)
+- **What the test found.** The developer had an uncommitted function in the tree, said "I added page_range myself; keep it as is", and asked for a docstring with "don't change anything else". The verdict said to remove the function, "the agent should not have introduced it in its diff", twice, and the review would have judged it as the agent's. The diff ran from `HEAD`, so every uncommitted change in the tree when a request is sent was counted as the agent's work. A sentence in the verdict prompt saying the diff may hold the developer's own changes did not move the model, and was not kept.
+- **Rule:**
+  - **Tracked files:** the task starts from `git stash create` (`taskStart`): a commit of the tree with the developer's uncommitted edits. It makes no stash entry, moves no ref and changes no file; with nothing uncommitted it prints nothing and `HEAD` is the start, as before.
+  - **Untracked files:** each one's size and modification time are recorded as the task starts (`untrackedStates`). One still the same at settle is the developer's and is not shown as new; one that changed is.
+  - **Order:** the supervisor's `beforeToolCall` waits for both, so the agent's first tool cannot run before the start is taken. Once taken, the wait is nothing.
+  - A message that continues a task keeps its start, both parts.
+- **Limits:**
+  - A snapshot commit is reachable from no ref, so `git gc` prunes it after `gc.pruneExpire` (two weeks by default). A task restored after that diffs against `HEAD` (`commitExists`).
+  - The untracked record is not saved with the task: after a reload every untracked file counts as new, as before.
+  - A file the developer had untracked and the agent then edited is shown whole, as new.
+- **Measured end to end:** the same request now ends `complete`, and the review, which reads the same start, judges only what the agent wrote. The stash list was untouched.
 
 ---
 

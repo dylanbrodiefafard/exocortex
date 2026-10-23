@@ -65,6 +65,11 @@ export const SettingsSchema = Type.Object(
 		reviewMaxFindings: Type.Integer({ minimum: 1, maximum: 10, default: 3 }),
 		/** How much of the changes a pass reads, in characters (~4 per token). */
 		reviewMaxChars: Type.Integer({ minimum: 2000, default: 48_000 }),
+		/**
+		 * D-101: the review's passes and checks think before they answer, whatever `thinking` says.
+		 * Without it Qwen3.8 passed an off-by-one in 13 passes of 13; with it, 5 of 5 found it.
+		 */
+		reviewThinking: Type.Boolean({ default: true }),
 	},
 	{ additionalProperties: true },
 );

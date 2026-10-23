@@ -8,6 +8,7 @@ import {
 	createOpenAIClient,
 	type InferenceClient,
 	InferenceError,
+	thinks,
 	withToolResult,
 } from "../src/inference/client.ts";
 import { ENGINE_PROFILES, type EngineTarget, resolveEngine } from "../src/inference/engine.ts";
@@ -381,6 +382,37 @@ describe("completeStructured", () => {
 		const sent = server.requests[0] as { messages: unknown[]; response_format: { type: string } };
 		expect(sent.messages).toHaveLength(1);
 		expect(sent.response_format.type).toBe("json_schema");
+	});
+
+	it("knows when a fork's reply begins with reasoning: the agent's thinking, unless F4 changes it (D-101)", () => {
+		const fork = (body: object) => ({ body: { model: "m", messages: [], ...body } });
+		const plain = target({});
+		const toggles = target({ thinkingToggle: true });
+		expect(thinks(plain, { thinking: true })).toBe(true);
+		expect(thinks(plain, {})).toBe(false);
+		expect(thinks(plain, { fork: fork({}) })).toBe(true); // Qwen thinks unless told not to
+		expect(thinks(plain, { fork: fork({ enable_thinking: false }) })).toBe(false);
+		expect(thinks(plain, { fork: fork({}), thinking: false })).toBe(true); // without F4 the agent's holds
+		expect(thinks(toggles, { fork: fork({}), thinking: false })).toBe(false);
+		expect(thinks(toggles, { fork: fork({ reasoning_effort: "none" }), thinking: true })).toBe(false);
+	});
+
+	it("asks for the JSON in the prompt, not by grammar, when the call thinks (D-101)", async () => {
+		server = await startFakeOpenAIServer([
+			{ kind: "text", text: 'Found one.\n```json\n{"verdict":"incomplete"}\n```' },
+		]);
+		const t = { ...target({ jsonSchema: true }), baseUrl: server.baseUrl };
+		const result = await completeStructured(
+			createOpenAIClient(t),
+			t,
+			{ ...request, thinking: true },
+			Verdict,
+			"verdict",
+		);
+		expect(result.value).toEqual({ verdict: "incomplete" });
+		const sent = server.requests[0] as { messages: { content: string }[]; response_format?: unknown };
+		expect(sent.response_format).toBeUndefined();
+		expect(sent.messages.at(-1)?.content).toMatch(/JSON Schema/);
 	});
 
 	/** A client that answers from a list, recording what it was asked. */

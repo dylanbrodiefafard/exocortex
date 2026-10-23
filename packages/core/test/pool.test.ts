@@ -17,6 +17,7 @@ import {
 	holdFor,
 	type ModuleLimits,
 	type PoolStats,
+	SIDECAR_THINKING_TOKENS,
 	type SidecarCallRecord,
 	type SidecarPriority,
 } from "../src/inference/pool.ts";
@@ -479,6 +480,16 @@ describe("pool accounting (D9)", () => {
 			["ok", 16],
 			["rejected_budget", 16],
 		]);
+	});
+
+	it("gives a call that thinks room for its reasoning on top of the answer's limit (D-101)", async () => {
+		const { pool, pending } = makePool({}, { maxTokensPerCall: 16 });
+		const asked = (thinking: boolean) => ({ ...call("m"), request: { ...call("m").request, thinking } });
+		const runs = [pool.run(asked(true)), pool.run(asked(false))];
+		await flush();
+		expect(pending.map((p) => p.request.maxTokens)).toEqual([16 + SIDECAR_THINKING_TOKENS, 16]);
+		for (const p of pending) p.reply();
+		await Promise.all(runs);
 	});
 
 	it("puts no limit on how many calls a module makes (D-092)", async () => {

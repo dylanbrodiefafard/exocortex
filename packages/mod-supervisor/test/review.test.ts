@@ -5,17 +5,25 @@ import {
 	type ChatRequest,
 	createSidecarPool,
 	ENGINE_PROFILES,
+	type ExoModule,
 	type InferenceClient,
 	type JsonValue,
 	type ModuleContext,
 	runShellCommand,
 	type SettleAction,
 	type TraceEventInput,
+	type UserTurn,
 } from "@exocortex/core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { fileSections, findingKey, reviewMessage, similarity } from "../src/review.ts";
 import { changedSignatures, declaredName, usesOf } from "../src/review-context.ts";
 import { createSupervisor } from "../src/supervisor.ts";
+
+/** A user message, then what the host does before the agent's first tool runs: the task's start is taken (D-102). */
+async function begin(sup: ExoModule, turn: UserTurn): Promise<void> {
+	sup.onUserTurn?.(turn);
+	await sup.beforeToolCall?.({ toolName: "edit", toolCallId: "c", input: {} }, new AbortController().signal);
+}
 
 const ORIGINAL = ["def greet(name):", '    prefix = "Hello"', "    return prefix + name", ""].join("\n");
 const CHANGED = ["def greet(name):", '    prefix = "Hello"', '    return prefix + ", " + name.strip()', ""].join("\n");
@@ -170,7 +178,7 @@ describe("review after a complete verdict (D-097)", () => {
 				],
 			}),
 		);
-		sup.onUserTurn?.(REQUEST);
+		await begin(sup, REQUEST);
 		writeFileSync(join(repo, "app.py"), CHANGED);
 		// The verdict and the review run in one background job; the hook returns at once (D-098).
 		expect(await sup.onSettle?.(DONE, signal)).toBeUndefined();
@@ -188,6 +196,10 @@ describe("review after a complete verdict (D-097)", () => {
 		expect(text).toContain("for any that is not, say why");
 		// The two tellings of the same bug, plus the low one on the same line, are one bucket of three votes.
 		expect(checkPrompts()).toHaveLength(1);
+		// The review thinks; the verdict keeps the supervisor's `thinking`, off (D-101).
+		const reviewing = requests.filter((r) => isFind(promptOf(r)) || isCheck(promptOf(r)));
+		expect(reviewing.map((r) => r.thinking)).toEqual([true, true, true, true]);
+		expect(requests.filter((r) => !reviewing.includes(r)).every((r) => r.thinking === false)).toBe(true);
 		expect(reviews()).toEqual([
 			expect.objectContaining({ trigger: "settle", passes: 3, answered: 3, proposed: 5, anchored: 3, distinct: 1 }),
 		]);
@@ -196,7 +208,7 @@ describe("review after a complete verdict (D-097)", () => {
 		]);
 
 		// Sending the follow-up continues the task.
-		sup.onUserTurn?.({ text, origin: "suggestion" });
+		await begin(sup, { text, origin: "suggestion" });
 		expect(records.at(-1)).toMatchObject({ kind: "exo.action", data: { action: "accepted", continuation: 1 } });
 	});
 
@@ -209,7 +221,7 @@ describe("review after a complete verdict (D-097)", () => {
 				check: () => ({ verdict: "not_a_bug", reason: "callers always pass a str", scenario: "" }),
 			}),
 		);
-		sup.onUserTurn?.(REQUEST);
+		await begin(sup, REQUEST);
 		writeFileSync(join(repo, "app.py"), CHANGED);
 		await sup.onSettle?.(DONE, signal);
 		expect(await lastJob()).toEqual({
@@ -224,7 +236,7 @@ describe("review after a complete verdict (D-097)", () => {
 
 	it("does not review when the verdict is not complete", async () => {
 		const sup = createSupervisor({ review: true }, context({ verdict: INCOMPLETE, passes: [] }));
-		sup.onUserTurn?.(REQUEST);
+		await begin(sup, REQUEST);
 		writeFileSync(join(repo, "app.py"), CHANGED);
 		await sup.onSettle?.(DONE, signal);
 		expect(textOf(await lastJob())).toContain("Add the comma");
@@ -233,7 +245,7 @@ describe("review after a complete verdict (D-097)", () => {
 
 	it("reviews a task once, and not when the agent changed nothing", async () => {
 		const sup = createSupervisor({ review: true, reviewPasses: 2 }, context({ verdict: COMPLETE, passes: [] }));
-		sup.onUserTurn?.({ text: "Explain greet.", origin: "user" });
+		await begin(sup, { text: "Explain greet.", origin: "user" });
 		await sup.onSettle?.(DONE, signal);
 		expect(await lastJob()).toMatchObject({ summary: "supervisor: complete" });
 		expect(findPrompts()).toEqual([]);
@@ -256,7 +268,7 @@ describe("review after a complete verdict (D-097)", () => {
 			{ review: true, reviewPasses: 2 },
 			context({ verdict: COMPLETE, passes: [[finding("a bug")], [finding("a bug")]], gate }),
 		);
-		sup.onUserTurn?.(REQUEST);
+		await begin(sup, REQUEST);
 		writeFileSync(join(repo, "app.py"), CHANGED);
 		await sup.onSettle?.(DONE, signal);
 		jobs[0]?.stop.abort();
@@ -265,6 +277,7 @@ describe("review after a complete verdict (D-097)", () => {
 		expect(reviews()).toEqual([]);
 		await sup.onSettle?.(DONE, signal);
 		expect(jobs).toHaveLength(2);
+		await lastJob(); // ended here, not in the next test
 	});
 
 	it("shows each changed function whole, the files in another order per pass, and callers of a changed signature", async () => {
@@ -272,7 +285,7 @@ describe("review after a complete verdict (D-097)", () => {
 		writeFileSync(join(repo, "main.py"), "from util import shout\nprint(shout('hi'))\n");
 		await git("add -A && git -c user.name=t -c user.email=t@t commit -qm more");
 		const sup = createSupervisor({ review: true, reviewPasses: 2 }, context({ verdict: COMPLETE, passes: [] }));
-		sup.onUserTurn?.({ text: "Make greet put a comma after Hello, and let shout take a suffix.", origin: "user" });
+		await begin(sup, { text: "Make greet put a comma after Hello, and let shout take a suffix.", origin: "user" });
 		writeFileSync(join(repo, "app.py"), CHANGED);
 		writeFileSync(join(repo, "util.py"), "def shout(text, suffix):\n    return text.upper() + suffix\n");
 		await sup.onSettle?.(DONE, signal);
@@ -300,7 +313,7 @@ describe("review after a complete verdict (D-097)", () => {
 			},
 		};
 		const sup = createSupervisor({ review: true, reviewPasses: 2, mode: "auto" }, ctx);
-		sup.onUserTurn?.(REQUEST);
+		await begin(sup, REQUEST);
 		writeFileSync(join(repo, "app.py"), CHANGED);
 		await sup.onSettle?.(DONE, signal);
 		expect(await lastJob()).toBeUndefined();
@@ -317,7 +330,7 @@ describe("review after a complete verdict (D-097)", () => {
 				passes: [...passes, [finding("another bug", LOG_LINE)], [finding("another bug", LOG_LINE)]],
 			}),
 		);
-		sup.onUserTurn?.(REQUEST);
+		await begin(sup, REQUEST);
 		writeFileSync(join(repo, "app.py"), CHANGED.replace("def greet(name):", `def greet(name):\n    ${LOG_LINE}`));
 		await sup.onSettle?.(DONE, signal);
 		expect(await lastJob()).toMatchObject({ kind: "continue" });
@@ -355,7 +368,7 @@ describe("/exo review (D-097)", () => {
 			{ reviewPasses: 2 },
 			context({ verdict: COMPLETE, passes: [...passes, ...passes, ...passes] }),
 		);
-		sup.onUserTurn?.(REQUEST);
+		await begin(sup, REQUEST);
 		writeFileSync(join(repo, "app.py"), CHANGED);
 		// Offered beside a draft and never added: not reported.
 		await sup.command?.("review");
@@ -388,7 +401,7 @@ describe("/exo review (D-097)", () => {
 		const saved: JsonValue[] = [];
 		const passes = [[finding("strip() on None crashes")], [finding("strip() on None crashes")]];
 		const sup = createSupervisor({ reviewPasses: 2 }, context({ verdict: COMPLETE, passes }, { saved }));
-		sup.onUserTurn?.(REQUEST);
+		await begin(sup, REQUEST);
 		writeFileSync(join(repo, "app.py"), CHANGED);
 		await sup.onSettle?.(DONE, signal);
 		await sup.command?.("review");

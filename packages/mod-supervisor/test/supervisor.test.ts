@@ -5,13 +5,21 @@ import {
 	type ChatRequest,
 	createSidecarPool,
 	ENGINE_PROFILES,
+	type ExoModule,
 	type InferenceClient,
 	type ModuleContext,
 	runShellCommand,
 	type TraceEventInput,
+	type UserTurn,
 } from "@exocortex/core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createSupervisor } from "../src/supervisor.ts";
+
+/** A user message, then what the host does before the agent's first tool runs: the task's start is taken (D-102). */
+async function begin(sup: ExoModule, turn: UserTurn): Promise<void> {
+	sup.onUserTurn?.(turn);
+	await sup.beforeToolCall?.({ toolName: "edit", toolCallId: "c", input: {} }, new AbortController().signal);
+}
 
 interface Script {
 	ledger: object;
@@ -115,7 +123,7 @@ describe("supervisor", () => {
 			{ warningSignals: true, runPromptChecks: false },
 			context({ ledger: LEDGER, verdicts: [INCOMPLETE] }),
 		);
-		sup.onUserTurn?.({ text: "Make app.py print v2 and add a README.", origin: "user" });
+		await begin(sup, { text: "Make app.py print v2 and add a README.", origin: "user" });
 		writeFileSync(join(repo, "it's new.py"), "def render():\n    raise NotImplementedError\n");
 		writeFileSync(join(repo, "big.txt"), `${"filler line\n".repeat(4_000)}the end\n`);
 		const first = await sup.onSettle?.(DONE, signal);
@@ -126,7 +134,7 @@ describe("supervisor", () => {
 
 		// The follow-up is accepted twice; each time only the untracked file changes.
 		for (const body of ["def render():\n    return 1\n", "def render():\n    return 2\n"]) {
-			sup.onUserTurn?.({ text: (first as { text: string }).text, origin: "suggestion" });
+			await begin(sup, { text: (first as { text: string }).text, origin: "suggestion" });
 			writeFileSync(join(repo, "it's new.py"), body);
 			await sup.onSettle?.(DONE, signal);
 		}
@@ -135,7 +143,7 @@ describe("supervisor", () => {
 
 	it("suggests a follow-up listing what is missing, then counts the accepted suggestion as a continuation", async () => {
 		const sup = createSupervisor({}, context({ ledger: LEDGER, verdicts: [INCOMPLETE] }));
-		sup.onUserTurn?.({ text: "Make app.py print v2 and add a README. Check with `sh ./check.sh`.", origin: "user" });
+		await begin(sup, { text: "Make app.py print v2 and add a README. Check with `sh ./check.sh`.", origin: "user" });
 		writeFileSync(join(repo, "app.py"), "print('v2')\n");
 		writeFileSync(join(repo, "check.sh"), "python3 app.py\n");
 		sup.onToolResult?.({ toolName: "edit", input: { path: "app.py" }, isError: false, exitCode: null, output: "ok" });
@@ -168,14 +176,14 @@ describe("supervisor", () => {
 			refused: [{ command: "rm -rf /", reason: "it is not a whole code span of the request" }],
 		});
 
-		sup.onUserTurn?.({ text: action?.kind === "suggest" ? action.text : "", origin: "user" });
+		await begin(sup, { text: action?.kind === "suggest" ? action.text : "", origin: "user" });
 		expect(kinds().at(-1)).toBe("exo.action:accepted");
 		expect(sup.status?.()).toContain("1/3 continuations");
 	});
 
 	it("reports completion without acting", async () => {
 		const sup = createSupervisor({}, context({ ledger: LEDGER, verdicts: [COMPLETE] }));
-		sup.onUserTurn?.({ text: "Make app.py print v2 and add a README.", origin: "user" });
+		await begin(sup, { text: "Make app.py print v2 and add a README.", origin: "user" });
 		expect(await sup.onSettle?.(DONE, signal)).toEqual({
 			kind: "notify",
 			summary: "supervisor: complete",
@@ -185,7 +193,7 @@ describe("supervisor", () => {
 
 	it("leaves 'is the agent waiting on the user' to the verdict: a blocking question stops it, an offer does not", async () => {
 		const blocked = createSupervisor({}, context({ ledger: LEDGER, verdicts: [{ ...INCOMPLETE, asked_user: true }] }));
-		blocked.onUserTurn?.({ text: "Make app.py print v2.", origin: "user" });
+		await begin(blocked, { text: "Make app.py print v2.", origin: "user" });
 		expect(await blocked.onSettle?.(DONE, signal)).toEqual({
 			kind: "notify",
 			summary: "supervisor: the agent is waiting for your answer",
@@ -195,7 +203,7 @@ describe("supervisor", () => {
 
 		// Ending on an offer used to switch the supervisor off before any verdict.
 		const offered = createSupervisor({}, context({ ledger: LEDGER, verdicts: [INCOMPLETE] }));
-		offered.onUserTurn?.({ text: "Make app.py print v2 and add a README.", origin: "user" });
+		await begin(offered, { text: "Make app.py print v2 and add a README.", origin: "user" });
 		const action = await offered.onSettle?.(
 			{ outcome: "completed", lastAssistantText: "Updated app.py.\n\nWould you like me to add tests too?" },
 			signal,
@@ -208,7 +216,7 @@ describe("supervisor", () => {
 		const settings = { mode: "auto", preVerdict: true, checks: ["false"], runPromptChecks: false };
 		const reading = (prompt: string) => ({ asked_user: prompt.includes("Which one do you prefer?"), claims: [] });
 		const sup = createSupervisor(settings, context({ ledger: LEDGER, verdicts: [COMPLETE], reading }));
-		sup.onUserTurn?.({ text: "Make app.py print v2.", origin: "user" });
+		await begin(sup, { text: "Make app.py print v2.", origin: "user" });
 		const asked = await sup.onSettle?.(
 			{ outcome: "completed", lastAssistantText: "There are two ways to do this.\n\nWhich one do you prefer?" },
 			signal,
@@ -224,7 +232,7 @@ describe("supervisor", () => {
 	it("without an LLM verdict or a reading of the final message, a failing check gives no verdict", async () => {
 		const settings = { mode: "auto", preVerdict: true, checks: ["false"], runPromptChecks: false };
 		const sup = createSupervisor(settings, context({ ledger: LEDGER, verdicts: [COMPLETE], reading: () => ({}) }));
-		sup.onUserTurn?.({ text: "Make app.py print v2.", origin: "user" });
+		await begin(sup, { text: "Make app.py print v2.", origin: "user" });
 		expect(await sup.onSettle?.(DONE, signal)).toBeUndefined();
 		expect(records.at(-1)?.data).toEqual({ action: "skipped", reason: "verdict_unavailable" });
 	});
@@ -234,7 +242,7 @@ describe("supervisor", () => {
 			{ mode: "auto", maxContinuations: 10 },
 			context({ ledger: LEDGER, verdicts: [INCOMPLETE] }),
 		);
-		sup.onUserTurn?.({ text: "Make app.py print v2 and add a README.", origin: "user" });
+		await begin(sup, { text: "Make app.py print v2 and add a README.", origin: "user" });
 		const results: (string | undefined)[] = [];
 		for (let i = 0; i < 5; i++) results.push((await sup.onSettle?.(DONE, signal))?.kind);
 		expect(results).toEqual(["continue", "continue", undefined, undefined, undefined]);
@@ -246,7 +254,7 @@ describe("supervisor", () => {
 			{ mode: "auto", maxContinuations: 1 },
 			context({ ledger: LEDGER, verdicts: [INCOMPLETE] }),
 		);
-		sup.onUserTurn?.({ text: "Make app.py print v2 and add a README.", origin: "user" });
+		await begin(sup, { text: "Make app.py print v2 and add a README.", origin: "user" });
 		expect((await sup.onSettle?.(DONE, signal))?.kind).toBe("continue");
 		writeFileSync(join(repo, "README.md"), "progress\n");
 		expect(await sup.onSettle?.(DONE, signal)).toBeUndefined();
@@ -258,28 +266,28 @@ describe("supervisor", () => {
 			{ checks: ["echo configured-check"] },
 			context({ ledger: { ...LEDGER, check_commands: [] }, verdicts: [COMPLETE] }),
 		);
-		sup.onUserTurn?.({ text: "Make app.py print v2.", origin: "user" });
+		await begin(sup, { text: "Make app.py print v2.", origin: "user" });
 		await sup.onSettle?.(DONE, signal);
 		expect(String(requests.at(-1)?.messages[0]?.["content"])).toContain("$ echo configured-check\nexit code: 0");
 	});
 
 	it("does nothing for non-tasks, aborted runs, or without a sidecar engine", async () => {
 		const chat = createSupervisor({}, context({ ledger: { ...LEDGER, is_task: false }, verdicts: [INCOMPLETE] }));
-		chat.onUserTurn?.({ text: "thanks!", origin: "user" });
+		await begin(chat, { text: "thanks!", origin: "user" });
 		expect(await chat.onSettle?.(DONE, signal)).toBeUndefined();
 
 		const aborted = createSupervisor({}, context({ ledger: LEDGER, verdicts: [INCOMPLETE] }));
-		aborted.onUserTurn?.({ text: "Make app.py print v2.", origin: "user" });
+		await begin(aborted, { text: "Make app.py print v2.", origin: "user" });
 		expect(await aborted.onSettle?.({ outcome: "aborted", lastAssistantText: "" }, signal)).toBeUndefined();
 
 		const offline = createSupervisor({}, context(undefined));
-		offline.onUserTurn?.({ text: "Make app.py print v2.", origin: "user" });
+		await begin(offline, { text: "Make app.py print v2.", origin: "user" });
 		expect(await offline.onSettle?.(DONE, signal)).toBeUndefined();
 	});
 
 	it("falls back to default settings on invalid config", async () => {
 		const sup = createSupervisor({ mode: "yolo" }, context({ ledger: LEDGER, verdicts: [INCOMPLETE] }));
-		sup.onUserTurn?.({ text: "Make app.py print v2 and add a README.", origin: "user" });
+		await begin(sup, { text: "Make app.py print v2 and add a README.", origin: "user" });
 		expect((await sup.onSettle?.(DONE, signal))?.kind).toBe("suggest");
 	});
 });
@@ -292,7 +300,7 @@ describe("what the judge is given (D-071)", () => {
 		);
 	it("reads the request itself, with later messages of the same task, beside the checklist", async () => {
 		const sup = createSupervisor({}, context({ ledger: LEDGER, verdicts: [COMPLETE] }));
-		sup.onUserTurn?.({ text: "Make app.py print v2. Round 1.005 to 100, ties to even.", origin: "user" });
+		await begin(sup, { text: "Make app.py print v2. Round 1.005 to 100, ties to even.", origin: "user" });
 		await sup.onSettle?.(DONE, signal);
 		expect(verdictPrompt()).toContain(
 			"Developer's request:\n<<<\nMake app.py print v2. Round 1.005 to 100, ties to even.\n>>>",
@@ -302,9 +310,9 @@ describe("what the judge is given (D-071)", () => {
 			{},
 			context({ ledger: { ...LEDGER, follows_previous: true }, verdicts: [COMPLETE] }),
 		);
-		followed.onUserTurn?.({ text: "Make app.py print v2.", origin: "user" });
+		await begin(followed, { text: "Make app.py print v2.", origin: "user" });
 		await followed.onSettle?.(DONE, signal);
-		followed.onUserTurn?.({ text: "Also keep the trailing newline.", origin: "user" });
+		await begin(followed, { text: "Also keep the trailing newline.", origin: "user" });
 		await followed.onSettle?.(DONE, signal);
 		expect(verdictPrompt()).toContain(
 			"Make app.py print v2.\n\n(The developer then added:)\nAlso keep the trailing newline.",
@@ -314,7 +322,7 @@ describe("what the judge is given (D-071)", () => {
 	it("keeps one criterion per requirement of a twelve-point request", async () => {
 		const criteria = Array.from({ length: 14 }, (_, i) => `Rule ${i + 1}`);
 		const sup = createSupervisor({}, context({ ledger: { ...LEDGER, criteria }, verdicts: [COMPLETE] }));
-		sup.onUserTurn?.({ text: "Implement rules 1 to 14.", origin: "user" });
+		await begin(sup, { text: "Implement rules 1 to 14.", origin: "user" });
 		await sup.onSettle?.(DONE, signal);
 		expect(verdictPrompt()).toContain("12. Rule 12");
 		expect(verdictPrompt()).not.toContain("13. Rule 13");
@@ -322,7 +330,7 @@ describe("what the judge is given (D-071)", () => {
 
 	it("tells the judge when the agent's test run proves nothing, without running anything", async () => {
 		const sup = createSupervisor({}, context({ ledger: { ...LEDGER, check_commands: [] }, verdicts: [COMPLETE] }));
-		sup.onUserTurn?.({ text: "Make app.py print v2.", origin: "user" });
+		await begin(sup, { text: "Make app.py print v2.", origin: "user" });
 		const command = "python3 -m unittest discover -q -s tests -t . 2>&1 | tail -5";
 		sup.onToolResult?.({ toolName: "bash", input: { command }, isError: false, exitCode: 0, output: "OK" });
 		await snapshotTaken();
@@ -346,7 +354,7 @@ describe("what the judge is given (D-071)", () => {
 
 	it("does not call a test run stale when the files are as they were when it ran", async () => {
 		const sup = createSupervisor({}, context({ ledger: { ...LEDGER, check_commands: [] }, verdicts: [COMPLETE] }));
-		sup.onUserTurn?.({ text: "Make app.py print v2.", origin: "user" });
+		await begin(sup, { text: "Make app.py print v2.", origin: "user" });
 		writeFileSync(join(repo, "app.py"), "print('v2')\n");
 		sup.onToolResult?.({
 			toolName: "bash",
@@ -378,7 +386,7 @@ describe("supervisor research options (all off by default)", () => {
 			{ preVerdict: true, checks: ["python3 -c 'import sys; sys.exit(3)'"] },
 			context({ ledger: LEDGER, verdicts: [COMPLETE] }),
 		);
-		sup.onUserTurn?.({ text: "Make app.py print v2.", origin: "user" });
+		await begin(sup, { text: "Make app.py print v2.", origin: "user" });
 		editApp(sup);
 		const action = await sup.onSettle?.(DONE, signal);
 		expect(action).toMatchObject({ kind: "suggest" });
@@ -393,7 +401,7 @@ describe("supervisor research options (all off by default)", () => {
 
 	it("preVerdict: no changes at all is uncertain, and passing checks still go to the LLM", async () => {
 		const quiet = createSupervisor({ preVerdict: true }, context({ ledger: LEDGER, verdicts: [INCOMPLETE] }));
-		quiet.onUserTurn?.({ text: "Make app.py print v2.", origin: "user" });
+		await begin(quiet, { text: "Make app.py print v2.", origin: "user" });
 		expect(await quiet.onSettle?.(DONE, signal)).toEqual({
 			kind: "notify",
 			summary: "supervisor: uncertain",
@@ -404,7 +412,7 @@ describe("supervisor research options (all off by default)", () => {
 			{ preVerdict: true, checks: ["true"] },
 			context({ ledger: LEDGER, verdicts: [COMPLETE] }),
 		);
-		checked.onUserTurn?.({ text: "Make app.py print v2.", origin: "user" });
+		await begin(checked, { text: "Make app.py print v2.", origin: "user" });
 		editApp(checked);
 		expect(await checked.onSettle?.(DONE, signal)).toMatchObject({ summary: "supervisor: complete" });
 		expect(records.filter((r) => r.kind === "exo.verdict").at(-1)?.data).toMatchObject({ source: "llm" });
@@ -413,7 +421,7 @@ describe("supervisor research options (all off by default)", () => {
 	it("warningSignals: shows tampering and unsupported claims to the verdict", async () => {
 		const reading = () => ({ asked_user: false, claims: [{ kind: "tests_pass", quote: "All tests pass." }] });
 		const sup = createSupervisor({ warningSignals: true }, context({ ledger: LEDGER, verdicts: [COMPLETE], reading }));
-		sup.onUserTurn?.({ text: "Make app.py print v2.", origin: "user" });
+		await begin(sup, { text: "Make app.py print v2.", origin: "user" });
 		writeFileSync(join(repo, "app.py"), "print('v2')  # TODO: real output\n");
 		sup.onToolResult?.({ toolName: "edit", input: { path: "app.py" }, isError: false, exitCode: null, output: "ok" });
 		await sup.onSettle?.({ outcome: "completed", lastAssistantText: "Done. All tests pass." }, signal);
@@ -437,7 +445,7 @@ describe("supervisor research options (all off by default)", () => {
 			{ verdictStyle: "per-criterion" },
 			context({ ledger: LEDGER, verdicts: [items("unmet", "")] }),
 		);
-		unmet.onUserTurn?.({ text: "Make app.py print v2 and add a README.", origin: "user" });
+		await begin(unmet, { text: "Make app.py print v2 and add a README.", origin: "user" });
 		editApp(unmet);
 		const action = await unmet.onSettle?.(DONE, signal);
 		expect(action?.kind === "suggest" && action.text).toContain("1. Write README.md");
@@ -447,7 +455,7 @@ describe("supervisor research options (all off by default)", () => {
 			{ verdictStyle: "per-criterion" },
 			context({ ledger: LEDGER, verdicts: [items("met", "README.md | 10 ++++")] }),
 		);
-		invented.onUserTurn?.({ text: "Make app.py print v2 and add a README.", origin: "user" });
+		await begin(invented, { text: "Make app.py print v2 and add a README.", origin: "user" });
 		editApp(invented);
 		expect(await invented.onSettle?.(DONE, signal)).toMatchObject({ summary: "supervisor: uncertain" });
 	});
@@ -486,7 +494,7 @@ describe("supervisor research options (all off by default)", () => {
 
 	it("marks the gap in a very long final message, and keeps both ends (D-089)", async () => {
 		const sup = createSupervisor({}, context({ ledger: LEDGER, verdicts: [COMPLETE] }));
-		sup.onUserTurn?.({ text: "Make app.py print v2.", origin: "user" });
+		await begin(sup, { text: "Make app.py print v2.", origin: "user" });
 		editApp(sup);
 		const long = `## Issues first\n${"filler sentence. ".repeat(2_000)}\nShould I also update the README?`;
 		await sup.onSettle?.({ outcome: "completed", lastAssistantText: long }, signal);
@@ -512,7 +520,7 @@ describe("supervisor research options (all off by default)", () => {
 			{ finalMessage: "claims" },
 			context({ ledger: LEDGER, verdicts: [COMPLETE], reading }),
 		);
-		sup.onUserTurn?.({ text: "Make app.py print v2.", origin: "user" });
+		await begin(sup, { text: "Make app.py print v2.", origin: "user" });
 		editApp(sup);
 		const long = `${"I carefully restructured everything. ".repeat(30)}All tests pass. Let me know.`;
 		await sup.onSettle?.({ outcome: "completed", lastAssistantText: long }, signal);
@@ -532,7 +540,7 @@ describe("supervisor research options (all off by default)", () => {
 			{ finalMessage: "claims" },
 			context({ ledger: LEDGER, verdicts: [COMPLETE], reading: () => ({}) }),
 		);
-		sup.onUserTurn?.({ text: "Make app.py print v2.", origin: "user" });
+		await begin(sup, { text: "Make app.py print v2.", origin: "user" });
 		editApp(sup);
 		await sup.onSettle?.({ outcome: "completed", lastAssistantText: "Done. All tests pass." }, signal);
 		const prompt = String(requests.at(-1)?.messages[0]?.["content"]);
@@ -545,7 +553,7 @@ describe("supervisor research options (all off by default)", () => {
 			{ completeVotes: 3 },
 			context({ ledger: LEDGER, verdicts: [COMPLETE, COMPLETE, INCOMPLETE] }),
 		);
-		split.onUserTurn?.({ text: "Make app.py print v2.", origin: "user" });
+		await begin(split, { text: "Make app.py print v2.", origin: "user" });
 		editApp(split);
 		expect(await split.onSettle?.(DONE, signal)).toMatchObject({ summary: "supervisor: uncertain" });
 		expect(records.filter((r) => r.kind === "exo.verdict").at(-1)?.data).toMatchObject({
@@ -554,7 +562,7 @@ describe("supervisor research options (all off by default)", () => {
 		});
 
 		const agreed = createSupervisor({ completeVotes: 2 }, context({ ledger: LEDGER, verdicts: [COMPLETE] }));
-		agreed.onUserTurn?.({ text: "Make app.py print v2.", origin: "user" });
+		await begin(agreed, { text: "Make app.py print v2.", origin: "user" });
 		editApp(agreed);
 		expect(await agreed.onSettle?.(DONE, signal)).toMatchObject({ summary: "supervisor: complete" });
 	});
@@ -569,11 +577,11 @@ describe("supervisor research options (all off by default)", () => {
 		};
 		// An agent that changed nothing has nothing to verify.
 		const idle = createSupervisor({ verifyUncertain: true }, context({ ledger: LEDGER, verdicts: [UNCERTAIN] }));
-		idle.onUserTurn?.({ text: "Make app.py print v2.", origin: "user" });
+		await begin(idle, { text: "Make app.py print v2.", origin: "user" });
 		expect(await idle.onSettle?.(DONE, signal)).toMatchObject({ kind: "notify" });
 
 		const sup = createSupervisor({ verifyUncertain: true }, context({ ledger: LEDGER, verdicts: [UNCERTAIN] }));
-		sup.onUserTurn?.({ text: "Make app.py print v2.", origin: "user" });
+		await begin(sup, { text: "Make app.py print v2.", origin: "user" });
 		editApp(sup);
 		const action = await sup.onSettle?.(DONE, signal);
 		expect(action).toEqual({
@@ -584,12 +592,12 @@ describe("supervisor research options (all off by default)", () => {
 		expect(records.at(-1)?.data).toEqual({ action: "suggested", unverified: ["Check that 1.005 rounds to 100"] });
 
 		// Accepted, and still uncertain afterwards: it is not asked a second time.
-		sup.onUserTurn?.({ text: (action as { text: string }).text, origin: "suggestion" });
+		await begin(sup, { text: (action as { text: string }).text, origin: "suggestion" });
 		expect(await sup.onSettle?.(DONE, signal)).toMatchObject({ kind: "notify", summary: "supervisor: uncertain" });
 
 		// Off by default.
 		const quiet = createSupervisor({}, context({ ledger: LEDGER, verdicts: [UNCERTAIN] }));
-		quiet.onUserTurn?.({ text: "Make app.py print v2.", origin: "user" });
+		await begin(quiet, { text: "Make app.py print v2.", origin: "user" });
 		editApp(quiet);
 		expect(await quiet.onSettle?.(DONE, signal)).toMatchObject({ kind: "notify" });
 	});

@@ -118,10 +118,12 @@ export function buildChatBody(target: EngineTarget, request: ChatRequest): JsonO
 /**
  * Whether a structured reply is asked of the engine (`response_format`) rather than of the prompt:
  * when the profile has F3, and not for a fork, which carries the agent's tools, which ninfer will
- * not combine with an output constraint (its `docs/serving.md`, D-099).
+ * not combine with an output constraint (its `docs/serving.md`, D-099). Not with thinking on
+ * either: the grammar holds only the answer after the reasoning, and a model that reasoned its way
+ * to findings then answered an empty list under it (D-101). The prompt asks for the JSON instead.
  */
-export function constrains(target: EngineTarget, request: Pick<ChatRequest, "fork">): boolean {
-	return target.features.jsonSchema && request.fork === undefined;
+export function constrains(target: EngineTarget, request: Pick<ChatRequest, "fork" | "thinking">): boolean {
+	return target.features.jsonSchema && request.fork === undefined && !thinks(target, request);
 }
 
 /**
@@ -205,6 +207,25 @@ function forkBase(target: EngineTarget, request: ChatRequest, fork: ForkPrefix):
 	};
 }
 
+/** Whether the agent's request has the model think: Qwen templates think unless told not to. */
+function agentThinksIn(body: JsonObject): boolean {
+	const kwargs = record(body["chat_template_kwargs"]);
+	return (
+		body["reasoning_effort"] !== "none" && body["enable_thinking"] !== false && kwargs["enable_thinking"] !== false
+	);
+}
+
+/**
+ * Whether the reply begins with reasoning (D-101): the call's own `thinking`, or for a fork the
+ * agent's, unless the engine lets the fork change it (F4, {@link thinkingOf}).
+ */
+export function thinks(target: EngineTarget, request: Pick<ChatRequest, "fork" | "thinking">): boolean {
+	if (!request.fork) return request.thinking === true;
+	const agentThinks = agentThinksIn(request.fork.body);
+	if (request.thinking === undefined || !target.features.thinkingToggle) return agentThinks;
+	return request.thinking && request.fork.body["reasoning_effort"] !== "none";
+}
+
 /**
  * The fork's thinking switch, where the engine changes only the new turn with it (F4, D-100): a
  * fork that does not think answers in a fraction of the tokens. The agent's request may say it in
@@ -219,7 +240,7 @@ function forkBase(target: EngineTarget, request: ChatRequest, fork: ForkPrefix):
 function thinkingOf(body: JsonObject, thinking: boolean): JsonObject {
 	const kwargs = record(body["chat_template_kwargs"]) as JsonObject;
 	const effort = body["reasoning_effort"];
-	const agentThinks = effort !== "none" && body["enable_thinking"] !== false && kwargs["enable_thinking"] !== false;
+	const agentThinks = agentThinksIn(body);
 	if (thinking === agentThinks || (thinking && effort === "none")) return {};
 	const said = "enable_thinking" in body || "enable_thinking" in kwargs || typeof effort === "string";
 	const fields: { [key: string]: JsonValue } = {};
