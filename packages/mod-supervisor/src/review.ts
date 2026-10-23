@@ -5,7 +5,7 @@ import { changedSignatures, usesOf } from "./review-context.ts";
 import type { SupervisorSettings } from "./settings.ts";
 import { diffHeaderPath, parseDiff } from "./signals.ts";
 
-const FIND_PROMPT = loadPrompt(new URL("../prompts/review-find.v2.md", import.meta.url));
+const FIND_PROMPT = loadPrompt(new URL("../prompts/review-find.v3.md", import.meta.url));
 const VERIFY_PROMPT = loadPrompt(new URL("../prompts/review-verify.v2.md", import.meta.url));
 
 const SEVERITIES = ["high", "medium", "low"] as const;

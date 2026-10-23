@@ -2475,6 +2475,17 @@ Open check: Exocortex's injected `custom_message` reaches ninfer as a second con
 - **Added:** the eval config `all-on`: every module with its defaults, the supervisor in suggest mode. It measures what Exocortex does overall, against `all-off`.
 - **Not changed, and why:** the review's thinking room. One pass cut off at 36,864 tokens has been seen once. Its prompt was not kept, so it is unclear whether it was a long review or a reasoning loop. The all-on eval's traces will show whether it recurs.
 
+### D-113 — The review no longer presumes a bug · accepted (2026-10-23; all-on eval run; amends D-097's find prompt)
+- **What was wrong.** In the all-on eval every review ran its five passes for 14k–37k tokens of reasoning over a 2k–7k-token prompt. Two of five were cut off at 36,864 tokens with no answer, on each of three tasks. A review cost 170k–250k tokens and 3–5 minutes. Replayed on `h-cpp-build-graph`'s reference fix (1.1 KB, no bug): about 100,000 characters of reasoning per pass. That reasoning was not a loop but dithering. The prompt said the change "is said to work: your job is to find what is wrong with it that its author missed", and the model took it that a bug must exist. It suspected code it was not shown and went back and forth: "final final final decision: empty list … actually, wait".
+- **The rules now** (`review-find.v3`):
+  - The framing says the checks pass and most such changes have no bug, so an empty list is the right answer when nothing can be shown.
+  - A "how to work" paragraph: check each suspicion once against the code shown; code not shown is not evidence either way; answer once each has been checked, without going back over decisions.
+- **Measured** (3 passes each, temperature 0.7, ninfer/coding):
+  - The clean fix took 7,760–10,148 tokens, against about 25k–37k, and none was cut off.
+  - The planted off-by-one from D-101 was found 3 of 3 times at about 1,900 tokens.
+  - Some dithering is left: on the eval's fixtures the model wonders what "a puzzle designer would intend".
+- **Not changed:** five passes and the two-vote rule (D-097); the thinking room (D-101). Fewer passes would save tokens but cost recall, which needs an eval to judge.
+
 ---
 
 ## Open questions (carried from brief §10, updated)
