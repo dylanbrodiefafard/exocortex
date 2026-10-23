@@ -275,8 +275,8 @@ describe("runEval with the real pi CLI and a scripted model", { timeout: 60_000 
 			continuations: 1,
 			verdicts: { complete: 1, incomplete: 1, failed: 0, uncertain: 0 },
 		});
-		// The ledger, a reading and a verdict per settle, and the review's five passes.
-		expect(records[0]?.metrics?.sidecarCalls).toBe(10);
+		// The ledger, a reading and a verdict per settle, and the review's three passes.
+		expect(records[0]?.metrics?.sidecarCalls).toBe(8);
 		expect(m).toBe(3);
 	});
 });

@@ -35,9 +35,11 @@ export const SettingsSchema = Type.Object(
 		review: Type.Boolean({ default: true }),
 		/**
 		 * Independent passes over the changes, each reading the files in another order. A bug fewer than
-		 * two passes report is dropped (Cursor's Bugbot); SWR-Bench found little gain past five.
+		 * two passes report is dropped (Cursor's Bugbot); SWR-Bench found little gain past five. Three
+		 * by default (D-114): each thinking pass costs 15k-45k tokens, and five held four sidecar slots
+		 * for minutes after every task.
 		 */
-		reviewPasses: Type.Integer({ minimum: 1, maximum: 8, default: 5 }),
+		reviewPasses: Type.Integer({ minimum: 1, maximum: 8, default: 3 }),
 		/** Findings followed up at most, most severe first. */
 		reviewMaxFindings: Type.Integer({ minimum: 1, maximum: 10, default: 3 }),
 	},

@@ -2486,6 +2486,14 @@ Open check: Exocortex's injected `custom_message` reaches ninfer as a second con
   - Some dithering is left: on the eval's fixtures the model wonders what "a puzzle designer would intend".
 - **Not changed:** five passes and the two-vote rule (D-097); the thinking room (D-101). Fewer passes would save tokens but cost recall, which needs an eval to judge.
 
+### D-114 — The review runs three passes, not five · accepted (2026-10-23; owner's decision after the all-on eval; amends D-097)
+- **What the eval showed** (`eval-runs/2026-10-23T13-01-53-929Z`, 14 hard tasks, one run each):
+  - All-on passed 12/14 against all-off's 10/14. It cost 137k sidecar tokens per run, against 340k main-model tokens all-off, and most of the sidecar tokens were the review.
+  - A five-pass review took 90k–230k tokens and 1.5–4 minutes. It held all four sidecar slots for that time after every task. It found no bug that held up, and it raised no false alarm.
+  - Each thinking pass costs 15k–45k tokens even after D-113.
+- **The rule now:** `reviewPasses` defaults to 3. The two-vote rule stays, so a bug must be reported by 2 of 3 passes instead of 2 of 5. That should save about 40% of a review's tokens and time, and leave a slot free while it runs.
+- **Not measured:** recall at three passes. The owner needs the engine, so no replay was run. D-101's planted off-by-one was found by 5/5 passes under `review-find.v2` and 3/3 under `v3` (D-113), so two of three agreeing is expected for a plain bug. A bug that only one pass in three sees is now dropped more often than it was at five. `"reviewPasses": 5` restores the old behaviour.
+
 ---
 
 ## Open questions (carried from brief §10, updated)

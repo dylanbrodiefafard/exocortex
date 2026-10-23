@@ -74,12 +74,12 @@ When it can't do its job, it says so: the engine didn't answer, git failed, or t
 The check runs in the background, so you have the session back as soon as the agent stops. The status line shows it working (`exo: checking the work…`), with no time limit: your test suite takes as long as it takes. Escape or a new message stops it.
 
 **Review.** Once the supervisor finds the task complete, or can't tell, and the task changed files, it also reviews the changes for bugs, the way Cursor's Bugbot and Claude Code's code review do (`"review": false` turns it off):
-- Five independent passes read the change, each with the files in a different order. Each changed function is shown whole, along with the other places that use a function whose signature changed.
+- Three independent passes read the change, each with the files in a different order (`reviewPasses`). Each changed function is shown whole, along with the other places that use a function whose signature changed.
 - A finding counts only if it quotes a line the change added, or a line of a caller the change left behind, and at least two passes report it.
 - A separate call then tries to disprove each one. Only findings it can't disprove are kept, at most 3, most severe first.
 - What survives goes in your editor, with room for the agent to say a finding is not a bug.
 
-The review's model calls think before they answer; without thinking, Qwen 3.8 missed a plain off-by-one in every pass. A review of a small change takes about a minute. It runs right after the verdict, in the same background job, with no time limit. Escape or sending a new message stops it, since the code it read is about to change.
+The review's model calls think before they answer; without thinking, Qwen 3.8 missed a plain off-by-one in every pass. A review of a small change takes one to two minutes. It runs right after the verdict, in the same background job, with no time limit. Escape or sending a new message stops it, since the code it read is about to change.
 
 If the review finishes while you're typing, your draft is left alone. A line above the editor says what was found, and `alt+r` (or `/exo add`) adds the findings below your message. If you send without them, they're dropped. The same applies to any follow-up that arrives while you're typing.
 
